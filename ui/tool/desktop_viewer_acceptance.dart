@@ -79,6 +79,12 @@ Future<void> main() async {
       .where((r) => r.wire == resolutionName)
       .firstOrNull;
   const maxFps = int.fromEnvironment('maxFps');
+  // How much the macOS layer presenter sharpens an enlarged picture.
+  final enhance =
+      PictureEnhancement.values.asNameMap()[const String.fromEnvironment(
+        'enhance',
+        defaultValue: 'off',
+      )];
   if (setup.scheme != 'http' ||
       !['127.0.0.1', 'localhost', '::1'].contains(setup.host) ||
       defaultSeconds < 15 ||
@@ -86,11 +92,13 @@ Future<void> main() async {
       quality == null ||
       codec == null ||
       resolution == null ||
+      enhance == null ||
       (maxFps != 0 && !kMaxFpsChoices.contains(maxFps))) {
     throw ArgumentError(
       'Set a loopback setupUrl, seconds 15..1800, quality '
       'quality|balanced|smooth, codec auto|h264, resolution '
-      '720p|1080p|1440p|native and maxFps 0|30|60|90|120',
+      '720p|1080p|1440p|native, enhance off|low|medium|high and maxFps '
+      '0|30|60|90|120',
     );
   }
   final config = await _fetchSetup(setup);
@@ -139,6 +147,7 @@ Future<void> main() async {
     // The Display menu shows the codec this run offers.
     final prefs = ViewerPrefs(persist: false);
     await prefs.setCodec(codec);
+    await prefs.setEnhance(enhance);
     runApp(
       MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -205,6 +214,9 @@ Future<void> main() async {
       // whether the Linux runner gave it, which it may refuse.
       'presenter': desktopVideoPresenter,
       'plane': texture?.plane ?? false,
+      // Asked of a layer presenter; each sample's `native.enhanced` says
+      // whether its metal layer showed the picture, at what size.
+      'enhance': enhance.name,
       'transport': config['transport'],
       'seconds': seconds,
       'warmup_seconds': _warmup.inSeconds,

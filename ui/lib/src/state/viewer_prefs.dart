@@ -66,7 +66,8 @@ class KeyboardSettings {
 /// The picture's quality, resolution and maximum frame rate are not here:
 /// they belong to each remembered computer. The codec is: whether a picture
 /// can be H.265 is this device's affair, as are the decoder install hints
-/// dismissed here. So is the keyboard, which is chosen
+/// dismissed here and how much an enlarged picture is sharpened on its GPU.
+/// So is the keyboard, which is chosen
 /// per computer but kept here, by the computer's id: it is how this device's
 /// keys and input method reach that computer.
 class ViewerPrefs extends ChangeNotifier {
@@ -79,6 +80,7 @@ class ViewerPrefs extends ChangeNotifier {
   static const _qualityPanelKey = 'viewer_quality_panel';
   static const _qualityMonitorKey = 'viewer_quality_monitor';
   static const _codecKey = 'viewer_codec';
+  static const _enhanceKey = 'viewer_enhance';
   static const _scaleModeKey = 'viewer_scale_mode';
   static const _touchModeKey = 'viewer_touch_mode';
   static const _virtualMouseKey = 'viewer_virtual_mouse';
@@ -107,6 +109,12 @@ class ViewerPrefs extends ChangeNotifier {
   /// What a session offers to decode (D6); it takes it at connect.
   DesktopCodecPreference get codec => _codec;
   DesktopCodecPreference _codec = DesktopCodecPreference.auto;
+
+  /// How much a picture shown enlarged is sharpened, where the runner can
+  /// ([DesktopPicture.enhances]): this device's choice, at once, for every
+  /// computer. Off until chosen.
+  PictureEnhancement get enhance => _enhance;
+  PictureEnhancement _enhance = PictureEnhancement.off;
 
   ViewerScaleMode get scaleMode => _scaleMode;
   ViewerScaleMode _scaleMode = ViewerScaleMode.fit;
@@ -153,6 +161,11 @@ class ViewerPrefs extends ChangeNotifier {
         DesktopCodecPreference.values,
         prefs.getString(_codecKey),
         DesktopCodecPreference.auto,
+      );
+      _enhance = _named(
+        PictureEnhancement.values,
+        prefs.getString(_enhanceKey),
+        PictureEnhancement.off,
       );
       _scaleMode = _named(
         ViewerScaleMode.values,
@@ -231,6 +244,12 @@ class ViewerPrefs extends ChangeNotifier {
     if (v == _codec) return;
     _codec = v;
     await _changed((prefs) => prefs.setString(_codecKey, v.name));
+  }
+
+  Future<void> setEnhance(PictureEnhancement v) async {
+    if (v == _enhance) return;
+    _enhance = v;
+    await _changed((prefs) => prefs.setString(_enhanceKey, v.name));
   }
 
   Future<void> setScaleMode(ViewerScaleMode v) async {

@@ -139,10 +139,10 @@ final class ViewerActions {
   final VoidCallback? onPasteNewInvite;
 }
 
-/// Scaling (local only, P1-4: the stage applies it to the viewport), the
-/// picture preference (live, D12), what only a new session takes —
-/// resolution, maximum frame rate and codec — and the quality panel and
-/// monitor.
+/// Scaling (local only, P1-4: the stage applies it to the viewport) and,
+/// where the runner can, the sharpening of an enlarged picture, the picture
+/// preference (live, D12), what only a new session takes — resolution,
+/// maximum frame rate and codec — and the quality panel and monitor.
 List<ViewerMenuEntry> displayMenu(AppLocalizations l10n, ViewerActions a) => [
   ViewerMenuSection(l10n.viewerScaleLabel),
   for (final (mode, key, label) in [
@@ -155,6 +155,7 @@ List<ViewerMenuEntry> displayMenu(AppLocalizations l10n, ViewerActions a) => [
       checked: a.prefs.scaleMode == mode,
       onSelected: () => a.prefs.setScaleMode(mode),
     ),
+  ..._sharpening(l10n, a),
   const ViewerMenuDivider(),
   ViewerMenuSection(l10n.viewerQualityLabel),
   ..._qualityItems(l10n, a),
@@ -163,6 +164,37 @@ List<ViewerMenuEntry> displayMenu(AppLocalizations l10n, ViewerActions a) => [
   const ViewerMenuDivider(),
   ..._figures(l10n, a, touch: false),
 ];
+
+/// How much an enlarged picture is sharpened, this device's choice: offered
+/// only while the runner presents the picture itself and can
+/// ([DesktopPicture.enhances]). Live, never a reconnect.
+List<ViewerMenuEntry> _sharpening(AppLocalizations l10n, ViewerActions a) {
+  if (a.desktop.picture.value?.enhances != true) return const [];
+  final current = a.prefs.enhance;
+  String label(PictureEnhancement level) => switch (level) {
+    PictureEnhancement.off => l10n.viewerSharpenOff,
+    PictureEnhancement.low => l10n.viewerSharpenLow,
+    PictureEnhancement.medium => l10n.viewerSharpenMedium,
+    PictureEnhancement.high => l10n.viewerSharpenHigh,
+  };
+  return [
+    ViewerMenuSubmenu(
+      key: const Key('display-sharpen'),
+      label: l10n.viewerSharpenLabel,
+      value: label(current),
+      note: l10n.viewerSharpenNote,
+      entries: [
+        for (final level in PictureEnhancement.values)
+          ViewerMenuItem(
+            key: Key('sharpen-${level.name}'),
+            label: label(level),
+            checked: current == level,
+            onSelected: () => a.prefs.setEnhance(level),
+          ),
+      ],
+    ),
+  ];
+}
 
 /// The remote display's real mode, as RustDesk's Resolution menu offers it
 /// (R8, R18): on a desktop runner only, while this viewer controls a host

@@ -60,8 +60,8 @@ class VideoPlacement {
 /// pictures reach the screen: a Flutter texture, or, where the runner
 /// presents them itself, a platform view or a plane under the Flutter view.
 /// The decoder pulls video from Rust itself and receipts presentations
-/// there; Dart only binds it to a source, places, snapshots and greys it,
-/// and disposes it.
+/// there; Dart only binds it to a source, places, snapshots, greys and
+/// enhances it, and disposes it.
 abstract interface class DesktopVideoTexture {
   /// The texture's id, which a presenting runner gives its platform view in
   /// the `textureId` creation parameter.
@@ -87,6 +87,15 @@ abstract interface class DesktopVideoTexture {
   /// reaches (the viewer's grey still while it reconnects); nothing for a
   /// texture.
   Future<void> grey(bool on);
+
+  /// Whether the runner can sharpen the picture while it shows it enlarged
+  /// ([enhance]): the macOS layer presenter.
+  bool get enhances;
+
+  /// How much the runner sharpens the picture while it shows it at least
+  /// its own size; nothing where it cannot ([enhances]). Every texture
+  /// starts at [PictureEnhancement.off].
+  Future<void> enhance(PictureEnhancement level);
 
   /// Writes the last presented picture as a JPEG at most [maxWidth] wide
   /// (D23). False when there is none. The caller bounds the wait.
@@ -272,6 +281,19 @@ Future<DesktopVideoTexture> createDesktopVideoTexture({
 
 const _videoChannel = MethodChannel('pb_mapper/desktop_video');
 
+/// The channel's texture [textureId] as `create` makes it for a presenter:
+/// a platform view's ([platformViewType]), a [plane], or Flutter's.
+@visibleForTesting
+DesktopVideoTexture channelVideoTexture(
+  int textureId, {
+  String? platformViewType,
+  bool plane = false,
+}) => _ChannelVideoTexture(
+  textureId,
+  platformViewType: platformViewType,
+  plane: plane,
+);
+
 class _ChannelVideoTexture implements DesktopVideoTexture {
   _ChannelVideoTexture(
     this.textureId, {
@@ -309,6 +331,19 @@ class _ChannelVideoTexture implements DesktopVideoTexture {
     await _channel.invokeMethod<void>('grey', {
       'textureId': textureId,
       'on': on,
+    });
+  }
+
+  /// The macOS layer presenter's enhancement (DesktopVideo.swift).
+  @override
+  bool get enhances => platformViewType != null;
+
+  @override
+  Future<void> enhance(PictureEnhancement level) async {
+    if (_disposed || !enhances) return;
+    await _channel.invokeMethod<void>('enhance', {
+      'textureId': textureId,
+      'level': level.name,
     });
   }
 
