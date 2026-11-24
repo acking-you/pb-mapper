@@ -8,6 +8,9 @@ pub(crate) mod pipeline;
 // Sending a dropped picture again: the macOS encoder's, tested everywhere.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod resubmit;
+// The capture thread a push source's pictures come from: the Windows host's,
+// tested everywhere.
+pub(crate) mod present_waiter;
 pub(crate) mod sps;
 // Which rate model a pace sweep fits: measurement support, which the macOS
 // encoder's measurement uses and video_bench includes by path; tested
