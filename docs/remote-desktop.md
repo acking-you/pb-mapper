@@ -1650,6 +1650,38 @@ queue and is never clamped. The clamp bounds the queue between probes; frame
 rate and bitrate decisions stay with the probe. JPEG sessions use a fixed
 window of four pictures and 2 MiB.
 
+A viewer and a host that both list `arrival_time` time the receipts one way.
+The viewer stamps each receipt with when its reader finished reading the
+newest unit it covers, payload included, and each probe echo with when it read
+the probe, in microseconds on its own session clock. The host pairs a stamp
+with when it booked the unit or wrote the probe (the way toward the viewer)
+and with when the receipt came back (the way back: the viewer's writer and its
+uplink). The two clocks share no epoch, so each one-way delay carries a
+constant offset, and only its rise above its least over the last 60 s (kept
+one per 250 ms, in at most 256 entries reserved once) is read: that rise is a
+queue. Receipts and probes share the forward least; only receipts keep the
+reverse one. With arrival times the ack queue is the median of the receipts'
+forward queues, with no base RTT taken off: the unit's own transfer is in it,
+as it always was in the receipt delay, so the 100 ms limit means what it did,
+and nothing on the way back is. `t` grows by the least of the newest three
+reverse queues, at most 1 s:
+
+```text
+t = base RTT + 100 ms + min(newest three reverse queues, 1 s)
+```
+
+A busy uplink at the viewer holds its receipts back without queueing a byte
+toward it; the longer `t` lets the window cover that wait instead of starving
+admission, and one late receipt never widens it. In the slow-link suite, 300 ms
+queued on the viewer's uplink alone left the pace at 60 FPS and the window
+unclamped at 27 frames, where both probes and receipts had taken it to 4 FPS
+and a 32 KiB window
+([measurements](benchmarks/2026-11-24-arrival-time/README.md)). A stamp is an observation,
+never authority: one that goes backwards for its kind, or a delay more than
+3 s above its least, is ignored, and only a malformed message breaks the
+protocol. The least resets on a path change and on a resume. The frame and
+byte maximums, the IDR's headroom and JPEG's window stay as above.
+
 Receipts reach only the credit ledger and the QoS controller. They never reach
 the input ledger, the backend or the control lease, and no authorisation method
 takes a sequence number. In the QoS controller they also feed a receipt-rate
@@ -1668,6 +1700,20 @@ the RTT but never the frame rate. A 3 s window with only tainted samples may
 step bits per frame down on their worst delay, never up. The queue delay is
 the median of the last three untainted RTTs (of two, the lower) minus the base
 RTT, so one probe that a Wi-Fi stall held moves it not at all.
+
+With arrival times (see [Send credit](#send-credit)) the delay is one-way:
+each untainted probe's sample is its queue toward the viewer, the median of
+the last three is the delay, a tainted probe's queue is what a window with no
+other sample steps on, and the receipts' witness below is their forward ack
+queue. A round trip counts as at least 10 ms, which on a shorter path hides
+the first (10 ms − its least round trip) of any queue; the one-way samples and
+the forward ack queue hide as much, so a queue toward the viewer moves the
+controller exactly as the round trip's did. A queue on the viewer's uplink (a cloud backup, a photo sync or a video
+call on the viewer's side, or a cellular uplink's scheduling) then lengthens
+the round trip without moving the frame rate or bits per frame, while a queue
+toward the viewer cuts as before. The round trip still sets the base RTT that
+sizes the window, the short path and Balanced's fast start. An echo whose
+stamp is no sample counts toward the base RTT and moves nothing else.
 
 Frame rate follows RustDesk's delay steps on that delay, scaled by
 `max(1, ceiling / 30)`. Below 50 ms it climbs, with a quick step after three
@@ -1916,6 +1962,22 @@ ask for one. Five decoder errors in 30 s with nothing presented end the
 session with `decoder_failed`. No request is sent while paused or while the
 host reports capture unavailable.
 
+Toward a host that listed `keyframe_seq`, a request made while predicted
+frames are thrown away until the next IDR also names the last seq the reader
+had read (`after_seq`): the sink's own after a gap or an overflow, and every
+decoder's after a gap, a failure or a stall, which the native decoders drop
+predicted frames after until their next keyframe. A backlog episode keeps
+decoding its queue and a user's request drops nothing, so neither names one.
+The host asks its encoder for the IDR as before. Unless it has admitted an IDR
+after that seq, which is then on its way to the viewer, B-send also drops this
+session's predicted units before they get a seq, as it drops a stale
+generation's, until it admits the next IDR or for 2 s, and counts them in
+`dropped_frames`: the link stops carrying frames the viewer would discard, and
+the IDR reaches it sooner. Receipts outrank keyframe requests in the viewer's
+writer, which is why the request names the seq. Other viewers of a room and
+the host's own resyncs are untouched, and a seq beyond the last one sent is a
+protocol error.
+
 `pause` revokes control, tells the host to stop capturing and clears the sink;
 probes are still echoed and pings sent, so the host sees a live, paused viewer.
 `resume` restarts at an IDR with the startup pace. A presentation is accepted
@@ -2125,7 +2187,7 @@ numbers the UI, the acceptance tool and these docs use:
 | --- | --- |
 | `rtt_ms` | The last probe round trip, transport only |
 | `link` | On a direct path, the viewer tunnel's link, sampled once a second: `kind` (`lan`, `internet`, `private`), `family`, `via`, `peer`, `local_ip`, QUIC's own `rtt_ms` and `min_rtt_ms` (the network alone, rounded up), `setup_ms` and `same_lan`; null on the relay |
-| `queue_delay_ms` | The median of the last three untainted probe RTTs minus the base RTT |
+| `queue_delay_ms` | The median of the last three untainted probe RTTs minus the base RTT; with arrival times, of their queues toward the viewer |
 | `picture_latency_ms` | Median over 2 s of host time (encoder submit to socket write) + `rtt_ms / 2` + viewer time (network receipt to compositor consumption). Each side uses its own clock and the network leg is an estimate; only a camera measures glass to glass. |
 | `presented_fps` | Accepted presentations per second |
 | `received_fps` | Non-duplicate video records per second |
@@ -2136,12 +2198,15 @@ numbers the UI, the acceptance tool and these docs use:
 | `speed_rx_bps`, `speed_tx_bps` | Speed, as RustDesk counts it: bytes per second the session's tunnel carried each way over the last second, TLS and every message included. A session over a test stream has no tunnel, and reports the video payload it received and nothing sent |
 | `codec`, `width`, `height` | The codec the host answered (`h265`, `h264` or `jpeg`) and the encoded size |
 | `ack_queue_ms` | The host's receipt-based queue delay (the ack queue under send credit) |
+| `forward_queue_ms`, `reverse_queue_ms` | With arrival times: the receipts' queue toward this viewer (the ack queue), and the median of the newest three receipts' queues on their way back, where a busy upload at the viewer queues; null from a host that reads no arrival times |
 | `present_interval` | p50/p95/p99/max of the intervals between accepted presentations over the last 60 s, with the gaps over 100 and 250 ms |
 | `degraded` | For 3 s: queue delay ≥ 150 ms, picture latency ≥ 250 ms, or (at a pace of 10 or more) fewer than half the pace presented |
 
 The host writes `encoder_dwell_ms` in its `Stats` only to a viewer that listed
-the `encoder_dwell` capability in `Authenticate`: a strict viewer of an older
-build rejects a field it does not know. A viewer reads its absence as null.
+the `encoder_dwell` capability in `Authenticate`, and `forward_queue_ms` and
+`reverse_queue_ms` only to one that listed `arrival_time`: a strict viewer of
+an older build rejects a field it does not know. A viewer reads its absence as
+null.
 
 Where the frame rate goes is then one comparison at a time: a capture rate
 below the pace is the host's source or its gate (`skipped_per_s`,
@@ -2174,7 +2239,8 @@ The host traces each second as `desktop_feedback_interval` on
 `pb_mapper_desktop::feedback` (debug): `action`, `fps`, `pace_fps`,
 `viewer_cap`, `paused`, `unresponsive`, `bpf`, `bitrate`, `encoder_bitrate`,
 `sent_bitrate`, `rate_model`, `rtt_ms`, `baseline_ms`, `delay_ms`, `tainted`,
-`ack_queue_ms`, `standing_ms`, `busy_bps`, `used_bps`, `would_cut`,
+`ack_queue_ms`, `forward_queue_ms` and `reverse_queue_ms` (with arrival
+times), `standing_ms`, `busy_bps`, `used_bps`, `would_cut`,
 `window_frames`, `window_bytes`, `window_clamped`,
 `outstanding_frames`, `outstanding_bytes`, `idr_inflight`, `skipped_ticks`,
 `encoder_dwell_ms`, `keyframes`, `gop`, `input_wait_p50_us`,
@@ -2187,7 +2253,12 @@ receipt-rate estimator, which only records what a receipt-driven rate control
 would see; nothing acts on them. It keeps the receipts of H.264 and H.265
 video from the second up to the newest one, at most 240, each with the delay of the newest
 unit it covered and the bytes it covered, and forgets them on a path change
-and on a resume. A frame interval is one at the current pace.
+and on a resume. A frame interval is one at the current pace. With arrival
+times it times each receipt by the viewer's stamp instead of its arrival at
+the host, and a receipt's delay above the base RTT is its forward queue, so
+neither the way back nor what bunches receipts on it is in any figure below;
+a receipt whose stamp was no sample is left out. A receipt-driven rate
+control reads these values rather than timing anything of its own.
 
 | Field | Definition |
 | --- | --- |
@@ -2250,8 +2321,11 @@ left out; while the connection is down the core rows show dashes.
 - **Network**: the path (LAN direct or direct, with the address family, from
   `link.kind` and `link.family`; or the relay and its carrier), the QUIC
   link's own round trip (`link.rtt_ms`, with its lowest) beside the stream's
-  in-band one (`rtt_ms`, with its queueing), Speed each way, and the bitrate
-  received and, from the host, sent.
+  in-band one (`rtt_ms`, with its queueing), from a host that reads this
+  device's arrival times the queue to this device with any on the way back
+  (`forward_queue_ms`, `reverse_queue_ms`: an upload here queues on the way
+  back without slowing the picture), Speed each way, and the bitrate received
+  and, from the host, sent.
 - **Picture**: the picture delay with its host and viewer ends, the rate
   presented, received and captured by the host, the encoded resolution, the
   codec (H.265, H.264 or JPEG) with its chroma, and keyframes with those the

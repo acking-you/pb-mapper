@@ -1,0 +1,519 @@
+Traced bandwidth-limit runs, alternating two builds of whole-unit stamps without the floor gap:
+one-way (the viewer lists arrival_time) and round trip (it lists neither new capability).
+t_ms counts from the limit. Columns as the host's desktop_feedback_interval.
+
+## oneway run 1
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=115367
+bandwidth_limit t_ms=3 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=115235
+bandwidth_limit t_ms=1005 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(215) delay=Some(212) ack=221 fq=Some(221) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2006 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(99) delay=Some(129) ack=140 fq=Some(140) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3008 pace=30 fps=30 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(174) delay=Some(171) ack=220 fq=Some(220) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=4011 pace=16 fps=16 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(160) delay=Some(157) ack=202 fq=Some(202) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5012 pace=11 fps=11 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(177) delay=Some(173) ack=201 fq=Some(201) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=6014 pace=10 fps=10 bpf=64500 enc=3870018 clamped=false act=Steady rtt=Some(10) delay=Some(104) ack=69 fq=Some(69) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=7016 pace=32 fps=32 bpf=61275 enc=3676517 clamped=true act=Steady rtt=Some(253) delay=Some(125) ack=250 fq=Some(250) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=8018 pace=10 fps=10 bpf=61275 enc=3676517 clamped=false act=Steady rtt=Some(22) delay=Some(117) ack=36 fq=Some(36) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=9020 pace=52 fps=52 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=6 bytes=88585
+bandwidth_limit t_ms=10023 pace=60 fps=60 bpf=55147 enc=3308865 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=91989
+recovered_after_ms=Some(2021)
+
+## rtt run 1
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=1000 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(210) delay=Some(200) ack=213 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=2000 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(81) delay=Some(145) ack=135 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=3000 pace=34 fps=34 bpf=71667 enc=4300020 clamped=true act=Raising rtt=Some(177) delay=Some(46) ack=212 fq=None rq=None frames=4 bytes=32768
+bandwidth_limit t_ms=4000 pace=19 fps=19 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(137) delay=Some(149) ack=195 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=5000 pace=17 fps=17 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(157) delay=Some(170) ack=196 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=6001 pace=14 fps=14 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(170) delay=Some(160) ack=193 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=7001 pace=12 fps=12 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(207) delay=Some(182) ack=182 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=8001 pace=32 fps=32 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(115) delay=Some(29) ack=92 fq=None rq=None frames=4 bytes=65536
+bandwidth_limit t_ms=9001 pace=60 fps=60 bpf=61275 enc=3676517 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=101104
+recovered_after_ms=Some(1000)
+
+## oneway run 2
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=115432
+bandwidth_limit t_ms=998 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(212) delay=Some(209) ack=220 fq=Some(220) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=1999 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(99) delay=Some(124) ack=139 fq=Some(139) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2999 pace=18 fps=18 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(174) delay=Some(75) ack=156 fq=Some(156) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3999 pace=11 fps=11 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(162) delay=Some(159) ack=202 fq=Some(202) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=4999 pace=21 fps=21 bpf=64500 enc=3870018 clamped=false act=Raising rtt=Some(20) delay=Some(19) ack=70 fq=Some(70) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=6000 pace=10 fps=10 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(226) delay=Some(206) ack=267 fq=Some(267) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7000 pace=30 fps=30 bpf=58050 enc=3483016 clamped=false act=Raising rtt=Some(107) delay=Some(45) ack=88 fq=Some(88) rq=Some(2) frames=4 bytes=65536
+bandwidth_limit t_ms=8000 pace=8 fps=8 bpf=58050 enc=3483016 clamped=true act=LoweringFps rtt=Some(198) delay=Some(207) ack=177 fq=Some(177) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=9000 pace=42 fps=42 bpf=58050 enc=3483016 clamped=false act=Raising rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=5 bytes=67859
+bandwidth_limit t_ms=10001 pace=60 fps=60 bpf=52245 enc=3134714 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=87143
+bandwidth_limit t_ms=11001 pace=60 fps=60 bpf=52245 enc=3134714 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=87250
+bandwidth_limit t_ms=12001 pace=60 fps=60 bpf=52245 enc=3134714 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=87246
+bandwidth_limit t_ms=13001 pace=60 fps=60 bpf=54745 enc=3284714 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=90389
+recovered_after_ms=Some(5001)
+
+## rtt run 2
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=5 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=1006 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(222) delay=Some(212) ack=212 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=2008 pace=12 fps=12 bpf=71667 enc=4300020 clamped=true act=Raising rtt=Some(10) delay=Some(98) ack=115 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=3010 pace=33 fps=33 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(166) delay=Some(156) ack=212 fq=None rq=None frames=4 bytes=32768
+bandwidth_limit t_ms=4013 pace=22 fps=22 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(158) delay=Some(148) ack=193 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=5015 pace=17 fps=17 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(171) delay=Some(161) ack=195 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=6018 pace=14 fps=14 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(191) delay=Some(161) ack=193 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=7020 pace=13 fps=13 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(173) delay=Some(163) ack=180 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=8024 pace=22 fps=22 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(46) ack=75 fq=None rq=None frames=3 bytes=65536
+bandwidth_limit t_ms=9026 pace=60 fps=60 bpf=61275 enc=3676517 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=101104
+recovered_after_ms=Some(1025)
+
+## oneway run 3
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=115367
+bandwidth_limit t_ms=3 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=115555
+bandwidth_limit t_ms=1005 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(208) delay=Some(205) ack=218 fq=Some(218) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2006 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(81) delay=Some(152) ack=146 fq=Some(146) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3008 pace=36 fps=36 bpf=71667 enc=4300020 clamped=true act=Raising rtt=Some(214) delay=Some(41) ack=216 fq=Some(216) rq=Some(2) frames=5 bytes=32768
+bandwidth_limit t_ms=4010 pace=23 fps=23 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(123) delay=Some(149) ack=201 fq=Some(201) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5012 pace=23 fps=23 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(140) delay=Some(163) ack=202 fq=Some(202) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=6016 pace=18 fps=18 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(151) delay=Some(175) ack=201 fq=Some(201) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7017 pace=13 fps=13 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(194) delay=Some(187) ack=186 fq=Some(186) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8020 pace=12 fps=12 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(32) delay=Some(74) ack=36 fq=Some(36) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=9023 pace=54 fps=54 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=92024
+recovered_after_ms=Some(1022)
+
+## rtt run 3
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=5 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=1007 pace=46 fps=46 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(209) delay=Some(199) ack=212 fq=None rq=None frames=6 bytes=32768
+bandwidth_limit t_ms=2010 pace=19 fps=19 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(163) delay=Some(184) ack=212 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=3014 pace=12 fps=12 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(196) delay=Some(174) ack=213 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=4014 pace=10 fps=10 bpf=68083 enc=4085018 clamped=true act=Steady rtt=Some(101) delay=Some(131) ack=126 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=5015 pace=34 fps=34 bpf=68083 enc=4085018 clamped=true act=Steady rtt=Some(141) delay=Some(131) ack=200 fq=None rq=None frames=4 bytes=32768
+bandwidth_limit t_ms=6018 pace=24 fps=24 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(188) delay=Some(178) ack=200 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=7022 pace=19 fps=19 bpf=64679 enc=3880768 clamped=true act=LoweringFps rtt=Some(152) delay=Some(165) ack=194 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=8025 pace=14 fps=14 bpf=64679 enc=3880768 clamped=true act=LoweringFps rtt=Some(171) delay=Some(161) ack=195 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=9028 pace=46 fps=46 bpf=64679 enc=3880768 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=6 bytes=81819
+bandwidth_limit t_ms=10030 pace=60 fps=60 bpf=61445 enc=3686729 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=101385
+recovered_after_ms=Some(2028)
+
+## oneway run 4
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=115544
+bandwidth_limit t_ms=998 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(221) delay=Some(218) ack=219 fq=Some(219) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=1999 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(108) delay=Some(134) ack=127 fq=Some(127) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2999 pace=27 fps=27 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(225) delay=Some(178) ack=220 fq=Some(220) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=3999 pace=14 fps=14 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(136) delay=Some(161) ack=200 fq=Some(200) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=4999 pace=14 fps=14 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(152) delay=Some(149) ack=200 fq=Some(200) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5999 pace=11 fps=11 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(172) delay=Some(169) ack=203 fq=Some(203) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7000 pace=17 fps=17 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(14) delay=Some(60) ack=42 fq=Some(42) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=8000 pace=19 fps=19 bpf=61275 enc=3676517 clamped=true act=Steady rtt=Some(150) delay=Some(84) ack=159 fq=Some(159) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=9000 pace=53 fps=53 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=6 bytes=90408
+recovered_after_ms=Some(1000)
+
+## rtt run 4
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=3 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=1006 pace=46 fps=46 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(207) delay=Some(197) ack=212 fq=None rq=None frames=6 bytes=32768
+bandwidth_limit t_ms=2008 pace=19 fps=19 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(164) delay=Some(186) ack=213 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=3011 pace=11 fps=11 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(200) delay=Some(176) ack=212 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=4014 pace=12 fps=12 bpf=68083 enc=4085018 clamped=false act=Raising rtt=Some(56) delay=Some(83) ack=62 fq=None rq=None frames=3 bytes=65536
+bandwidth_limit t_ms=5016 pace=30 fps=30 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(210) delay=Some(171) ack=200 fq=None rq=None frames=4 bytes=32768
+bandwidth_limit t_ms=6019 pace=18 fps=18 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(187) delay=Some(177) ack=199 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=7022 pace=15 fps=15 bpf=64679 enc=3880768 clamped=true act=LoweringFps rtt=Some(141) delay=Some(163) ack=192 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=8023 pace=13 fps=13 bpf=64679 enc=3880768 clamped=true act=LoweringFps rtt=Some(149) delay=Some(169) ack=195 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=9026 pace=45 fps=45 bpf=64679 enc=3880768 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=5 bytes=80040
+bandwidth_limit t_ms=10028 pace=60 fps=60 bpf=61445 enc=3686729 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=101385
+recovered_after_ms=Some(2028)
+
+## oneway run 5
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(0) frames=7 bytes=114376
+bandwidth_limit t_ms=6 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=115461
+bandwidth_limit t_ms=1006 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(213) delay=Some(210) ack=218 fq=Some(218) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2007 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(96) delay=Some(124) ack=136 fq=Some(136) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3008 pace=18 fps=18 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(173) delay=Some(75) ack=154 fq=Some(154) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=4010 pace=10 fps=10 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(153) delay=Some(175) ack=202 fq=Some(202) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5010 pace=12 fps=12 bpf=64500 enc=3870018 clamped=false act=Raising rtt=Some(59) delay=Some(56) ack=67 fq=Some(67) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=6011 pace=18 fps=18 bpf=64500 enc=3870018 clamped=false act=Raising rtt=Some(74) delay=Some(53) ack=89 fq=Some(89) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=7014 pace=16 fps=16 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(167) delay=Some(162) ack=188 fq=Some(188) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8017 pace=12 fps=12 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(173) delay=Some(170) ack=188 fq=Some(188) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=9019 pace=43 fps=43 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=5 bytes=73298
+bandwidth_limit t_ms=10020 pace=60 fps=60 bpf=58211 enc=3492691 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=97190
+recovered_after_ms=Some(2018)
+
+## rtt run 5
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=2 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=1005 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(211) delay=Some(201) ack=212 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=2007 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(93) delay=Some(112) ack=124 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=3010 pace=18 fps=18 bpf=71667 enc=4300020 clamped=true act=Raising rtt=Some(146) delay=Some(89) ack=163 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=4012 pace=18 fps=18 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(186) delay=Some(157) ack=195 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=5014 pace=16 fps=16 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(201) delay=Some(171) ack=191 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=6016 pace=12 fps=12 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(141) delay=Some(163) ack=193 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=7018 pace=14 fps=14 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(47) delay=Some(99) ack=38 fq=None rq=None frames=3 bytes=65536
+bandwidth_limit t_ms=8018 pace=22 fps=22 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(203) delay=Some(192) ack=242 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=9020 pace=50 fps=50 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=6 bytes=84253
+bandwidth_limit t_ms=10020 pace=60 fps=60 bpf=58211 enc=3492691 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=96049
+recovered_after_ms=Some(2020)
+
+## oneway run 6
+bandwidth_limit t_ms=2 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=115500
+bandwidth_limit t_ms=1003 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(209) delay=Some(206) ack=221 fq=Some(221) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2006 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(92) delay=Some(121) ack=132 fq=Some(132) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3008 pace=18 fps=18 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(169) delay=Some(74) ack=156 fq=Some(156) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=4009 pace=11 fps=11 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(147) delay=Some(173) ack=202 fq=Some(202) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5010 pace=14 fps=14 bpf=64500 enc=3870018 clamped=false act=Raising rtt=Some(70) delay=Some(70) ack=70 fq=Some(70) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=6013 pace=20 fps=20 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(171) delay=Some(80) ack=195 fq=Some(195) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7014 pace=10 fps=10 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(212) delay=Some(206) ack=187 fq=Some(187) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8014 pace=20 fps=20 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(40) delay=Some(37) ack=36 fq=Some(36) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=9017 pace=60 fps=60 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=102269
+recovered_after_ms=Some(1016)
+
+## rtt run 6
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=6 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=1008 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(220) delay=Some(210) ack=213 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=2011 pace=12 fps=12 bpf=71667 enc=4300020 clamped=true act=Raising rtt=Some(10) delay=Some(95) ack=113 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=3015 pace=26 fps=26 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(172) delay=Some(67) ack=209 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=4017 pace=19 fps=19 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(161) delay=Some(151) ack=196 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=5017 pace=19 fps=19 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(186) delay=Some(153) ack=194 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=6021 pace=18 fps=18 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(195) delay=Some(166) ack=192 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=7022 pace=17 fps=17 bpf=61275 enc=3676517 clamped=true act=Steady rtt=Some(165) delay=Some(154) ack=181 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=8025 pace=14 fps=14 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(21) delay=Some(165) ack=179 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=9026 pace=56 fps=56 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=94363
+recovered_after_ms=Some(1025)
+
+## oneway run 7
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(0) frames=7 bytes=114226
+bandwidth_limit t_ms=4 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(0) frames=7 bytes=114445
+bandwidth_limit t_ms=1007 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(207) delay=Some(205) ack=218 fq=Some(218) rq=Some(1) frames=3 bytes=32768
+bandwidth_limit t_ms=2011 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(81) delay=Some(107) ack=119 fq=Some(119) rq=Some(1) frames=3 bytes=32768
+bandwidth_limit t_ms=3013 pace=16 fps=16 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(98) delay=Some(74) ack=135 fq=Some(135) rq=Some(1) frames=3 bytes=32768
+bandwidth_limit t_ms=4015 pace=16 fps=16 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(139) delay=Some(164) ack=200 fq=Some(200) rq=Some(1) frames=3 bytes=32768
+bandwidth_limit t_ms=5016 pace=12 fps=12 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(156) delay=Some(178) ack=200 fq=Some(200) rq=Some(1) frames=3 bytes=32768
+bandwidth_limit t_ms=6019 pace=10 fps=10 bpf=64500 enc=3870018 clamped=false act=Steady rtt=Some(35) delay=Some(149) ack=95 fq=Some(95) rq=Some(1) frames=3 bytes=65536
+bandwidth_limit t_ms=7021 pace=32 fps=32 bpf=61275 enc=3676517 clamped=true act=Steady rtt=Some(233) delay=Some(103) ack=251 fq=Some(251) rq=Some(1) frames=4 bytes=32768
+bandwidth_limit t_ms=8024 pace=10 fps=10 bpf=61275 enc=3676517 clamped=false act=Steady rtt=Some(17) delay=Some(113) ack=36 fq=Some(36) rq=Some(1) frames=3 bytes=65536
+bandwidth_limit t_ms=9025 pace=52 fps=52 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=6 bytes=88546
+bandwidth_limit t_ms=10027 pace=60 fps=60 bpf=55147 enc=3308865 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=92044
+recovered_after_ms=Some(2027)
+
+## rtt run 7
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=998 pace=46 fps=46 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(207) delay=Some(197) ack=213 fq=None rq=None frames=6 bytes=32768
+bandwidth_limit t_ms=1999 pace=19 fps=19 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(167) delay=Some(187) ack=212 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=2999 pace=11 fps=11 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(198) delay=Some(175) ack=213 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=3999 pace=12 fps=12 bpf=68083 enc=4085018 clamped=false act=Raising rtt=Some(54) delay=Some(86) ack=94 fq=None rq=None frames=3 bytes=65536
+bandwidth_limit t_ms=4999 pace=31 fps=31 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(208) delay=Some(168) ack=200 fq=None rq=None frames=4 bytes=32768
+bandwidth_limit t_ms=6000 pace=19 fps=19 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(185) delay=Some(175) ack=200 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=7000 pace=16 fps=16 bpf=64679 enc=3880768 clamped=true act=LoweringFps rtt=Some(149) delay=Some(165) ack=194 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=8000 pace=14 fps=14 bpf=64679 enc=3880768 clamped=true act=Steady rtt=Some(161) delay=Some(151) ack=195 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=9000 pace=46 fps=46 bpf=64679 enc=3880768 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=6 bytes=81819
+bandwidth_limit t_ms=10000 pace=60 fps=60 bpf=61445 enc=3686729 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=101385
+recovered_after_ms=Some(2000)
+
+## oneway run 8
+bandwidth_limit t_ms=1 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=115372
+bandwidth_limit t_ms=1002 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(214) delay=Some(211) ack=219 fq=Some(219) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2004 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(80) delay=Some(155) ack=145 fq=Some(145) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3005 pace=36 fps=36 bpf=71667 enc=4300020 clamped=true act=Raising rtt=Some(216) delay=Some(44) ack=215 fq=Some(215) rq=Some(2) frames=5 bytes=32768
+bandwidth_limit t_ms=4008 pace=23 fps=23 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(125) delay=Some(150) ack=202 fq=Some(202) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5011 pace=22 fps=22 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(129) delay=Some(157) ack=199 fq=Some(199) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=6013 pace=18 fps=18 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(146) delay=Some(169) ack=201 fq=Some(201) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7016 pace=13 fps=13 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(177) delay=Some(174) ack=186 fq=Some(186) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8018 pace=10 fps=10 bpf=61275 enc=3676517 clamped=false act=Steady rtt=Some(62) delay=Some(120) ack=98 fq=Some(98) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=9021 pace=44 fps=44 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=5 bytes=74900
+bandwidth_limit t_ms=10024 pace=60 fps=60 bpf=58211 enc=3492691 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=96457
+recovered_after_ms=Some(2022)
+
+## rtt run 8
+bandwidth_limit t_ms=1 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=1002 pace=46 fps=46 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(209) delay=Some(199) ack=212 fq=None rq=None frames=6 bytes=32768
+bandwidth_limit t_ms=2002 pace=26 fps=26 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(168) delay=Some(158) ack=212 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=3003 pace=14 fps=14 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(202) delay=Some(175) ack=212 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=4003 pace=10 fps=10 bpf=68083 enc=4085018 clamped=true act=Steady rtt=Some(197) delay=Some(187) ack=199 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=5003 pace=16 fps=16 bpf=68083 enc=4085018 clamped=false act=Raising rtt=Some(67) delay=Some(57) ack=61 fq=None rq=None frames=3 bytes=65536
+bandwidth_limit t_ms=6003 pace=17 fps=17 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(200) delay=Some(162) ack=190 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=7004 pace=14 fps=14 bpf=64679 enc=3880768 clamped=true act=Steady rtt=Some(160) delay=Some(150) ack=195 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=8004 pace=14 fps=14 bpf=64679 enc=3880768 clamped=true act=Steady rtt=Some(173) delay=Some(145) ack=192 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=9004 pace=48 fps=48 bpf=64679 enc=3880768 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=6 bytes=85376
+bandwidth_limit t_ms=10004 pace=60 fps=60 bpf=61445 enc=3686729 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=101385
+recovered_after_ms=Some(2001)
+
+## oneway run 9
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=115317
+bandwidth_limit t_ms=5 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=115405
+bandwidth_limit t_ms=1008 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(217) delay=Some(214) ack=222 fq=Some(222) rq=Some(7) frames=3 bytes=32768
+bandwidth_limit t_ms=2010 pace=12 fps=12 bpf=71667 enc=4300020 clamped=true act=Raising rtt=Some(10) delay=Some(99) ack=120 fq=Some(120) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3011 pace=31 fps=31 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(169) delay=Some(167) ack=218 fq=Some(218) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=4012 pace=16 fps=16 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(164) delay=Some(160) ack=202 fq=Some(202) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5015 pace=15 fps=15 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(175) delay=Some(152) ack=197 fq=Some(197) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=6017 pace=14 fps=14 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(196) delay=Some(170) ack=202 fq=Some(202) rq=Some(5) frames=3 bytes=32768
+bandwidth_limit t_ms=7018 pace=10 fps=10 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(120) delay=Some(166) ack=119 fq=Some(119) rq=Some(10) frames=3 bytes=32768
+bandwidth_limit t_ms=8020 pace=32 fps=32 bpf=61275 enc=3676517 clamped=true act=Steady rtt=Some(10) delay=Some(98) ack=191 fq=Some(191) rq=Some(1) frames=4 bytes=32768
+bandwidth_limit t_ms=9021 pace=60 fps=60 bpf=61275 enc=3676517 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=102140
+recovered_after_ms=Some(1019)
+
+## rtt run 9
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=997 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(212) delay=Some(202) ack=212 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=1997 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(97) delay=Some(118) ack=129 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=2999 pace=18 fps=18 bpf=71667 enc=4300020 clamped=true act=Raising rtt=Some(153) delay=Some(95) ack=171 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=4000 pace=16 fps=16 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(198) delay=Some(167) ack=193 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=5002 pace=10 fps=10 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(148) delay=Some(178) ack=195 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=6003 pace=24 fps=24 bpf=64500 enc=3870018 clamped=false act=Raising rtt=Some(24) delay=Some(17) ack=62 fq=None rq=None frames=3 bytes=65536
+bandwidth_limit t_ms=7004 pace=22 fps=22 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(266) delay=Some(192) ack=244 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=8005 pace=10 fps=10 bpf=61275 enc=3676517 clamped=false act=Steady rtt=Some(10) delay=Some(105) ack=30 fq=None rq=None frames=3 bytes=65536
+bandwidth_limit t_ms=9006 pace=52 fps=52 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=6 bytes=87623
+bandwidth_limit t_ms=10006 pace=60 fps=60 bpf=55147 enc=3308865 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=90993
+recovered_after_ms=Some(2003)
+
+## oneway run 10
+bandwidth_limit t_ms=2 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=115453
+bandwidth_limit t_ms=1004 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(211) delay=Some(208) ack=220 fq=Some(220) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2005 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(96) delay=Some(124) ack=134 fq=Some(134) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3005 pace=18 fps=18 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(172) delay=Some(75) ack=158 fq=Some(158) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=4007 pace=10 fps=10 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(149) delay=Some(174) ack=203 fq=Some(203) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5010 pace=14 fps=14 bpf=64500 enc=3870018 clamped=false act=Raising rtt=Some(62) delay=Some(59) ack=70 fq=Some(70) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=6011 pace=25 fps=25 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(160) delay=Some(157) ack=201 fq=Some(201) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7014 pace=16 fps=16 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(198) delay=Some(195) ack=186 fq=Some(186) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8017 pace=6 fps=6 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(144) delay=Some(200) ack=167 fq=Some(167) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=9017 pace=42 fps=42 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=5 bytes=71633
+bandwidth_limit t_ms=10019 pace=60 fps=60 bpf=55147 enc=3308865 clamped=false act=Steady rtt=Some(10) delay=Some(1) ack=1 fq=Some(1) rq=Some(1) frames=7 bytes=92077
+recovered_after_ms=Some(2018)
+
+## rtt run 10
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=3 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=114125
+bandwidth_limit t_ms=1005 pace=40 fps=40 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(209) delay=Some(199) ack=212 fq=None rq=None frames=5 bytes=32768
+bandwidth_limit t_ms=2007 pace=25 fps=25 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(165) delay=Some(155) ack=211 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=3009 pace=15 fps=15 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(201) delay=Some(174) ack=212 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=4012 pace=8 fps=8 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(210) delay=Some(200) ack=204 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=5014 pace=22 fps=22 bpf=68083 enc=4085018 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=86 fq=None rq=None frames=3 bytes=65536
+bandwidth_limit t_ms=6017 pace=29 fps=29 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(204) delay=Some(166) ack=200 fq=None rq=None frames=4 bytes=32768
+bandwidth_limit t_ms=7020 pace=17 fps=17 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(189) delay=Some(179) ack=180 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=8023 pace=10 fps=10 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(195) delay=Some(185) ack=179 fq=None rq=None frames=3 bytes=32768
+bandwidth_limit t_ms=9025 pace=42 fps=42 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=5 bytes=70772
+bandwidth_limit t_ms=10027 pace=60 fps=60 bpf=58211 enc=3492691 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=None rq=None frames=7 bytes=96049
+recovered_after_ms=Some(2026)
+
+Then 16 runs of whole-unit stamps with the floor gap hidden from the probes and the ack queue (the committed logic):
+
+## floor-gap run 1
+bandwidth_limit t_ms=3 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115497
+bandwidth_limit t_ms=1004 pace=46 fps=46 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(209) delay=Some(198) ack=211 fq=Some(211) rq=Some(2) frames=6 bytes=32768
+bandwidth_limit t_ms=2005 pace=28 fps=28 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(172) delay=Some(161) ack=211 fq=Some(211) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=3008 pace=14 fps=14 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(208) delay=Some(180) ack=211 fq=Some(211) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=4012 pace=10 fps=10 bpf=68083 enc=4085018 clamped=true act=Steady rtt=Some(208) delay=Some(197) ack=200 fq=Some(200) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5013 pace=34 fps=34 bpf=68083 enc=4085018 clamped=true act=Raising rtt=Some(170) delay=Some(47) ack=134 fq=Some(134) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=6014 pace=27 fps=27 bpf=68083 enc=4085018 clamped=true act=Steady rtt=Some(152) delay=Some(155) ack=198 fq=Some(198) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=7015 pace=26 fps=26 bpf=64679 enc=3880768 clamped=true act=Raising rtt=Some(181) delay=Some(149) ack=192 fq=Some(192) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8016 pace=19 fps=19 bpf=64679 enc=3880768 clamped=true act=LoweringFps rtt=Some(193) delay=Some(165) ack=194 fq=Some(194) rq=Some(1) frames=3 bytes=32768
+bandwidth_limit t_ms=9018 pace=51 fps=51 bpf=64679 enc=3880768 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=6 bytes=90712
+recovered_after_ms=Some(1016)
+
+## floor-gap run 2
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(0) frames=7 bytes=114402
+bandwidth_limit t_ms=4 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115403
+bandwidth_limit t_ms=1005 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(211) delay=Some(200) ack=211 fq=Some(211) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2008 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(97) delay=Some(116) ack=126 fq=Some(126) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3011 pace=33 fps=33 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(210) delay=Some(156) ack=210 fq=Some(210) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=4014 pace=22 fps=22 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(194) delay=Some(164) ack=191 fq=Some(191) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5016 pace=23 fps=23 bpf=64500 enc=3870018 clamped=true act=Raising rtt=Some(141) delay=Some(130) ack=193 fq=Some(193) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=6017 pace=23 fps=23 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(149) delay=Some(138) ack=191 fq=Some(191) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7018 pace=19 fps=19 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(182) delay=Some(172) ack=178 fq=Some(178) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8020 pace=11 fps=11 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(193) delay=Some(179) ack=178 fq=Some(178) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=9022 pace=42 fps=42 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=5 bytes=71449
+bandwidth_limit t_ms=10023 pace=60 fps=60 bpf=58211 enc=3492691 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=97159
+recovered_after_ms=Some(2022)
+
+## floor-gap run 3
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115360
+bandwidth_limit t_ms=6 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115461
+bandwidth_limit t_ms=1007 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(212) delay=Some(203) ack=212 fq=Some(212) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2010 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(99) delay=Some(118) ack=129 fq=Some(129) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3011 pace=33 fps=33 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(211) delay=Some(159) ack=212 fq=Some(212) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=4014 pace=22 fps=22 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(188) delay=Some(164) ack=189 fq=Some(189) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5017 pace=19 fps=19 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(202) delay=Some(171) ack=192 fq=Some(192) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=6019 pace=19 fps=19 bpf=64500 enc=3870018 clamped=true act=Raising rtt=Some(145) delay=Some(135) ack=193 fq=Some(193) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7020 pace=13 fps=13 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(189) delay=Some(174) ack=180 fq=Some(180) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8023 pace=10 fps=10 bpf=61275 enc=3676517 clamped=false act=Steady rtt=Some(10) delay=Some(124) ack=28 fq=Some(28) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=9026 pace=52 fps=52 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=6 bytes=88609
+bandwidth_limit t_ms=10029 pace=60 fps=60 bpf=58211 enc=3492691 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=96150
+recovered_after_ms=Some(2028)
+
+## floor-gap run 4
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115221
+bandwidth_limit t_ms=6 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115201
+bandwidth_limit t_ms=1008 pace=46 fps=46 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(209) delay=Some(199) ack=211 fq=Some(211) rq=Some(2) frames=6 bytes=32768
+bandwidth_limit t_ms=2011 pace=18 fps=18 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(167) delay=Some(187) ack=210 fq=Some(210) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3012 pace=11 fps=11 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(207) delay=Some(175) ack=215 fq=Some(215) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=4014 pace=22 fps=22 bpf=68083 enc=4085018 clamped=false act=Raising rtt=Some(37) delay=Some(48) ack=69 fq=Some(69) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=5015 pace=31 fps=31 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(208) delay=Some(169) ack=200 fq=Some(200) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=6016 pace=18 fps=18 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(190) delay=Some(179) ack=199 fq=Some(199) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7019 pace=14 fps=14 bpf=64679 enc=3880768 clamped=true act=LoweringFps rtt=Some(154) delay=Some(170) ack=195 fq=Some(195) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8020 pace=12 fps=12 bpf=64679 enc=3880768 clamped=true act=Steady rtt=Some(22) delay=Some(138) ack=194 fq=Some(194) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=9022 pace=54 fps=54 bpf=64679 enc=3880768 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=97054
+recovered_after_ms=Some(1021)
+
+## floor-gap run 5
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=114177
+bandwidth_limit t_ms=5 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115515
+bandwidth_limit t_ms=1005 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(213) delay=Some(202) ack=213 fq=Some(213) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2008 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(99) delay=Some(118) ack=129 fq=Some(129) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3011 pace=33 fps=33 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(210) delay=Some(156) ack=210 fq=Some(210) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=4014 pace=21 fps=21 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(193) delay=Some(166) ack=192 fq=Some(192) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5017 pace=21 fps=21 bpf=64500 enc=3870018 clamped=true act=Raising rtt=Some(143) delay=Some(132) ack=192 fq=Some(192) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=6019 pace=22 fps=22 bpf=64500 enc=3870018 clamped=true act=Raising rtt=Some(155) delay=Some(109) ack=193 fq=Some(193) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7022 pace=17 fps=17 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(194) delay=Some(182) ack=181 fq=Some(181) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8025 pace=10 fps=10 bpf=61275 enc=3676517 clamped=true act=Steady rtt=Some(201) delay=Some(192) ack=180 fq=Some(180) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=9027 pace=42 fps=42 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=5 bytes=71638
+bandwidth_limit t_ms=10029 pace=60 fps=60 bpf=58211 enc=3492691 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=97246
+recovered_after_ms=Some(2027)
+
+## floor-gap run 6
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115381
+bandwidth_limit t_ms=3 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115393
+bandwidth_limit t_ms=1006 pace=46 fps=46 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(208) delay=Some(198) ack=214 fq=Some(214) rq=Some(2) frames=6 bytes=32768
+bandwidth_limit t_ms=2007 pace=18 fps=18 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(167) delay=Some(188) ack=212 fq=Some(212) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3009 pace=11 fps=11 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(203) delay=Some(175) ack=213 fq=Some(213) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=4011 pace=12 fps=12 bpf=68083 enc=4085018 clamped=false act=Raising rtt=Some(38) delay=Some(63) ack=62 fq=Some(62) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=5011 pace=34 fps=34 bpf=68083 enc=4085018 clamped=true act=Steady rtt=Some(178) delay=Some(138) ack=200 fq=Some(200) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=6015 pace=19 fps=19 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(187) delay=Some(177) ack=200 fq=Some(200) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7015 pace=16 fps=16 bpf=64679 enc=3880768 clamped=true act=LoweringFps rtt=Some(146) delay=Some(166) ack=193 fq=Some(193) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8019 pace=13 fps=13 bpf=64679 enc=3880768 clamped=true act=Steady rtt=Some(164) delay=Some(153) ack=192 fq=Some(192) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=9021 pace=45 fps=45 bpf=64679 enc=3880768 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=6 bytes=80870
+bandwidth_limit t_ms=10022 pace=60 fps=60 bpf=61445 enc=3686729 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=102554
+recovered_after_ms=Some(2020)
+
+## floor-gap run 7
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115500
+bandwidth_limit t_ms=998 pace=47 fps=47 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(206) delay=Some(195) ack=210 fq=Some(210) rq=Some(2) frames=6 bytes=32768
+bandwidth_limit t_ms=1998 pace=20 fps=20 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(163) delay=Some(182) ack=210 fq=Some(210) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2999 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(195) delay=Some(185) ack=212 fq=Some(212) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3999 pace=12 fps=12 bpf=64500 enc=3870018 clamped=false act=Raising rtt=Some(16) delay=Some(73) ack=61 fq=Some(61) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=4999 pace=30 fps=30 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(204) delay=Some(173) ack=260 fq=Some(260) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=5999 pace=10 fps=10 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(92) delay=Some(126) ack=174 fq=Some(174) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7000 pace=34 fps=34 bpf=58050 enc=3483016 clamped=true act=Raising rtt=Some(109) delay=Some(47) ack=193 fq=Some(193) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=8000 pace=8 fps=8 bpf=58050 enc=3483016 clamped=true act=LoweringFps rtt=Some(223) delay=Some(213) ack=171 fq=Some(171) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=9000 pace=42 fps=42 bpf=58050 enc=3483016 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=5 bytes=67855
+bandwidth_limit t_ms=10000 pace=60 fps=60 bpf=52245 enc=3134714 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=87267
+bandwidth_limit t_ms=11001 pace=60 fps=60 bpf=52245 enc=3134714 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=87224
+bandwidth_limit t_ms=12001 pace=60 fps=60 bpf=52245 enc=3134714 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=87195
+bandwidth_limit t_ms=13001 pace=60 fps=60 bpf=54745 enc=3284714 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=91397
+recovered_after_ms=Some(5001)
+
+## floor-gap run 8
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115497
+bandwidth_limit t_ms=1000 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(211) delay=Some(200) ack=211 fq=Some(211) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2000 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(97) delay=Some(116) ack=129 fq=Some(129) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3000 pace=34 fps=34 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(207) delay=Some(153) ack=210 fq=Some(210) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=4001 pace=15 fps=15 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(181) delay=Some(199) ack=192 fq=Some(192) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5001 pace=14 fps=14 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(137) delay=Some(151) ack=192 fq=Some(192) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=6001 pace=14 fps=14 bpf=64500 enc=3870018 clamped=true act=Steady rtt=Some(155) delay=Some(144) ack=193 fq=Some(193) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7001 pace=13 fps=13 bpf=61275 enc=3676517 clamped=true act=LoweringFps rtt=Some(196) delay=Some(182) ack=179 fq=Some(179) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8002 pace=20 fps=20 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(19) delay=Some(10) ack=55 fq=Some(55) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=9002 pace=60 fps=60 bpf=61275 enc=3676517 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=102128
+recovered_after_ms=Some(1000)
+
+## floor-gap run 9
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115488
+bandwidth_limit t_ms=7 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115540
+bandwidth_limit t_ms=1009 pace=46 fps=46 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(208) delay=Some(196) ack=210 fq=Some(210) rq=Some(2) frames=6 bytes=32768
+bandwidth_limit t_ms=2010 pace=19 fps=19 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(171) delay=Some(188) ack=211 fq=Some(211) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3011 pace=11 fps=11 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(203) delay=Some(178) ack=211 fq=Some(211) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=4013 pace=10 fps=10 bpf=68083 enc=4085018 clamped=false act=Steady rtt=Some(59) delay=Some(159) ack=76 fq=Some(76) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=5013 pace=23 fps=23 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(200) delay=Some(158) ack=199 fq=Some(199) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=6015 pace=17 fps=17 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(183) delay=Some(172) ack=198 fq=Some(198) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7016 pace=14 fps=14 bpf=64679 enc=3880768 clamped=true act=LoweringFps rtt=Some(151) delay=Some(165) ack=193 fq=Some(193) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8020 pace=14 fps=14 bpf=64679 enc=3880768 clamped=true act=Steady rtt=Some(21) delay=Some(138) ack=192 fq=Some(192) rq=Some(1) frames=3 bytes=32768
+bandwidth_limit t_ms=9021 pace=56 fps=56 bpf=64679 enc=3880768 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=100796
+recovered_after_ms=Some(1021)
+
+## floor-gap run 10
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115461
+bandwidth_limit t_ms=5 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115436
+bandwidth_limit t_ms=1006 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(214) delay=Some(203) ack=210 fq=Some(210) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2007 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(100) delay=Some(118) ack=130 fq=Some(130) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3010 pace=34 fps=34 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(209) delay=Some(154) ack=210 fq=Some(210) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=4012 pace=24 fps=24 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(239) delay=Some(173) ack=259 fq=Some(259) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5015 pace=12 fps=12 bpf=64500 enc=3870018 clamped=false act=Raising rtt=Some(14) delay=Some(86) ack=61 fq=Some(61) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=6017 pace=30 fps=30 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(265) delay=Some(170) ack=258 fq=Some(258) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=7018 pace=12 fps=12 bpf=58050 enc=3483016 clamped=false act=Raising rtt=Some(10) delay=Some(50) ack=28 fq=Some(28) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=8021 pace=24 fps=24 bpf=58050 enc=3483016 clamped=true act=Steady rtt=Some(146) delay=Some(53) ack=166 fq=Some(166) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=9023 pace=58 fps=58 bpf=58050 enc=3483016 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=93674
+recovered_after_ms=Some(1020)
+
+## floor-gap run 11
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115439
+bandwidth_limit t_ms=6 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115445
+bandwidth_limit t_ms=1008 pace=46 fps=46 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(207) delay=Some(196) ack=211 fq=Some(211) rq=Some(2) frames=6 bytes=32768
+bandwidth_limit t_ms=2010 pace=19 fps=19 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(164) delay=Some(185) ack=212 fq=Some(212) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3013 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(195) delay=Some(184) ack=210 fq=Some(210) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=4014 pace=22 fps=22 bpf=68083 enc=4085018 clamped=false act=Raising rtt=Some(37) delay=Some(34) ack=61 fq=Some(61) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=5017 pace=34 fps=34 bpf=68083 enc=4085018 clamped=true act=Steady rtt=Some(144) delay=Some(146) ack=201 fq=Some(201) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=6020 pace=24 fps=24 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(193) delay=Some(182) ack=200 fq=Some(200) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7021 pace=21 fps=21 bpf=64679 enc=3880768 clamped=true act=Steady rtt=Some(159) delay=Some(148) ack=193 fq=Some(193) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8021 pace=25 fps=25 bpf=64679 enc=3880768 clamped=true act=Steady rtt=Some(22) delay=Some(144) ack=192 fq=Some(192) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=9024 pace=60 fps=60 bpf=64679 enc=3880768 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=107929
+recovered_after_ms=Some(1022)
+
+## floor-gap run 12
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=114149
+bandwidth_limit t_ms=998 pace=46 fps=46 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(207) delay=Some(196) ack=211 fq=Some(211) rq=Some(2) frames=6 bytes=32768
+bandwidth_limit t_ms=1999 pace=29 fps=29 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(165) delay=Some(154) ack=210 fq=Some(210) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=2999 pace=10 fps=10 bpf=71667 enc=4300020 clamped=true act=Steady rtt=Some(195) delay=Some(183) ack=212 fq=Some(212) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3999 pace=12 fps=12 bpf=64500 enc=3870018 clamped=false act=Raising rtt=Some(10) delay=Some(69) ack=60 fq=Some(60) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=4999 pace=32 fps=32 bpf=64500 enc=3870018 clamped=true act=LoweringFps rtt=Some(259) delay=Some(160) ack=260 fq=Some(260) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=5999 pace=20 fps=20 bpf=64500 enc=3870018 clamped=false act=Raising rtt=Some(53) delay=Some(42) ack=61 fq=Some(61) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=7000 pace=10 fps=10 bpf=58050 enc=3483016 clamped=true act=LoweringFps rtt=Some(229) delay=Some(217) ack=230 fq=Some(230) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8000 pace=16 fps=16 bpf=58050 enc=3483016 clamped=false act=Raising rtt=Some(62) delay=Some(50) ack=28 fq=Some(28) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=9000 pace=58 fps=58 bpf=58050 enc=3483016 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=93672
+recovered_after_ms=Some(998)
+
+## floor-gap run 13
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115534
+bandwidth_limit t_ms=6 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115524
+bandwidth_limit t_ms=1006 pace=46 fps=46 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(208) delay=Some(198) ack=211 fq=Some(211) rq=Some(2) frames=6 bytes=32768
+bandwidth_limit t_ms=2008 pace=18 fps=18 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(167) delay=Some(186) ack=212 fq=Some(212) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3011 pace=12 fps=12 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(198) delay=Some(173) ack=208 fq=Some(208) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=4014 pace=10 fps=10 bpf=68083 enc=4085018 clamped=true act=Steady rtt=Some(108) delay=Some(137) ack=174 fq=Some(174) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5015 pace=16 fps=16 bpf=68083 enc=4085018 clamped=true act=Steady rtt=Some(76) delay=Some(62) ack=118 fq=Some(118) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=6017 pace=13 fps=13 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(204) delay=Some(192) ack=203 fq=Some(203) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7018 pace=11 fps=11 bpf=64679 enc=3880768 clamped=true act=Steady rtt=Some(168) delay=Some(156) ack=193 fq=Some(193) rq=Some(3) frames=3 bytes=32768
+bandwidth_limit t_ms=8021 pace=33 fps=33 bpf=64679 enc=3880768 clamped=true act=Raising rtt=Some(191) delay=Some(11) ack=144 fq=Some(144) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=9022 pace=60 fps=60 bpf=64679 enc=3880768 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=107992
+recovered_after_ms=Some(1018)
+
+## floor-gap run 14
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115414
+bandwidth_limit t_ms=998 pace=46 fps=46 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(208) delay=Some(198) ack=211 fq=Some(211) rq=Some(2) frames=6 bytes=32768
+bandwidth_limit t_ms=1999 pace=19 fps=19 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(167) delay=Some(184) ack=209 fq=Some(209) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=2999 pace=12 fps=12 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(201) delay=Some(174) ack=211 fq=Some(211) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3999 pace=10 fps=10 bpf=68083 enc=4085018 clamped=true act=Steady rtt=Some(129) delay=Some(158) ack=199 fq=Some(199) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=4999 pace=34 fps=34 bpf=68083 enc=4085018 clamped=true act=Raising rtt=Some(186) delay=Some(0) ack=175 fq=Some(175) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=6000 pace=27 fps=27 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(164) delay=Some(166) ack=199 fq=Some(199) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=7000 pace=20 fps=20 bpf=64679 enc=3880768 clamped=true act=LoweringFps rtt=Some(194) delay=Some(163) ack=193 fq=Some(193) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8000 pace=19 fps=19 bpf=64679 enc=3880768 clamped=true act=Steady rtt=Some(143) delay=Some(156) ack=193 fq=Some(193) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=9000 pace=51 fps=51 bpf=64679 enc=3880768 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=6 bytes=91720
+recovered_after_ms=Some(1000)
+
+## floor-gap run 15
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115412
+bandwidth_limit t_ms=6 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115478
+bandwidth_limit t_ms=1008 pace=47 fps=47 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(207) delay=Some(195) ack=211 fq=Some(211) rq=Some(2) frames=6 bytes=32768
+bandwidth_limit t_ms=2010 pace=20 fps=20 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(166) delay=Some(185) ack=210 fq=Some(210) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=3011 pace=13 fps=13 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(201) delay=Some(173) ack=210 fq=Some(210) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=4013 pace=10 fps=10 bpf=68083 enc=4085018 clamped=true act=Steady rtt=Some(208) delay=Some(196) ack=201 fq=Some(201) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5016 pace=24 fps=24 bpf=68083 enc=4085018 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=89 fq=Some(89) rq=Some(2) frames=3 bytes=65536
+bandwidth_limit t_ms=6018 pace=30 fps=30 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(203) delay=Some(162) ack=200 fq=Some(200) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=7020 pace=16 fps=16 bpf=64679 enc=3880768 clamped=true act=LoweringFps rtt=Some(169) delay=Some(185) ack=194 fq=Some(194) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8023 pace=14 fps=14 bpf=64679 enc=3880768 clamped=true act=Steady rtt=Some(10) delay=Some(156) ack=190 fq=Some(190) rq=Some(1) frames=3 bytes=32768
+bandwidth_limit t_ms=9026 pace=56 fps=56 bpf=64679 enc=3880768 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=99702
+recovered_after_ms=Some(1025)
+
+## floor-gap run 16
+bandwidth_limit t_ms=0 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115481
+bandwidth_limit t_ms=4 pace=60 fps=60 bpf=69167 enc=4150020 clamped=false act=Steady rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=7 bytes=115466
+bandwidth_limit t_ms=1006 pace=46 fps=46 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(209) delay=Some(198) ack=210 fq=Some(210) rq=Some(2) frames=6 bytes=32768
+bandwidth_limit t_ms=2007 pace=27 fps=27 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(172) delay=Some(162) ack=213 fq=Some(213) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=3009 pace=15 fps=15 bpf=71667 enc=4300020 clamped=true act=LoweringFps rtt=Some(202) delay=Some(178) ack=210 fq=Some(210) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=4012 pace=10 fps=10 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(201) delay=Some(190) ack=201 fq=Some(201) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=5015 pace=30 fps=30 bpf=68083 enc=4085018 clamped=true act=Raising rtt=Some(140) delay=Some(40) ack=152 fq=Some(152) rq=Some(2) frames=4 bytes=32768
+bandwidth_limit t_ms=6016 pace=24 fps=24 bpf=68083 enc=4085018 clamped=true act=LoweringFps rtt=Some(191) delay=Some(180) ack=200 fq=Some(200) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=7019 pace=22 fps=22 bpf=64679 enc=3880768 clamped=true act=Steady rtt=Some(161) delay=Some(147) ack=194 fq=Some(194) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=8020 pace=18 fps=18 bpf=64679 enc=3880768 clamped=true act=LoweringFps rtt=Some(183) delay=Some(171) ack=194 fq=Some(194) rq=Some(2) frames=3 bytes=32768
+bandwidth_limit t_ms=9021 pace=50 fps=50 bpf=64679 enc=3880768 clamped=false act=Raising rtt=Some(10) delay=Some(0) ack=0 fq=Some(0) rq=Some(1) frames=6 bytes=89793
+recovered_after_ms=Some(1019)
