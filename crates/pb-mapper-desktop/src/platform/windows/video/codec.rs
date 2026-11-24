@@ -339,6 +339,9 @@ impl Codec {
                     gpu_priority: _,
                     // The video processor's, which `Converter` takes.
                     vp_usage: _,
+                    // Whether a watcher is asked for, which `Codec::new`
+                    // is told.
+                    poll_events: _,
                 },
         } = settings;
         let transform: IMFTransform = unsafe {

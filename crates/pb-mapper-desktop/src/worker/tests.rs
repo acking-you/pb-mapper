@@ -1,7 +1,9 @@
 use super::*;
 use crate::{
     CursorPosition, DRAIN_POLL, Display, EncodedFrame, Input, InputEvent, KeyframeReason,
-    VideoFormat, VideoRate, error,
+    VideoFormat, VideoRate,
+    codec::present_waiter::{Idle, Status},
+    error,
     idr::IdrReason,
     lane::LANE_CAPACITY,
     modes::{Journal, ModeCommand},
@@ -94,10 +96,11 @@ struct Fake {
     shape_reads: Arc<AtomicU32>,
     /// A push capture source stays idle until this instant or a callback.
     idle_until: Arc<Mutex<Option<Instant>>>,
-    /// A pull source on a still desktop, as DXGI between two presents: a
-    /// capture submits nothing unless it carries a keyframe, and the source
-    /// names no time to try again.
+    /// A pull source on a still desktop: a capture submits nothing unless
+    /// it carries a keyframe, and the source names no time to try again.
     still: Arc<AtomicBool>,
+    /// A capture thread that thread C arms, as the Windows encoder's.
+    armed: Arc<Mutex<Option<Armed>>>,
     /// Each unit repeats an unchanged picture, as the Windows encoder's
     /// liveness frame does.
     duplicate: Arc<AtomicBool>,
@@ -107,10 +110,10 @@ struct Fake {
     /// (`Submit::Waiting`).
     serial: Arc<AtomicBool>,
     /// Its output wakes thread C (`drain_poll` is `None`) while its capture
-    /// is still polled, as the Windows encoder's with its event watcher;
-    /// while a serial encoder waits for input it names a retry `DRAIN_POLL`
-    /// after the capture that found it waiting, and asks for input (the
-    /// wake) once its unit is out.
+    /// is still polled, as the Windows encoder's was with its event watcher
+    /// before its capture thread; while a serial encoder waits for input it
+    /// names a retry `DRAIN_POLL` after the capture that found it waiting,
+    /// and asks for input (the wake) once its unit is out.
     push_drain: Arc<AtomicBool>,
     /// When the last capture found a serial encoder waiting for input.
     waiting: Arc<Mutex<Option<Instant>>>,
@@ -145,6 +148,7 @@ impl Fake {
             shape_reads: Arc::default(),
             idle_until: Arc::default(),
             still: Arc::default(),
+            armed: Arc::default(),
             duplicate: Arc::default(),
             serial: Arc::default(),
             push_drain: Arc::default(),
@@ -226,6 +230,9 @@ impl Backend for Fake {
         if self.fail_capture.load(Ordering::SeqCst) {
             return Err(error("no compatible hardware encoder"));
         }
+        if let Some(armed) = self.armed.lock().as_mut() {
+            return Ok(armed.submit(started, keyframe, codec, &mut self.submitted_video));
+        }
         // As the Windows encoder: drain what is finished, then submit, which
         // a serial encoder still holding a unit refuses.
         let mut drained = None;
@@ -293,9 +300,12 @@ impl Backend for Fake {
         (!self.push_drain.load(Ordering::SeqCst)).then_some(DRAIN_POLL)
     }
     fn capture_poll(&self) -> Option<Duration> {
-        Some(DRAIN_POLL)
+        self.armed.lock().is_none().then_some(DRAIN_POLL)
     }
     fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        if let Some(armed) = self.armed.lock().as_ref() {
+            return armed.rule().until((self.clock)(), keyframe_due);
+        }
         // As the Windows encoder: a pushing serial encoder waits for its
         // input request, which comes with its unit's output, and is asked
         // again `DRAIN_POLL` later meanwhile, and at once once it asked.
@@ -356,6 +366,97 @@ impl Backend for Fake {
     fn restore_display_mode(&mut self) -> Result<bool> {
         self.log.lock().restores += 1;
         Ok(false)
+    }
+}
+
+/// A capture thread that thread C arms, as the Windows encoder's, which
+/// follows the encoder's rule (`present_waiter::Idle`): what it published
+/// and how far it looked, and what each capture call did. Its look answers
+/// at once.
+struct Armed {
+    status: Status,
+    created: Instant,
+    last_submit: Option<Instant>,
+    keyframe: bool,
+    /// Each capture call: when, and whether it armed the thread or sent a
+    /// new picture or a repeat.
+    calls: Vec<(Instant, Call)>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Call {
+    Arm,
+    Fresh,
+    Repeat,
+}
+impl Armed {
+    fn new(created: Instant) -> Self {
+        Self {
+            status: Status::default(),
+            created,
+            last_submit: None,
+            keyframe: false,
+            calls: Vec::new(),
+        }
+    }
+
+    fn rule(&self) -> Idle {
+        Idle {
+            waiting: None,
+            status: self.status,
+            created: self.created,
+            last_submit: self.last_submit,
+            keyframe: self.keyframe,
+            look: Duration::from_millis(32),
+        }
+    }
+
+    /// The thread converted a present and published it, which disarms it.
+    fn publish(&mut self) {
+        self.status = Status {
+            published: true,
+            ..Status::default()
+        };
+    }
+
+    /// As the encoder's submit: the published picture, else a due repeat
+    /// once the thread found nothing newer, else arm the thread.
+    fn submit(
+        &mut self,
+        now: Instant,
+        keyframe: bool,
+        codec: VideoCodec,
+        submitted: &mut bool,
+    ) -> Option<EncodedFrame> {
+        self.keyframe |= keyframe;
+        let call = if self.status.published {
+            Call::Fresh
+        } else if self.rule().repeat_now(now) {
+            Call::Repeat
+        } else {
+            Call::Arm
+        };
+        self.calls.push((now, call));
+        *submitted = call != Call::Arm;
+        if call == Call::Arm {
+            self.status.armed.get_or_insert(now);
+            self.status.idle = true;
+            return None;
+        }
+        self.status = Status::default();
+        self.last_submit = Some(now);
+        let keyframe = std::mem::take(&mut self.keyframe);
+        Some(EncodedFrame {
+            format: VideoFormat {
+                codec,
+                width: 16,
+                height: 10,
+                keyframe,
+                duplicate: call == Call::Repeat,
+                gop: u32::MAX,
+                ..VideoFormat::default()
+            },
+            bytes: vec![1; 8],
+        })
     }
 }
 
@@ -1731,6 +1832,90 @@ fn a_pushing_encoder_with_a_pulled_capture_still_polls_armed_ticks_while_active(
     assert!((60..=61).contains(&still.len()), "{} captures", still.len());
     let gaps = spacing(&still);
     assert!(gaps.iter().all(|gap| *gap == period), "{gaps:?}");
+}
+
+/// A capture thread that thread C arms, as the Windows encoder's, never
+/// polled: thread C's first tick arms it and takes the first picture as
+/// the thread publishes it. On a still desktop thread C then calls only to
+/// arm it again after each 250 ms repeat, never spinning; a present the
+/// armed thread publishes is taken the moment it lands; and one published
+/// right after a repeat waits for the next tick.
+#[test]
+fn an_armed_capture_thread_is_taken_as_it_publishes_and_never_polled() {
+    use crate::codec::pipeline::LIVENESS_INTERVAL;
+    let mut h = Harness::new(true, None);
+    let period = Duration::from_secs(1) / 60;
+    let start = h.now();
+    *h.fake.armed.lock() = Some(Armed::new(start));
+    let calls = |h: &Harness| {
+        h.fake
+            .armed
+            .lock()
+            .as_ref()
+            .map(|armed| armed.calls.clone())
+            .unwrap()
+    };
+    let last = |h: &Harness| calls(h).last().copied();
+    let publish = |h: &Harness| h.fake.armed.lock().as_mut().unwrap().publish();
+
+    // Armed by the first tick, until the first picture's deadline.
+    assert!(h.step() > start);
+    assert_eq!(calls(&h), [(start, Call::Arm)]);
+    let first = start + Duration::from_millis(40);
+    *h.now.lock() = first;
+    publish(&h);
+    h.step();
+    assert_eq!(last(&h), Some((first, Call::Fresh)));
+    assert!(h.sent()[0].keyframe);
+
+    // Still: an arming after each repeat, the repeats 250 ms apart.
+    h.run(Duration::from_secs(1), true);
+    let spell: Vec<(Instant, Call)> = calls(&h)
+        .into_iter()
+        .filter(|(at, _)| *at > first)
+        .collect();
+    let kinds: Vec<Call> = spell.iter().map(|(_, call)| *call).collect();
+    assert_eq!(kinds, [Call::Arm, Call::Repeat].repeat(4), "{spell:?}");
+    let repeats: Vec<Instant> = spell
+        .iter()
+        .filter(|(_, call)| *call == Call::Repeat)
+        .map(|(at, _)| *at)
+        .collect();
+    assert_eq!(repeats[0], first + LIVENESS_INTERVAL);
+    assert!(
+        repeats
+            .windows(2)
+            .all(|pair| pair[1] - pair[0] == LIVENESS_INTERVAL)
+    );
+
+    // Armed again after the last repeat: a present that lands between
+    // thread C's wakes is taken at once.
+    let armed = h.next_capture();
+    assert_eq!(last(&h), Some((armed, Call::Arm)));
+    let landed = armed + Duration::from_micros(30_003);
+    *h.now.lock() = landed;
+    publish(&h);
+    h.step();
+    assert_eq!(last(&h), Some((landed, Call::Fresh)));
+    assert!(!h.sent()[0].duplicate);
+
+    // A repeat spends the tick: a present published right after it waits
+    // for the next.
+    let armed = h.next_capture();
+    assert_eq!(last(&h), Some((armed, Call::Arm)));
+    let repeated = h.next_capture();
+    assert_eq!(last(&h), Some((repeated, Call::Repeat)));
+    assert_eq!(repeated, landed + LIVENESS_INTERVAL);
+    let late = repeated + Duration::from_millis(1);
+    *h.now.lock() = late;
+    publish(&h);
+    let taken = h.next_capture();
+    assert!(
+        taken > late && taken <= repeated + period,
+        "{:?}",
+        taken - repeated
+    );
+    assert_eq!(last(&h), Some((taken, Call::Fresh)));
 }
 
 #[test]

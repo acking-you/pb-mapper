@@ -38,6 +38,13 @@
 //!   Windows asks the window to repaint): a desktop of text, the content
 //!   whose sharpness at a given bitrate the encoder settings below decide.
 //!   After its first picture the encoder sees only the 250 ms repeats.
+//! - `--still`: cover the whole display with one colour, painted once: a
+//!   still desktop, whose capture calls, `AcquireNextFrame` calls and
+//!   loop wakes per second are what a still screen with a viewer costs.
+//! - `--spontaneous`: a pattern window that changes colour once a second,
+//!   with no input: each change is the first present after stillness, whose
+//!   wait to the submit that took it `after_still_present_to_submit_*`
+//!   reports.
 //! - `--h264-profile base|high`: the H.264 profile asked for first (High by
 //!   default, as a session: Constrained High, High, then Baseline where the
 //!   encoder refuses them).
@@ -90,11 +97,16 @@
 //! stderr: `desktop_video_encoder_opened`, `desktop_h264_high_failed`,
 //! `desktop_gpu_priority` and the rest.
 //!
-//! The loop waits as thread C does: until the next tick, the next poll of an
-//! armed tick or of a polled encoder holding units (or of one with an
-//! announced output still uncollected), or a wake from the encoder's event
-//! watcher (each output, and the input request a waiting submit waits for),
-//! and at most 100 ms.
+//! The loop waits as thread C does: until the next tick, the time the
+//! encoder names (`idle_until`: the next repeat, or a retry while it waits
+//! for an input request), the next drain of a polled encoder holding units
+//! (or of one with an announced output still uncollected), or a wake from
+//! the encoder's capture thread (each new picture, and the answer a held
+//! repeat waits for) or event watcher (each output, and the input request a
+//! waiting submit waits for), and at most 100 ms. The capture thread waits
+//! for each present while the loop's tick wants a picture, so nothing polls
+//! DXGI; a backend whose capture is pulled is asked again as thread C asks
+//! it.
 //!
 //! It prints the largest keyframe and access unit, which `wire::MAX_PAYLOAD`
 //! must hold. Driving the encoder, it also prints a `case=encoder` line: the
@@ -121,9 +133,15 @@
 //! p95), the share of submits whose picture was dated, and the presents no
 //! submitted picture showed (`coalesced_presents`: for each dated picture,
 //! the presents it covers beyond one, as thread C's `coalesced_per_s`
-//! counts them). It also prints how long the first access unit took from
-//! the start of the paced loop, and, driving the encoder, what the
-//! duplication's first frame reported (`first_acquire_*`).
+//! counts them), and the same wait for the dated pictures presented at
+//! least 250 ms after the one before (`after_still_present_to_submit_*`,
+//! a change on a desktop that had been still). It also prints how long the
+//! first access unit took from the start of the paced loop, and, driving
+//! the encoder, what the duplication's first frame reported
+//! (`first_acquire_*`), its capture thread's `AcquireNextFrame` calls
+//! (`acquires`, `acquires_per_s`), and how long dropping it took at the end
+//! (`drop_ms`: its capture thread's join, the encoder's shutdown and its
+//! event watcher's join).
 #[cfg(windows)]
 mod probe_support;
 // The `--pace` classifier, shared with the macOS encoder's measurement test.
@@ -208,8 +226,8 @@ mod bench {
         probe_support::option,
     };
     use pb_mapper_desktop::{
-        Backend, DRAIN_POLL, Display, DisplaySelection, NativeBackend, VideoCodec, VideoLimits,
-        VideoRate, displays, native_backend,
+        Backend, Display, DisplaySelection, NativeBackend, VideoCodec, VideoLimits, VideoRate,
+        displays, native_backend,
         windows::video::{
             Encoded, Encoder, EncoderOptions, EncoderWake, GpuSpan, H264Profile, PICKUP_BOUNDS_US,
             Statistics, Submit, VpUsage, h265_available,
@@ -244,9 +262,10 @@ mod bench {
     /// A step's bitrate is measured after this long, once the rate controller
     /// has settled.
     const SETTLE: Duration = Duration::from_secs(2);
-    /// Thread C's `HOT_WINDOW`: after a new picture, a tick that found
-    /// nothing new is asked again every `DRAIN_POLL` for this long, and once
-    /// a period after it.
+    /// Thread C's `HOT_WINDOW`: after a new picture, a pulled capture's
+    /// armed tick is asked again at its poll interval for this long, and
+    /// once a period after it. A present this long after the one before
+    /// counts as a change after stillness.
     const HOT_WINDOW: Duration = Duration::from_millis(250);
     /// Thread C's `CONTEXT_CHECK_INTERVAL`: it wakes at least this often.
     const CONTEXT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
@@ -265,12 +284,22 @@ mod bench {
         let pattern_only = flag(&args, "--pattern-only");
         let noise = flag(&args, "--noise");
         let text = flag(&args, "--text");
-        if text && (noise || option(&args, "--dump").is_some()) {
+        let still = flag(&args, "--still");
+        let spontaneous = flag(&args, "--spontaneous");
+        let still_fills = [text, still, spontaneous]
+            .into_iter()
+            .filter(|fill| *fill)
+            .count();
+        let moving = noise
+            || option(&args, "--dump").is_some()
+            || ((still || spontaneous) && (flag(&args, "--animate") || rates.paces.is_some()));
+        if still_fills > 1 || (still_fills == 1 && moving) {
             return Err(
-                "--text covers the display with a still page: not with --noise or --dump".into(),
+                "--text, --still and --spontaneous are still or change once a second: one at a time, not with --noise or --dump, and --still and --spontaneous not with --animate or --pace"
+                    .into(),
             );
         }
-        let _animation = if option(&args, "--dump").is_some() || noise || text {
+        let _animation = if option(&args, "--dump").is_some() || noise || text || still {
             Some(Pattern::new(
                 display.x,
                 display.y,
@@ -280,9 +309,19 @@ mod bench {
                     Fill::Noise
                 } else if text {
                     Fill::Text
+                } else if still {
+                    Fill::Still
                 } else {
                     Fill::Colour
                 },
+            )?)
+        } else if spontaneous {
+            Some(Pattern::new(
+                display.x + 32,
+                display.y + 32,
+                960,
+                540,
+                Fill::Second,
             )?)
         } else if pattern_only || flag(&args, "--animate") || rates.paces.is_some() {
             Some(Pattern::new(
@@ -323,9 +362,10 @@ mod bench {
                 );
             }
         }
-        // What the encoder's event watcher wakes, and the loop waits on.
+        // What the encoder's capture thread and event watcher wake, and the
+        // loop waits on.
         let wake = EncoderWake::new()?;
-        let waker = (!limits.poll_events).then_some(wake.waker());
+        let waker = wake.waker();
         let options = limits.options;
         let building = Instant::now();
         let mut encoder = if limits.backend {
@@ -421,7 +461,13 @@ mod bench {
             return Err(format!("encoder GOP is {} frames, under 5 s", stats.gop).into());
         }
         let elapsed = start.elapsed().as_secs_f64();
-        report(&tally, &stats, &rates, &limits, elapsed)
+        let reported = report(&tally, &stats, &rates, &limits, elapsed);
+        // The encoder's teardown: its capture thread's join, the encoder's
+        // shutdown and its event watcher's join.
+        let dropping = Instant::now();
+        drop(coder);
+        println!("drop_ms={:.3}", dropping.elapsed().as_secs_f64() * 1e3);
+        reported
     }
 
     /// The cycles this thread has run, counted only while it runs, so a
@@ -566,8 +612,6 @@ mod bench {
         backend: bool,
         /// Pace on the even grid, never anchored on a present.
         grid: bool,
-        /// Build the encoder without its event watcher: poll its events.
-        poll_events: bool,
         max_width: u32,
         max_height: u32,
         bitrate: u32,
@@ -580,8 +624,8 @@ mod bench {
         /// Copy each new picture out of the duplication before converting
         /// it, as before direct conversion.
         copy_capture: bool,
-        /// The encoder's profile, quality against speed, scenario and GPU
-        /// priority, and the video processor's usage.
+        /// The encoder's profile, quality against speed, scenario, GPU
+        /// priority and polled events, and the video processor's usage.
         options: EncoderOptions,
     }
     impl Limits {
@@ -661,6 +705,7 @@ mod bench {
                     }
                 },
                 gpu_priority: flag(args, "--gpu-priority"),
+                poll_events,
                 vp_usage: match option(args, "--vp-usage") {
                     None => VpUsage::Auto,
                     Some("quality") => VpUsage::Quality,
@@ -699,7 +744,6 @@ mod bench {
             let limits = Self {
                 backend,
                 grid,
-                poll_events,
                 max_width,
                 max_height,
                 bitrate,
@@ -776,12 +820,22 @@ mod bench {
             }
         }
 
-        /// When an armed tick that waits on the encoder's input request is
-        /// asked again, if the request does not wake the loop first.
+        /// When the loop needs the encoder again if nothing wakes it first;
+        /// `None`: at its next tick.
         fn idle_until(&self) -> Option<Instant> {
             match self {
-                Self::Encoder(encoder) => encoder.idle_until(),
+                Self::Encoder(encoder) => encoder.idle_until(None),
                 Self::Backend(backend) => backend.capture_idle_until(None),
+            }
+        }
+
+        /// How often an armed tick is asked again, for a capture that
+        /// cannot wake the loop: never for the encoder, whose capture
+        /// thread does.
+        fn capture_poll(&self) -> Option<Duration> {
+            match self {
+                Self::Encoder(_) => None,
+                Self::Backend(backend) => backend.capture_poll(),
             }
         }
     }
@@ -817,6 +871,11 @@ mod bench {
         /// present to the submit that took it, in milliseconds.
         submits: u64,
         present_waits: Vec<f64>,
+        /// The same wait for the dated pictures presented at least
+        /// `HOT_WINDOW` after the dated picture before (the first after a
+        /// still spell), and the last dated present.
+        after_still_waits: Vec<f64>,
+        last_present: Option<Instant>,
         /// The presents the dated pictures covered beyond one each.
         coalesced: u64,
         /// From the start of the paced loop to the first access unit.
@@ -937,11 +996,14 @@ mod bench {
     /// Each step runs the run's seconds at its pace, as the host's capture
     /// worker paces: a submission on each tick, every ready unit drained in
     /// between, until `--frames` units are out. A tick whose capture found
-    /// nothing new stays armed, as thread C keeps it: it is asked again every
-    /// `DRAIN_POLL` within `HOT_WINDOW` of the last new picture or while the
-    /// encoder holds units, and once a period otherwise. A tick whose submit
-    /// waits for the encoder's input request is asked again as the request
-    /// wakes the loop, or at the encoder's `idle_until`.
+    /// nothing new stays armed, as thread C keeps it: the encoder's capture
+    /// thread wakes the loop for the next picture, and the encoder names
+    /// when it needs the loop otherwise (`idle_until`); a pulled capture is
+    /// asked again every `DRAIN_POLL` within `HOT_WINDOW` of the last new
+    /// picture or while the encoder holds units, and once a period
+    /// otherwise. A tick whose submit waits for the encoder's input request
+    /// is asked again as the request wakes the loop, or at the encoder's
+    /// `idle_until`.
     fn paced(run: &Run<'_>, coder: &mut Coder, sinks: &mut Sinks, tally: &mut Tally) -> Result {
         let Run {
             rates,
@@ -955,8 +1017,8 @@ mod bench {
         for (step, &pace) in steps.iter().enumerate() {
             let step_start = Instant::now();
             pacer.set_pace(pace, step_start);
-            // An armed tick's next poll, and until when polls come every
-            // `DRAIN_POLL`.
+            // An armed tick's next poll, for a pulled capture, and until when
+            // polls come at its poll interval.
             let mut poll_due: Option<Instant> = None;
             let mut hot_until = step_start;
             while step_start.elapsed() < Duration::from_secs(rates.seconds)
@@ -1092,6 +1154,13 @@ mod bench {
                             let waited = now.saturating_duration_since(presented.at);
                             tally.present_waits.push(waited.as_secs_f64() * 1e3);
                             tally.coalesced += u64::from(presented.presents.saturating_sub(1));
+                            let after_still = tally.last_present.is_none_or(|last| {
+                                presented.at.saturating_duration_since(last) >= HOT_WINDOW
+                            });
+                            if after_still {
+                                tally.after_still_waits.push(waited.as_secs_f64() * 1e3);
+                            }
+                            tally.last_present = Some(presented.at);
                         }
                         // As thread C: a dated picture anchors the next tick,
                         // unless the grid is the arm measured.
@@ -1105,15 +1174,20 @@ mod bench {
                     } else {
                         tally.polls += 1;
                         let done = Instant::now();
-                        // A submit that waits for the encoder's input request
-                        // names its own retry, and the request wakes the loop.
-                        poll_due = coder.idle_until().is_none().then(|| {
-                            if done < hot_until || coder.pending() > 0 {
-                                done + DRAIN_POLL
-                            } else {
-                                done + DRAIN_POLL.max(pacer.period())
-                            }
-                        });
+                        // As thread C: a source that names when it needs the
+                        // loop, or wakes it, is not polled.
+                        poll_due = coder
+                            .idle_until()
+                            .is_none()
+                            .then(|| coder.capture_poll())
+                            .flatten()
+                            .map(|poll| {
+                                if done < hot_until || coder.pending() > 0 {
+                                    done + poll
+                                } else {
+                                    done + poll.max(pacer.period())
+                                }
+                            });
                     }
                 }
                 // Wait as thread C waits: for the next tick or armed poll, a
@@ -1176,7 +1250,7 @@ mod bench {
                 mean(&tally.drain_kcycles),
             );
             println!(
-                "capture={} vp_quality={} repeats={} repeat_p50_us={:.1} repeat_mean_us={:.1}",
+                "capture={} vp_quality={} repeats={} repeat_p50_us={:.1} repeat_mean_us={:.1} acquires={} acquires_per_s={:.1}",
                 if stats.direct_capture {
                     "direct"
                 } else {
@@ -1186,6 +1260,8 @@ mod bench {
                 stats.repeats,
                 median(&tally.repeat_us),
                 mean(&tally.repeat_us),
+                stats.acquires,
+                stats.acquires as f64 / elapsed,
             );
             if limits.gpu_time {
                 let spans = |repeat: bool| -> Vec<f64> {
@@ -1290,6 +1366,13 @@ mod bench {
             tally.coalesced as f64 / elapsed,
         );
         println!(
+            "after_still_dated={} after_still_present_to_submit_p50_ms={:.3} after_still_present_to_submit_p95_ms={:.3} after_still_present_to_submit_max_ms={:.3}",
+            tally.after_still_waits.len(),
+            quantile(&tally.after_still_waits, 50),
+            quantile(&tally.after_still_waits, 95),
+            quantile(&tally.after_still_waits, 100),
+        );
+        println!(
             "dwell_p50_ms={:.3} dwell_p95_ms={:.3} present_to_output_samples={} present_to_output_p50_ms={:.3} present_to_output_p95_ms={:.3}",
             quantile(&tally.dwell_ms, 50),
             quantile(&tally.dwell_ms, 95),
@@ -1371,10 +1454,16 @@ mod pattern {
         /// A still page of text, painted once and again only when Windows
         /// asks the window to repaint.
         Text,
+        /// One colour, painted once and again only when Windows asks the
+        /// window to repaint.
+        Still,
+        /// A colour that changes, and a counter, once a second.
+        Second,
     }
 
     /// A topmost window at physical desktop coordinates: a changing colour
-    /// or fresh noise every display refresh, or a still page of text.
+    /// or fresh noise every display refresh, a still page of text or
+    /// colour, or a colour that changes once a second.
     pub struct Pattern {
         stop: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
@@ -1425,17 +1514,27 @@ mod pattern {
                     .flatten();
                 let mut frame = 0u32;
                 let mut message = MSG::default();
-                // The text is painted at first, and after each repaint the
-                // window's own class made.
+                // The text or colour is painted at first, and after each
+                // repaint the window's own class made.
                 let mut stale = true;
+                let mut changed = std::time::Instant::now();
                 while !done.load(Ordering::Acquire) {
                     while PeekMessageW(&mut message, Some(window), 0, 0, PM_REMOVE).as_bool() {
                         stale |= message.message == WM_PAINT;
                         let _ = DispatchMessageW(&message);
                     }
-                    if let Some(text) = &text {
+                    let once_a_second = fill == Fill::Second;
+                    if text.is_some() || fill == Fill::Still || once_a_second {
+                        if once_a_second && changed.elapsed() >= std::time::Duration::from_secs(1) {
+                            changed = std::time::Instant::now();
+                            frame = frame.wrapping_add(1);
+                            stale = true;
+                        }
                         if std::mem::take(&mut stale) {
-                            text.paint(dc);
+                            match &text {
+                                Some(text) => text.paint(dc),
+                                None => paint_colour(dc, width, height, frame),
+                            }
                         }
                         // Nothing to present: DwmFlush, which waits for
                         // the next present, may not wait on a still screen.
@@ -1450,26 +1549,7 @@ mod pattern {
                         }
                         continue;
                     }
-                    let brush = CreateSolidBrush(COLORREF(
-                        ((frame * 3) & 255)
-                            | (((frame * 5) & 255) << 8)
-                            | (((frame * 7) & 255) << 16),
-                    ));
-                    let _ = FillRect(
-                        dc,
-                        &RECT {
-                            left: 0,
-                            top: 0,
-                            right: width,
-                            bottom: height,
-                        },
-                        brush,
-                    );
-                    let _ = DeleteObject(brush.into());
-                    let text: Vec<u16> = format!("Unique desktop presentation {frame}")
-                        .encode_utf16()
-                        .collect();
-                    let _ = TextOutW(dc, 32, 32, &text);
+                    paint_colour(dc, width, height, frame);
                     frame = frame.wrapping_add(1);
                     if DwmFlush().is_err() {
                         break;
@@ -1495,6 +1575,35 @@ mod pattern {
             if let Some(thread) = self.thread.take() {
                 let _ = thread.join();
             }
+        }
+    }
+
+    /// Fill the window's `width` × `height` with `frame`'s colour, and
+    /// write its number.
+    unsafe fn paint_colour(dc: HDC, width: i32, height: i32, frame: u32) {
+        let brush = unsafe {
+            CreateSolidBrush(COLORREF(
+                (frame.wrapping_mul(3) & 255)
+                    | ((frame.wrapping_mul(5) & 255) << 8)
+                    | ((frame.wrapping_mul(7) & 255) << 16),
+            ))
+        };
+        let text: Vec<u16> = format!("Unique desktop presentation {frame}")
+            .encode_utf16()
+            .collect();
+        unsafe {
+            let _ = FillRect(
+                dc,
+                &RECT {
+                    left: 0,
+                    top: 0,
+                    right: width,
+                    bottom: height,
+                },
+                brush,
+            );
+            let _ = DeleteObject(brush.into());
+            let _ = TextOutW(dc, 32, 32, &text);
         }
     }
 
