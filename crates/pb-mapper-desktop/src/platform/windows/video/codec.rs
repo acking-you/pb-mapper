@@ -859,7 +859,7 @@ impl Drop for Codec {
 /// Take one from a count only thread C takes from, so that a count it read
 /// above zero stays so until it does.
 fn take(count: &AtomicU32) {
-    let _ = count.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+    let _ = count.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
 }
 
 /// Why the encoder's events failed: thread C's next drain returns it, and
