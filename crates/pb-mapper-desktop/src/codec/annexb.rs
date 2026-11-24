@@ -242,15 +242,19 @@ impl ParameterSets {
         }
         Ok(())
     }
+    /// The kept H.264 SPS as the encoder wrote it, before any rewrite;
+    /// empty before one, and for H.265.
+    pub(crate) fn sps_written(&self) -> &[u8] {
+        match self.kind {
+            VideoCodec::H264 if self.sps_source.is_empty() => &self.sps,
+            VideoCodec::H264 => &self.sps_source,
+            VideoCodec::H265 | VideoCodec::Jpeg => &[],
+        }
+    }
     /// Keep an H.264 SPS, rewritten where it leaves reordering open: read
     /// only when it differs from the last one the encoder wrote.
     fn observe_sps(&mut self, sps: &[u8]) {
-        let written = if self.sps_source.is_empty() {
-            &self.sps
-        } else {
-            &self.sps_source
-        };
-        if written.as_slice() == sps {
+        if self.sps_written() == sps {
             return;
         }
         #[cfg(test)]

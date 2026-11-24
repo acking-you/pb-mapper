@@ -131,6 +131,17 @@ pub struct EncoderOpened {
     pub sps_profile: Option<u8>,
     /// What that SPS said about output reordering, and what is sent.
     pub sps_reorder: Option<SpsReorder>,
+    /// That SPS NAL unit as the encoder wrote it, before any rewrite: the
+    /// one to compare with what is sent. Empty before it wrote one.
+    pub sps: Vec<u8>,
+}
+
+/// Bytes as lowercase hex, for a log line.
+struct Hex<'a>(&'a [u8]);
+impl std::fmt::Display for Hex<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+    }
 }
 
 pub struct Encoded {
@@ -535,6 +546,7 @@ impl Encoder {
             sps_reorder = %opened
                 .sps_reorder
                 .map_or_else(|| "unknown".to_owned(), |reorder| reorder.to_string()),
+            sps = %Hex(&opened.sps),
             gpu_priority = options.gpu_priority,
         );
         let converter = Converter::new(
@@ -753,7 +765,7 @@ impl Encoder {
                 &CODECAPI_AVEncCommonMeanBitRate,
                 &VARIANT::from(rate.bitrate),
             )
-            .map_err(|failure| codec_error(self.codec.kind, failure))?;
+            .map_err(|failure| self.codec_failed(failure))?;
         self.bitrate = rate.bitrate;
         Ok(())
     }
@@ -770,16 +782,16 @@ impl Encoder {
     /// A stuck pipeline fails, blamed on the encoder or on the capture.
     pub fn drain(&mut self) -> Result<Option<Encoded>> {
         self.check_thread()?;
-        let kind = self.codec.kind;
         let ready = self
             .collect()
-            .map_err(|failure| codec_error(kind, failure))?;
+            .map_err(|failure| self.codec_failed(failure))?;
         if self.stats.submitted == 0 && self.created.elapsed() > FIRST_SUBMIT_WAIT {
-            return Err(unsubmitted(
-                kind,
-                self.codec.input_requested(),
-                self.latest.is_some(),
-            ));
+            let (asked, image) = (self.codec.input_requested(), self.latest.is_some());
+            let failure = unsubmitted(self.codec.kind, asked, image);
+            if encoder_blamed(asked, image) {
+                self.codec.failed(&failure);
+            }
+            return Err(failure);
         }
         if self
             .pending
@@ -787,9 +799,17 @@ impl Encoder {
             .is_some_and(|(_, at, _)| at.elapsed() > OUTPUT_WAIT)
             || self.idle_without_request()
         {
-            return Err(codec_error(kind, error("hardware video encoder stalled")));
+            return Err(self.codec_failed(error("hardware video encoder stalled")));
         }
         Ok(ready)
+    }
+
+    /// `failure`, the hardware encoder's own, as `codec_error` makes it.
+    /// One of an H.264 encoder built in a High profile, before its first
+    /// output, turns High off for the process (`Codec::failed`).
+    fn codec_failed(&self, failure: std::io::Error) -> std::io::Error {
+        self.codec.failed(&failure);
+        codec_error(self.codec.kind, failure)
     }
 
     /// An encoder that holds nothing asks for its next input at once. One
@@ -830,11 +850,24 @@ impl Encoder {
                 }
                 let bytes = sample_bytes(&sample)?;
                 let (bytes, keyframe) = self.codec.annex_b(bytes)?;
-                if self.stats.opened.sps_reorder.is_none() {
+                if self.stats.opened.sps_reorder.is_none()
+                    && let Some(reorder) = self.codec.sps_reorder()
+                {
                     // An encoder whose media type carried no SPS writes
-                    // its first in band.
-                    self.stats.opened.sps_reorder = self.codec.sps_reorder();
-                    self.stats.opened.sps_profile = self.codec.sps_profile();
+                    // its first in band: logged once, as the encoder's
+                    // opening could not say it.
+                    let opened = &mut self.stats.opened;
+                    opened.sps_reorder = Some(reorder);
+                    opened.sps_profile = self.codec.sps_profile();
+                    opened.sps = self.codec.sps_written().to_vec();
+                    tracing::info!(
+                        target: "pb_mapper_desktop::session",
+                        event = "desktop_video_encoder_sps",
+                        encoder = %self.codec.name,
+                        sps_profile = ?opened.sps_profile,
+                        sps_reorder = %reorder,
+                        sps = %Hex(&opened.sps),
+                    );
                 }
                 let now = Instant::now();
                 let previous = self.last_output.replace(now);
@@ -942,17 +975,16 @@ impl Encoder {
                 .SetSampleDuration((duration.as_nanos() / 100) as i64)
                 .map_err(error)?;
         }
-        let kind = self.codec.kind;
         if self.force_keyframe {
             self.codec
                 .property(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32))
-                .map_err(|failure| codec_error(kind, failure))?;
+                .map_err(|failure| self.codec_failed(failure))?;
         }
         unsafe {
             self.codec
                 .transform
                 .ProcessInput(self.codec.input_id, &sample, 0)
-                .map_err(|failure| codec_error(kind, error(failure)))?;
+                .map_err(|failure| self.codec_failed(error(failure)))?;
         }
         self.codec.input_taken();
         if let Some(source) = &mut self.source {
@@ -1112,11 +1144,17 @@ fn counter_instant(ticks: i64, now: i64, frequency: i64, at: Instant) -> Option<
 /// the encoder is stuck, a codec error. The probe encodes no frame, so this is
 /// where an H.265 encoder that never asks for input is turned off.
 fn unsubmitted(kind: VideoCodec, asked: bool, image: bool) -> std::io::Error {
-    if asked && !image {
-        error("desktop capture delivered no image")
-    } else {
+    if encoder_blamed(asked, image) {
         codec_error(kind, error("hardware video encoder stalled"))
+    } else {
+        error("desktop capture delivered no image")
     }
+}
+
+/// Whether an encoder that took no input in its first `FIRST_SUBMIT_WAIT`
+/// is itself stuck: it never `asked` for input, or had an `image` to take.
+fn encoder_blamed(asked: bool, image: bool) -> bool {
+    !asked || image
 }
 
 /// A DXGI device manager over `device`, which the encoder's own threads use.

@@ -12,9 +12,13 @@
 //! H.264 is asked for in a High profile with CABAC, which codes the same
 //! picture in fewer bits than Baseline's CAVLC, where nothing rules it out:
 //! an encoder that implements the B-frame count and does not take 0, an
-//! earlier High encoder of this process that reordered its output
+//! earlier High encoder of this process that failed in it
 //! (`H264_HIGH_FAILED`), or an output type that refuses it. Baseline is
-//! the fallback.
+//! the fallback, which every H.264 encoder took before High was asked for.
+//! A High encoder that takes its types and then will not start, or takes
+//! B-frames back with them, is built again at once in Baseline; one that
+//! fails before its first output, or reorders one, fails that capture,
+//! whose retry builds Baseline.
 use super::{EncoderOpened, EncoderOptions, H264Profile, MAX_IN_FLIGHT};
 use crate::{
     Result, VideoCodec, Waker,
@@ -69,9 +73,12 @@ const WATCHER_EXIT: Duration = Duration::from_millis(100);
 /// switch, a recovery or a new size builds again, get no watcher and have
 /// their events polled, so that at most one is left behind per process.
 static WATCHER_STUCK: AtomicBool = AtomicBool::new(false);
-/// An H.264 encoder built in a High profile reordered its output in this
-/// process: later H.264 encoders, which the capture's retry builds at once,
-/// are built in Baseline, which has no B-frames.
+/// An H.264 encoder built in a High profile failed in it in this process:
+/// it took its types and would not start, took B-frames back, failed
+/// before its first output or reordered one. Later H.264 encoders, which
+/// the capture's retry builds at once, are built in Baseline, which has no
+/// B-frames. It lasts as long as the process that owns the encoder: the
+/// app, or behind the helper one connection's capture worker.
 static H264_HIGH_FAILED: AtomicBool = AtomicBool::new(false);
 
 /// The H.264 output profiles a High build tries, in order: Constrained High
@@ -118,16 +125,39 @@ fn pick_h264_profile(
     }
 }
 
-/// An H.264 encoder built in a High profile reordered its output: later
-/// H.264 encoders of this process are built in Baseline.
-fn h264_high_reordered(encoder: &str) {
-    if !H264_HIGH_FAILED.swap(true, Ordering::AcqRel) {
+/// `encoder`, built in a High H.264 profile, failed in it (`why`): set
+/// `latch` (`H264_HIGH_FAILED`), so that later H.264 encoders of this
+/// process are built in Baseline. Whether this turned High off; only that
+/// first failure is logged.
+fn turn_high_off(latch: &AtomicBool, encoder: &str, why: &dyn std::fmt::Display) -> bool {
+    let first = !latch.swap(true, Ordering::AcqRel);
+    if first {
         tracing::warn!(
             target: "pb_mapper_desktop::session",
             event = "desktop_h264_high_failed",
             encoder,
-            "the encoder reordered its output in a High profile; H.264 is Baseline for the rest of this process",
+            detail = %why,
+            "an H.264 encoder failed in a High profile; H.264 is Baseline for the rest of this process",
         );
+    }
+    first
+}
+
+/// Why an activation failed, and whether it failed in a High H.264 profile
+/// the encoder had taken.
+struct Refused {
+    failure: std::io::Error,
+    /// The encoder took a High profile's types, then would not start
+    /// streaming in them or took B-frames back with them: `Codec::new`
+    /// turns High off and builds it again in Baseline.
+    in_high: bool,
+}
+impl From<std::io::Error> for Refused {
+    fn from(failure: std::io::Error) -> Self {
+        Self {
+            failure,
+            in_high: false,
+        }
     }
 }
 
@@ -180,8 +210,8 @@ pub(super) struct Codec {
     /// The NAL unit ranges of the unit being sent, kept across units.
     nal_units: Vec<(usize, usize)>,
     pub(super) gop: u32,
-    /// An H.264 encoder built in a High profile: a reordered output turns
-    /// High off for the process.
+    /// An H.264 encoder built in a High profile: a reordered output, or a
+    /// failure before its first, turns High off for the process.
     high: bool,
     /// What it read back as it opened.
     pub(super) opened: EncoderOpened,
@@ -245,16 +275,34 @@ impl Codec {
         let mut failures = vec![];
         for activation in candidates {
             let name = activation_name(&activation);
-            match Self::activate(&activation, name.clone(), manager, settings, waker) {
+            let mut activated = Self::activate(&activation, name.clone(), manager, settings, waker);
+            if let Err(Refused {
+                failure,
+                in_high: true,
+            }) = &activated
+            {
+                // High is off for the process, as a reordered output turns
+                // it off, and this encoder is activated again, a new
+                // instance once the last is shut down, in Baseline.
+                turn_high_off(&H264_HIGH_FAILED, &name, failure);
+                failures.push(format!("{name} in High: {failure}"));
+                // SAFETY: a COM call on an activation this loop holds;
+                // the encoder it made was shut down as it dropped.
+                unsafe {
+                    let _ = activation.ShutdownObject();
+                }
+                activated = Self::activate(&activation, name.clone(), manager, settings, waker);
+            }
+            match activated {
                 Ok(mut codec) => {
                     codec.opened.vendor = adapter.VendorId;
                     return Ok(codec);
                 }
-                Err(e) => {
+                Err(Refused { failure, .. }) => {
                     unsafe {
                         let _ = activation.ShutdownObject();
                     }
-                    failures.push(format!("{name}: {e}"));
+                    failures.push(format!("{name}: {failure}"));
                 }
             }
         }
@@ -275,7 +323,7 @@ impl Codec {
         manager: &IMFDXGIDeviceManager,
         settings: EncoderSettings,
         waker: Option<&Waker>,
-    ) -> Result<Self> {
+    ) -> std::result::Result<Self, Refused> {
         let EncoderSettings {
             kind,
             width,
@@ -303,7 +351,7 @@ impl Codec {
                 .map_err(error)?;
             attrs.SetUINT32(&MF_LOW_LATENCY, 1).map_err(error)?;
             if attrs.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) == 0 {
-                return Err(error("hardware encoder does not accept D3D11 surfaces"));
+                return Err(error("hardware encoder does not accept D3D11 surfaces").into());
             }
             transform
                 .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)
@@ -353,7 +401,7 @@ impl Codec {
         // `collect`.
         let b_frames = codec.b_frames();
         if kind == VideoCodec::H265 && b_frames == BFrames::On {
-            return Err(error("B-frames could not be turned off"));
+            return Err(error("B-frames could not be turned off").into());
         }
         let _ = codec.property(
             &CODECAPI_AVEncCommonRateControlMode,
@@ -431,19 +479,16 @@ impl Codec {
             }
         }
         let Some(profile) = profile else {
-            return Err(refused.unwrap_or_else(|| error("no output profile to try")));
+            return Err(refused
+                .unwrap_or_else(|| error("no output profile to try"))
+                .into());
         };
-        unsafe {
-            codec
-                .transform
-                .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
-                .map_err(error)?;
-            codec
-                .transform
-                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
-                .map_err(error)?;
+        if let Err(failure) = codec.start(b_frames) {
+            return Err(Refused {
+                failure,
+                in_high: codec.high,
+            });
         }
-        codec.update_header()?;
         codec.opened = codec.read_back(profile, b_frames);
         // Its first input requests wait in its queue meanwhile. Only an
         // encoder that something waits on says how its events come: the
@@ -538,6 +583,7 @@ impl Codec {
             profile,
             sps_profile: self.parameter_sets.sps_profile(),
             sps_reorder: self.parameter_sets.sps_reorder(),
+            sps: self.parameter_sets.sps_written().to_vec(),
         }
     }
     /// What the encoder's H.264 SPS said about reordering, once it wrote
@@ -549,12 +595,50 @@ impl Codec {
     pub(super) fn sps_profile(&self) -> Option<u8> {
         self.parameter_sets.sps_profile()
     }
+    /// The encoder's own H.264 SPS, before any rewrite, once it wrote one.
+    pub(super) fn sps_written(&self) -> &[u8] {
+        self.parameter_sets.sps_written()
+    }
     /// The encoder reordered an output: an H.264 build in a High profile
     /// turns High off for the rest of the process.
     pub(super) fn reordered(&self) {
         if self.high {
-            h264_high_reordered(&self.name);
+            turn_high_off(&H264_HIGH_FAILED, &self.name, &"reordered its output");
         }
+    }
+    /// The encoder failed with `failure`. An H.264 build in a High profile
+    /// that has given no output yet turns High off for the rest of the
+    /// process, so that the capture's retry builds it in Baseline, which
+    /// worked before High was asked for. One that has given output fails
+    /// as any encoder does.
+    pub(super) fn failed(&self, failure: &std::io::Error) {
+        if self.high && self.collected == 0 {
+            turn_high_off(&H264_HIGH_FAILED, &self.name, failure);
+        }
+    }
+    /// Start streaming in the types the encoder took, and keep the
+    /// parameter sets its output type carries. In a High H.264 profile, an
+    /// encoder that took a B-frame count of 0 must still read 0 back: one
+    /// that took B-frames back with the profile is refused in it.
+    fn start(&mut self, b_frames: BFrames) -> Result<()> {
+        if self.high
+            && b_frames == BFrames::Off
+            && self
+                .value(&CODECAPI_AVEncMPVDefaultBPictureCount)
+                .is_some_and(|count| count > 0)
+        {
+            return Err(error("the encoder took B-frames back with a High profile"));
+        }
+        // SAFETY: COM calls on an interface this codec holds.
+        unsafe {
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
+                .map_err(error)?;
+            self.transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+                .map_err(error)?;
+        }
+        self.update_header()
     }
     /// Vendors accept a GOP setting and then clamp or ignore it, so only a
     /// value read back unchanged counts. Returns the GOP the encoder reports.
@@ -1118,6 +1202,32 @@ mod tests {
             [257, 100, 66],
             "Constrained High, High, Baseline"
         );
+    }
+
+    /// A High encoder's failure turns High off once, and every later pick
+    /// is Baseline, whatever the encoder says of B-frames; an activation
+    /// that failed before its High types were taken is no such failure.
+    #[test]
+    fn a_failure_in_high_leaves_every_later_h264_encoder_in_baseline() {
+        let latch = AtomicBool::new(false);
+        assert_eq!(
+            pick_h264_profile(
+                H264Profile::High,
+                latch.load(Ordering::Acquire),
+                BFrames::Off
+            ),
+            &H264_HIGH
+        );
+        assert!(turn_high_off(&latch, "encoder", &"would not start"));
+        assert!(!turn_high_off(&latch, "encoder", &"stalled"), "only once");
+        for b_frames in [BFrames::Off, BFrames::Unsupported] {
+            assert_eq!(
+                pick_h264_profile(H264Profile::High, latch.load(Ordering::Acquire), b_frames),
+                &H264_BASE
+            );
+        }
+        let refused = Refused::from(error("output media type"));
+        assert!(!refused.in_high);
     }
 
     /// A Media Foundation event queue standing in for an encoder's event

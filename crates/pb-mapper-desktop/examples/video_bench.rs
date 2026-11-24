@@ -47,7 +47,10 @@
 //!   display remoting, which a session does not.
 //! - `--gpu-priority`: raise the capture device's GPU thread priority and
 //!   the process's GPU scheduling class to `HIGH` while the encoder lives,
-//!   which a session does not. Run it beside a GPU-saturating 3D load.
+//!   which a session does not. Run it beside a GPU-saturating 3D load, from
+//!   an elevated prompt for the device priority, with
+//!   `RUST_LOG=pb_mapper_desktop::session=info` to see what each call did
+//!   (`desktop_gpu_priority`).
 //! - `--dump-source <path>`: write the NV12 picture each submit gave the
 //!   encoder, read back from the GPU (`height` luma rows, then `height / 2`
 //!   rows of interleaved chroma, `width` bytes each, at the encoded size
@@ -59,12 +62,17 @@
 //!   time the encoder in a run without it. Not with `--backend`.
 //!
 //! The encoder's read-back of its settings is printed as an
-//! `encoder_opened` line (`desktop_video_encoder_opened`'s fields), and each
+//! `encoder_opened` line (`desktop_video_encoder_opened`'s fields, and the
+//! encoder's own H.264 SPS in hex as `encoder_sps`, to compare with the SPS
+//! `--output` holds, which is the one sent), and each
 //! unit's dwell in the encoder, submit to output, as `dwell_p50_ms` and
 //! `dwell_p95_ms`; driving the encoder, so is the time from each dated
 //! present to the drain that collected its unit (`present_to_output_*`,
 //! which pairs units in order, so a run that discards a late unit, as
-//! `--pause-ms` does, pairs the later ones wrongly).
+//! `--pause-ms` does, pairs the later ones wrongly). With `RUST_LOG` set,
+//! as `pb_mapper_desktop::session=info`, the host's own events go to
+//! stderr: `desktop_video_encoder_opened`, `desktop_h264_high_failed`,
+//! `desktop_gpu_priority` and the rest.
 //!
 //! The loop waits as thread C does: until the next tick, the next poll of an
 //! armed tick or of a polled encoder holding units (or of one with an
@@ -222,6 +230,13 @@ mod bench {
     const CONTEXT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
     pub fn run() -> Result {
+        // The host's own events on stderr, as `RUST_LOG` selects them;
+        // errors only without it.
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .init();
         let args: Vec<String> = std::env::args().skip(1).collect();
         let rates = Rates::parse(&args)?;
         let display = displays()?.into_iter().next().ok_or("no display")?;
@@ -1110,7 +1125,7 @@ mod bench {
             );
             let opened = &stats.opened;
             println!(
-                "encoder_opened vendor={:#06x} profile={} sps_profile={} sps_reorder={} cabac={} b_frames={} rate_control={} quality_vs_speed={} scenario={}",
+                "encoder_opened vendor={:#06x} profile={} sps_profile={} sps_reorder={} cabac={} b_frames={} rate_control={} quality_vs_speed={} scenario={} encoder_sps={}",
                 opened.vendor,
                 opened.profile,
                 or_none(opened.sps_profile),
@@ -1120,6 +1135,15 @@ mod bench {
                 or_none(opened.rate_control),
                 or_none(opened.quality_vs_speed),
                 or_none(opened.scenario),
+                if opened.sps.is_empty() {
+                    "none".to_owned()
+                } else {
+                    opened
+                        .sps
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect()
+                },
             );
         }
         if limits.backend {
