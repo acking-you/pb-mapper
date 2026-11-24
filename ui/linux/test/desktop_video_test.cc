@@ -2,9 +2,10 @@
 // Flutter: libpb_mapper_ffi.so's test source (feature desktop-test-source)
 // plays them into a video source, the module pulls, decodes and publishes
 // them, and a thread standing in for Flutter's raster thread acquires each
-// picture, which is its presentation receipt, and uploads it in a GL ES
-// context with no surface (EGL), as Flutter's texture does. It checks the
-// decoder state rules the runner shares with Windows and Android, and
+// picture, which is its presentation receipt, and converts it to RGBA with
+// the runner's GL code (desktop_video_gl.cc) in a GL ES context with no
+// surface (EGL). It checks the decoder state rules the runner shares with
+// Windows and Android and the conversion against GStreamer's own, and
 // measures how many pictures a second each size decodes and presents and
 // what each thread's CPU costs per picture. Run by
 // scripts/test/linux-desktop-video.sh, which builds the library and the
@@ -22,6 +23,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -30,12 +32,14 @@
 #include <functional>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "desktop_video_gl.h"
 #include "desktop_video_module.h"
 
 namespace {
@@ -170,6 +174,17 @@ class GlContext {
   EGLContext context_ = EGL_NO_CONTEXT;
 };
 
+// The renderer and version behind a context (llvmpipe on CI), read before
+// the raster thread makes it current.
+std::string Renderer(GlContext* gl) {
+  if (!gl->MakeCurrent()) return "a context that cannot be made current";
+  const auto* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
+  const auto* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+  const std::string text = std::string(renderer ? renderer : "an unnamed renderer") + ", " + (version ? version : "");
+  gl->Release();
+  return text;
+}
+
 // The calling thread's CPU time so far, in microseconds.
 uint64_t ThreadCpuUs() {
   struct rusage usage {};
@@ -261,9 +276,48 @@ std::string CpuPerPicture(const std::map<long, ThreadTime>& before, const std::m
   return text;
 }
 
+// Whether an RGBA picture is more than one colour, as the test pattern is.
+bool Varied(const std::vector<uint8_t>& rgba) {
+  for (size_t i = 4; i + 3 < rgba.size(); i += 4) {
+    if (std::abs(rgba[i] - rgba[0]) > 8 || std::abs(rgba[i + 1] - rgba[1]) > 8 || std::abs(rgba[i + 2] - rgba[2]) > 8) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The peak signal-to-noise ratio of two RGBA pictures' colour, in dB.
+double Psnr(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+  if (a.size() != b.size() || a.empty()) return 0;
+  double squares = 0;
+  size_t samples = 0;
+  for (size_t i = 0; i + 3 < a.size(); i += 4) {
+    for (size_t c = 0; c < 3; ++c) {
+      const double difference = static_cast<double>(a[i + c]) - static_cast<double>(b[i + c]);
+      squares += difference * difference;
+      ++samples;
+    }
+  }
+  if (squares == 0) return 99;
+  return 10 * std::log10(255.0 * 255.0 * static_cast<double>(samples) / squares);
+}
+
+// What the conversion of one picture gave, checked on the raster thread.
+struct Verification {
+  bool done = false;
+  PbVideoPlanes planes{};
+  // GL_TEXTURE_2D, RGBA8 (where GL ES 3.1 can say), the picture's size.
+  bool texture = false;
+  std::string texture_note;
+  // Against GStreamer's converter, for a picture in system memory.
+  bool compared = false;
+  double psnr = 0;
+  bool snapshot_varied = false, still_varied = false;
+};
+
 // Flutter's raster thread: acquires the newest picture whenever the module
-// says there is one, keeps it until the next, and uploads it into a GL
-// texture as FlPixelBufferTexture's populate does.
+// says there is one, keeps it until the next, and converts it into the RGBA
+// texture with the runner's GL code, as the texture's populate does.
 class Raster {
  public:
   Raster(const PbVideoModule* module, GlContext* gl) : module_(module), gl_(gl) {}
@@ -322,8 +376,21 @@ class Raster {
   int pictures() const { return pictures_; }
   // This thread's CPU time so far (getrusage), in microseconds.
   uint64_t cpu_us() const { return cpu_us_; }
-  // Whether its GL context was current and every upload succeeded.
-  bool uploaded() const { return gl_ready_ && gl_errors_ == 0; }
+  // Whether its GL context was current and every picture converted.
+  bool converted() const { return gl_ready_ && convert_failures_ == 0; }
+  std::string failure() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return failure_;
+  }
+  // Checks the conversion of the next picture.
+  Verification Verify(milliseconds limit) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    verification_ = Verification{};
+    verify_ = true;
+    verified_.wait_for(lock, limit, [this] { return verification_.done; });
+    verify_ = false;
+    return verification_;
+  }
   // The size of the picture shown last, and whether it has content.
   void Last(uint32_t* width, uint32_t* height, bool* content) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -336,7 +403,7 @@ class Raster {
   void Run() {
     pthread_setname_np(pthread_self(), "raster");
     gl_ready_ = gl_->MakeCurrent();
-    GLuint texture = 0;
+    std::unique_ptr<pb_video::VideoGl> converter(gl_ready_ ? new pb_video::VideoGl(module_) : nullptr);
     while (true) {
       {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -346,20 +413,36 @@ class Raster {
       }
       PbVideoPicture* picture = module_->acquire(decoder_);
       if (!picture) continue;
-      uint32_t width = 0, height = 0;
-      const uint8_t* rgba = module_->pixels(picture, &width, &height);
-      if (gl_ready_ && rgba) {
-        if (texture == 0) glGenTextures(1, &texture);
-        glBindTexture(GL_TEXTURE_2D, texture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, static_cast<GLsizei>(width), static_cast<GLsizei>(height), 0, GL_RGBA,
-                     GL_UNSIGNED_BYTE, rgba);
-        glFlush();
-        if (glGetError() != GL_NO_ERROR) ++gl_errors_;
+      if (picture == shown_) {
+        module_->release(picture);
+        continue;
       }
-      // The test pattern is never one colour.
-      bool content = false;
-      for (size_t i = 4; rgba && !content && i < static_cast<size_t>(width) * height * 4; i += 4099 * 4) {
-        content = memcmp(rgba, rgba + i, 3) != 0;
+      PbVideoPlanes planes{};
+      module_->describe(picture, &planes);
+      std::string failure;
+      const bool converted = converter && converter->Convert(picture, &failure);
+      if (converter && converter->TakeDmabufRefusal()) module_->refuse_dmabuf(decoder_);
+      uint32_t name = 0, width = 0, height = 0;
+      if (converted && !converter->Texture(&name, &width, &height, &failure)) name = 0;
+      if (!converted || name == 0) ++convert_failures_;
+      // The test pattern is never one colour: its luma varies, read where
+      // it is in memory (a dma-buf's is checked by reading the texture).
+      bool content = converted && planes.dmabuf;
+      const PbVideoPlane& luma = planes.planes[0];
+      for (size_t row = 1; !planes.dmabuf && luma.data && luma.width && !content && row < luma.height; row += 97) {
+        content = luma.data[row * luma.stride + (row * 7) % luma.width] != luma.data[0];
+      }
+      bool verify = false;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        verify = verify_ && !verification_.done;
+        if (!converted && failure_.empty()) failure_ = failure;
+      }
+      if (verify && converted) {
+        Verification checked = Inspect(converter.get(), picture, planes, name, width, height);
+        std::lock_guard<std::mutex> lock(mutex_);
+        verification_ = checked;
+        verified_.notify_all();
       }
       if (shown_) module_->release(shown_);
       shown_ = picture;
@@ -370,14 +453,73 @@ class Raster {
       height_ = height;
       content_ = content;
     }
-    if (texture) glDeleteTextures(1, &texture);
+    converter.reset();
     if (gl_ready_) gl_->Release();
   }
+
+  // Reads the converted texture back and compares it with GStreamer's
+  // converter on the same picture; checks both snapshots.
+  Verification Inspect(pb_video::VideoGl* converter, PbVideoPicture* picture, const PbVideoPlanes& planes, GLuint name,
+                     uint32_t width, uint32_t height) {
+    Verification result;
+    result.done = true;
+    result.planes = planes;
+    result.texture = width == planes.width && height == planes.height && name != 0 && glIsTexture(name);
+    if (!epoxy_is_desktop_gl() && epoxy_gl_version() >= 31) {
+      GLint internal = 0, levelled_width = 0, levelled_height = 0;
+      glBindTexture(GL_TEXTURE_2D, name);
+      glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &internal);
+      glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &levelled_width);
+      glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &levelled_height);
+      glBindTexture(GL_TEXTURE_2D, 0);
+      result.texture = result.texture && internal == GL_RGBA8 && levelled_width == static_cast<GLint>(width) &&
+                       levelled_height == static_cast<GLint>(height) && glGetError() == GL_NO_ERROR;
+      result.texture_note = "internal format checked";
+    } else {
+      result.texture_note = "GL ES before 3.1 cannot say its internal format";
+    }
+    // The whole texture, rows top first as the picture's.
+    std::vector<uint8_t> converted(static_cast<size_t>(width) * height * 4);
+    GLuint framebuffer = 0;
+    glGenFramebuffers(1, &framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, name, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+      glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_BYTE,
+                   converted.data());
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &framebuffer);
+    if (!planes.dmabuf) {
+      std::vector<uint8_t> reference(converted.size());
+      uint32_t reference_width = 0, reference_height = 0;
+      result.compared = module_->snapshot(picture, planes.width, reference.data(), reference.size(), &reference_width,
+                                          &reference_height) == 0 &&
+                        reference_width == width && reference_height == height;
+      if (result.compared) result.psnr = Psnr(converted, reference);
+      std::vector<uint8_t> snapshot(320 * 320 * 4);
+      uint32_t snapshot_width = 0, snapshot_height = 0;
+      result.snapshot_varied = module_->snapshot(picture, 320, snapshot.data(), snapshot.size(), &snapshot_width,
+                                                 &snapshot_height) == 0 &&
+                               snapshot_width == 320 && Varied(snapshot);
+    }
+    std::vector<uint8_t> still;
+    uint32_t still_width = 0, still_height = 0;
+    result.still_varied =
+        converter->ReadBack(320, &still, &still_width, &still_height) && still_width == 320 && Varied(still);
+    return result;
+  }
+
   const PbVideoModule* module_;
   GlContext* const gl_;
   bool gl_ready_ = false;
-  std::atomic<int> gl_errors_{0};
+  std::atomic<int> convert_failures_{0};
   std::atomic<uint64_t> cpu_us_{0};
+  bool verify_ = false;
+  Verification verification_;
+  std::condition_variable verified_;
+  std::string failure_;
   PbVideoDecoder* decoder_ = nullptr;
   std::thread thread_;
   std::mutex mutex_;
@@ -514,8 +656,14 @@ int main(int argc, char** argv) {
   Check(has_gl, has_gl ? "a GL ES context with no surface stands in for Flutter's" : why.c_str());
   if (!has_gl) return 1;
 
+  // What this display samples in place, as the runner reads Flutter's.
+  PbVideoPresenter presenter{};
+  pb_video::ReadPresenter(gl.display(), &presenter);
+  printf("the GL context: %s; dma-buf import %s (%u layouts)\n", Renderer(&gl).c_str(),
+         presenter.dmabuf ? "yes" : "no", presenter.modifier_count);
+
   Raster raster(module, &gl);
-  PbVideoDecoder* decoder = module->create(&shims, Raster::Ready, &raster);
+  PbVideoDecoder* decoder = module->create(&shims, &presenter, Raster::Ready, &raster);
   Check(decoder != nullptr, "a decoder is created");
   if (!decoder) return 1;
   raster.Start(decoder);
@@ -572,8 +720,8 @@ int main(int argc, char** argv) {
     uint32_t width = 0, height = 0;
     bool content = false;
     raster.Last(&width, &height, &content);
-    Check(width == 1280 && height == 720 && content, "pictures are 1280x720 RGBA with content");
-    Check(raster.uploaded(), "the compositor's stand-in uploads every picture");
+    Check(width == 1280 && height == 720 && content, "pictures are converted to 1280x720 RGBA, with content");
+    Check(raster.converted(), raster.converted() ? "every picture is converted on the GPU" : raster.failure().c_str());
     std::lock_guard<std::mutex> lock(g_text_mutex);
     printf("  decoder: %s (%s)\n", g_decoder.c_str(), g_hardware ? "hardware" : "software");
     if (broken) {
@@ -583,6 +731,33 @@ int main(int argc, char** argv) {
     }
   }
   Check(stats().configurations == 1 && g_reports == 1 && g_failures == 0, "one configuration, reported, no failure");
+
+  printf("the GPU conversion\n");
+  {
+    const Verification checked = raster.Verify(milliseconds(3000));
+    const PbVideoStats now = stats();
+    const PbVideoPlanes& planes = checked.planes;
+    printf("  pictures: %s %s, Kr %.4f Kb %.4f, %s range; %s; %s\n",
+           planes.format == PB_VIDEO_FORMAT_NV12   ? "NV12"
+           : planes.format == PB_VIDEO_FORMAT_I420 ? "I420"
+                                                   : "unknown",
+           planes.dmabuf ? "in dma-bufs" : "in system memory", planes.kr, planes.kb,
+           planes.full_range ? "full" : "limited",
+           (now.flags & PB_VIDEO_STATS_CONVERTS) ? "through videoconvert" : "as the decoder gives them",
+           checked.texture_note.c_str());
+    Check(checked.done, "a picture is converted and read back");
+    Check(checked.texture, "the texture is GL_TEXTURE_2D, RGBA8, 1280x720");
+    if (!planes.dmabuf) {
+      printf("  PSNR against GStreamer's converter: %.1f dB\n", checked.psnr);
+      Check(checked.compared && checked.psnr >= 40, "it matches GStreamer's converter at 40 dB or more");
+      Check(checked.snapshot_varied, "the snapshot, scaled to 320 wide, has content");
+    }
+    Check(checked.still_varied, "the GPU's still, scaled to 320 wide, has content");
+    if (!g_hardware) {
+      Check(planes.format == PB_VIDEO_FORMAT_I420 && !planes.dmabuf && !(now.flags & PB_VIDEO_STATS_CONVERTS),
+            "the software decoder's I420 reaches the GPU with no videoconvert");
+    }
+  }
 
   printf("a discontinuity on a delta unit\n");
   const uint64_t configured = stats().configurations;
