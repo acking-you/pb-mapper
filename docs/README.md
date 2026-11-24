@@ -43,6 +43,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [Multi-device control benchmark](benchmarks/2026-11-18-multi-device-control/README.md) | `host_send_bench` before and after multi-viewer desktop rooms and coloured peer cursors |
 | [Desktop pipeline measurements](benchmarks/2026-11-24-desktop-pipeline/README.md) | `host_send_bench` and the slow-link suite before and after armed capture ticks and the receipt-rate estimator, and the A/B runs behind the withdrawn hand-off and thread-priority changes |
 | [Capture pacing measurements](benchmarks/2026-11-24-capture-pacing/README.md) | `host_send_bench` before and after present-anchored capture pacing, and the Windows and Mac device runs its effect still needs |
+| [Windows host kept awake](benchmarks/2026-11-24-win-keep-awake/README.md) | what a capture call's keep-awake touch costs, and the device checks still outstanding |
 
 ## Security
 

@@ -6,6 +6,9 @@ use crate::{Display, Result, error, platform::StillCapture};
 pub(crate) struct XcapJpeg;
 impl StillCapture for XcapJpeg {
     fn jpeg(&mut self, display: &Display) -> Result<Vec<u8>> {
+        // A JPEG session captures a still each tick: it keeps the display
+        // and the system awake as the encoder's submit does.
+        super::power::touch();
         let monitor = xcap::Monitor::all()
             .map_err(error)?
             .into_iter()
