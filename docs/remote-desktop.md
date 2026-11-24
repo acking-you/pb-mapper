@@ -1705,9 +1705,10 @@ that is not measured either.
 A Mac host encodes with VideoToolbox's low-latency rate control, which
 drops a picture it cannot fit into its budget at its highest QP.
 
-**The QP bound.** VideoToolbox's own bound is below 51, so a low-latency
-session sets `kVTCompressionPropertyKey_MaxAllowedFrameQP` to 51, the top of
-the 8-bit H.264 and H.265 range. The key is of macOS 12.0 and is looked up
+**The QP bound.** A low-latency session sets
+`kVTCompressionPropertyKey_MaxAllowedFrameQP` to 51, the top of the 8-bit
+H.264 and H.265 range; left to its own bound, low latency drops pictures
+that this bound lets it code. The key is of macOS 12.0 and is looked up
 at run time; an encoder that refuses it keeps its own bound. The fallback,
 standard rate control, does not set it. `macos_encoder_opened` logs whether
 the session took it (`max_qp`).
@@ -1718,7 +1719,7 @@ In a test loop on an M6, fresh full-screen noise at 1920x1080, 4 Mbit/s and
 120 FPS the bound likewise kept about every other picture, against 22 to 90
 of about 360 without it. Scrolling text, and the busy pattern (text with
 image blocks under fresh grain), dropped none either way. The 1.5 s after
-an IDR dropped as many either way.
+an IDR dropped about as many either way.
 
 The host counts the pictures VideoToolbox drops. Thread C traces them as
 `macos_encoder_dropped`, at most once a second, from its drain.
@@ -1755,18 +1756,18 @@ measured on the same Mac and not made:
 - *Starting a session at `timestamp`.* Low-latency H.264 budgets per second.
   Low-latency H.265, set to bits per frame × the pace, spent 0.02 to 0.04 of
   its budget at 5 FPS at 1440p and at 10 and 5 FPS at 4K, and so stopped
-  changing the picture. Under `timestamp` an IDR at 10 FPS also dropped 16 to 18 of the
-  20 pictures after it. Mac sessions still start at `nominal`; see
-  [Encoder rate model per GPU](#encoder-rate-model-per-gpu).
+  changing the picture. Under `timestamp` an IDR at 10 FPS also dropped 16
+  to 18 of the 20 pictures after it. Mac sessions still start at `nominal`;
+  see [Encoder rate model per GPU](#encoder-rate-model-per-gpu).
 - *Standard rate control above low latency's knee.* At a nominal 120 FPS,
   low latency held 118 to 120 pictures a second at 2560x1440, 108 to 113 at
   2560x1664, 91 to 93 at 3024x1964 and 59 to 64 at 3840x2160. Without the
-  data-rate cap, standard rate control held 118 to 120 at the larger sizes,
-  87 on the busy pattern at 4K. But it coded scrolling text 12 to 15 dB
+  data-rate cap, standard rate control held 118 to 120 at every size but
+  on the busy pattern at 4K (87). But it coded scrolling text 12 to 15 dB
   below low latency while spending 3.6 to 7.2 times its bits a second, and
   it overspent the busy pattern by a third at 3024x1964 whatever mean it
-  was set to. With the cap it fell to 69 to 78 a second after 3 s. H.265 stays
-  on low latency at every size.
+  was set to. With the cap it fell to 69 to 78 a second after 3 s at
+  3024x1964 and 3840x2160. H.265 stays on low latency at every size.
 - *Holding the old cap for a second after a bitrate cut.* A cut from 8 to 2
   Mbit/s dropped no picture, and the first unit after it was within 1.2
   times its new budget. So a new bitrate still sets its cap at once.
