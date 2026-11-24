@@ -649,6 +649,80 @@ async fn every_viewer_starts_at_the_backends_rate_model() {
     host.stop().await.unwrap();
 }
 
+/// The encoder bitrate of the next `Stats`, past a video unit's payload
+/// record.
+async fn encoder_bitrate(viewer: &mut Viewer) -> u32 {
+    loop {
+        match wire::read_header(&mut viewer.stream, Duration::from_secs(5))
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            HostMessage::Stats(stats) => return stats.encoder_bitrate,
+            HostMessage::Video { .. } => {
+                wire::read_payload(&mut viewer.stream).await.unwrap();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A session whose viewer's connection closes leaves the host the rate it
+/// ended at, which the next session of its preset starts from; one the host
+/// ended leaves nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_connection_starts_the_next_session_no_higher() {
+    let relay = pb_mapper_testkit::Relay::start("desktop-closing-rate").await;
+    let client = Client::from_credential(
+        relay.addr().to_string(),
+        pb_mapper_testkit::admin_credential(),
+        true,
+        None,
+    );
+    let host = Host::builder(options())
+        .backend(|| Ok(Pixel))
+        .start(&client)
+        .await
+        .unwrap();
+    let invitation = host.invitation().clone();
+    let token = invitation.token_text();
+    let connect = || authenticate(&client, &invitation, token.clone(), vec![VideoCodec::Jpeg]);
+
+    // Disconnect, from the host, leaves nothing.
+    let (mut first, answer) = connect().await;
+    assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+    let start = encoder_bitrate(&mut first).await;
+    host.end_session();
+    until(|| host.status().viewer.is_none()).await;
+    assert_eq!(*host.shared.closing_rate.lock(), None);
+    drop(first);
+
+    // A connection that closes leaves Balanced's start, at 1080p.
+    let (second, answer) = connect().await;
+    assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+    until(|| host.status().viewer.is_some()).await;
+    drop(second);
+    until(|| host.shared.closing_rate.lock().is_some()).await;
+    let record = host.shared.closing_rate.lock().unwrap();
+    assert_eq!(record.preset, QualityPreset::Balanced);
+    assert!((record.bpf - 66_667.0).abs() < 1.0, "{record:?}");
+
+    // Had it ended at half that, the next session starts there.
+    *host.shared.closing_rate.lock() = Some(ClosingRate {
+        bpf: record.bpf / 2.0,
+        ..record
+    });
+    let (mut third, answer) = connect().await;
+    assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+    let lowered = encoder_bitrate(&mut third).await;
+    assert!(
+        (i64::from(lowered) * 2 - i64::from(start)).abs() <= 4,
+        "{lowered} after {start}"
+    );
+    drop(third);
+    host.stop().await.unwrap();
+}
+
 /// A JPEG capture that loses consent ends the session on the wire. The viewer
 /// treats HostEnded as a deliberate disconnect and does not reconnect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

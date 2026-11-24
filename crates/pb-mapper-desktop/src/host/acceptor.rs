@@ -16,7 +16,7 @@ use crate::{
 };
 use std::{
     sync::{Arc, atomic::Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::AsyncWriteExt,
@@ -223,6 +223,11 @@ impl Acceptor {
             worker_room.wait_for_session(session_cancel).await
         })
         .await;
+        // Recorded before the slot frees, so a viewer that reconnects once
+        // this one is gone starts from it.
+        if let Some(rate) = session.closing_rate(Instant::now()) {
+            *self.shared.closing_rate.lock() = Some(rate);
+        }
         {
             let mut active = self.room.lock().await;
             release.armed = false;
@@ -271,6 +276,7 @@ impl Acceptor {
             .capabilities
             .iter()
             .any(|capability| capability == CAPABILITY_H265);
+        let previous = *self.shared.closing_rate.lock();
         if let Some(room) = active.as_ref().cloned() {
             let Some((codec, incompatible)) = room.negotiate_codec(&request.codecs, offered) else {
                 drop(active);
@@ -317,6 +323,7 @@ impl Acceptor {
                 request.limits,
                 request.quality,
                 room.rate_model,
+                previous,
                 &request.capabilities,
                 &capabilities,
                 self.shared.changes.clone(),
@@ -390,6 +397,7 @@ impl Acceptor {
             request.limits,
             request.quality,
             caps.rate_model,
+            previous,
             &request.capabilities,
             &capabilities,
             self.shared.changes.clone(),

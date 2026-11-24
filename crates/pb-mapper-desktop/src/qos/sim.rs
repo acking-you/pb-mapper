@@ -165,7 +165,15 @@ impl Sim {
             max_height: 1080,
             max_fps: 60,
         };
-        let mut qos = Qos::new(limits, VideoCodec::H264, quality, false, rate_model, t0);
+        let mut qos = Qos::new(
+            limits,
+            VideoCodec::H264,
+            quality,
+            false,
+            rate_model,
+            None,
+            t0,
+        );
         if one_way {
             qos.use_one_way();
         }

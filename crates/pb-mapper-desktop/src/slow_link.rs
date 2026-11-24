@@ -2040,7 +2040,9 @@ async fn reconnect(
 /// the relay's unlimited link connects. Reports, for each session, the time
 /// from `Viewer::connect` to its first presented picture, that picture's
 /// bytes, and the host's ack queue over its first 3 s; and for the last, how
-/// long its encoder bitrate took to reach 80% of Balanced's start.
+/// long its encoder bitrate took to reach 80% of Balanced's start. The
+/// reconnect starts at the rate the first session ended at, so its IDR is
+/// smaller than the first session's.
 #[test]
 #[ignore = "explicit ~45-second reconnect measurement on a 1 Mbit/s link"]
 fn reconnect_on_a_slow_link() {
@@ -2110,6 +2112,11 @@ fn reconnect_on_a_slow_link() {
                 "a session's first picture is its IDR"
             );
         }
+        let bytes = |start: &SessionStart| start.first.map_or(0, |first| first.bytes);
+        assert!(
+            bytes(&again) < bytes(&cold),
+            "the reconnect's IDR must be smaller than the first session's"
+        );
         assert!(
             climbed.is_some(),
             "the last viewer's bitrate must reach 80% of the start within {CLIMB_LIMIT:?}"

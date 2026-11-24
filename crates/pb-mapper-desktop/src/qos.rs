@@ -135,6 +135,9 @@ const PIXEL_SCALE_MIN: f64 = 0.4;
 const PIXEL_SCALE_MAX: f64 = 3.0;
 /// The most one window may raise the expected bitrate, in bit/s.
 const BPF_RAISE_MAX_BPS: f64 = 150_000.0;
+/// How long after a session its transport ended the bits per frame it ended
+/// at may start another (`ClosingRate`).
+pub(crate) const START_MEMORY: Duration = Duration::from_secs(120);
 
 const _: () = assert!(
     ENCODER_BITRATE_MIN <= ENCODER_BITRATE_MAX,
@@ -282,6 +285,29 @@ pub(crate) fn scaled_size(width: u32, height: u32, max_width: u32, max_height: u
         )
     };
     ((width & !1).max(2), (height & !1).max(2))
+}
+
+/// Where a session that its transport ended left its rate: its bits per
+/// frame relative to 1080p, under its preset, and when it ended. A session
+/// of the same preset accepted within `START_MEMORY` of that starts no
+/// higher (`Qos::new`): a viewer reconnecting over the link that just ended
+/// its session meets it at the rate the link last carried.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ClosingRate {
+    pub preset: QualityPreset,
+    /// Bits per frame at 1080p: the encoded size's divided by its pixel
+    /// scale, so a session of another size starts from its own share.
+    pub bpf: f64,
+    pub ended: Instant,
+}
+impl ClosingRate {
+    /// The bits per frame at 1080p this record starts a session of `preset`
+    /// accepted at `now` from, if it applies: the same preset, within
+    /// `START_MEMORY` of the end.
+    fn start(&self, preset: QualityPreset, now: Instant) -> Option<f64> {
+        (self.preset == preset && now.saturating_duration_since(self.ended) <= START_MEMORY)
+            .then_some(self.bpf)
+    }
 }
 
 /// What thread C is asked for, published after every change.
@@ -534,7 +560,10 @@ pub(crate) struct Qos {
 impl Qos {
     /// Bits per frame start at the viewer's bounds, until `set_video_size`
     /// says what the encoder produces: the host's expectation before the first
-    /// unit, then each unit's own size. The rate model starts at the
+    /// unit, then each unit's own size. They start at the preset's start, or
+    /// lower where the last session its transport ended (`previous`) ended
+    /// lower, of the same preset and within `START_MEMORY`; the frame rate
+    /// starts as the preset's always does. The rate model starts at the
     /// backend's (`BackendCaps::rate_model`).
     pub fn new(
         limits: VideoLimits,
@@ -542,6 +571,7 @@ impl Qos {
         quality: QualityPreset,
         fps_override: bool,
         rate_model: RateModel,
+        previous: Option<ClosingRate>,
         now: Instant,
     ) -> Self {
         let mut qos = Self {
@@ -585,8 +615,36 @@ impl Qos {
             rebase_generation: 0,
         };
         qos.apply_preset(quality);
+        if let Some(previous) = previous
+            && let Some(start) = previous.start(quality, now)
+        {
+            let bpf = qos.clamp_bpf(start * qos.pixel_scale);
+            if bpf < qos.bpf {
+                qos.set_bpf(bpf);
+                tracing::info!(
+                    target: "pb_mapper_desktop::feedback",
+                    event = "desktop_start_rate_remembered",
+                    preset = ?quality,
+                    bpf_1080p = start as u32,
+                    preset_start_1080p = preset(quality).bpf_start as u32,
+                    ended_ms_ago = millis(now.saturating_duration_since(previous.ended)),
+                );
+            }
+        }
+        // Built after bits per frame are set, so the first tick's budget is
+        // the one the session starts at.
         qos.span = LatchSpan::new(now, qos.pace(now), qos.nominal_budget());
         qos
+    }
+
+    /// Where this session's rate stands at `now`, as a record for the next
+    /// session should its transport end it now.
+    pub fn closing_rate(&self, now: Instant) -> ClosingRate {
+        ClosingRate {
+            preset: self.preset,
+            bpf: self.bpf / self.pixel_scale,
+            ended: now,
+        }
     }
 
     /// The fps and bits per frame a preset starts from. Balanced H.264 and
@@ -1453,6 +1511,7 @@ mod tests {
             QualityPreset::Balanced,
             false,
             RateModel::Nominal,
+            None,
             now,
         )
     }
@@ -1645,6 +1704,7 @@ mod tests {
             QualityPreset::Balanced,
             false,
             RateModel::Nominal,
+            None,
             t0,
         );
         sample(&mut jpeg, t0, 20, false);
@@ -1787,6 +1847,7 @@ mod tests {
             QualityPreset::Smooth,
             false,
             RateModel::Nominal,
+            None,
             t0,
         );
         assert_eq!(jpeg.pace(s(2)), JPEG_MAX_FPS);
@@ -1851,6 +1912,7 @@ mod tests {
             QualityPreset::Balanced,
             false,
             RateModel::Nominal,
+            None,
             t0,
         );
         probes(&mut jpeg, t0, &[(20, 0); 8]);
@@ -1939,6 +2001,7 @@ mod tests {
             QualityPreset::Quality,
             false,
             RateModel::Nominal,
+            None,
             t0,
         );
         probes(&mut qos, t0, &[(20, 0); 8]);
@@ -2142,6 +2205,7 @@ mod tests {
             QualityPreset::Quality,
             false,
             RateModel::Nominal,
+            None,
             t0,
         );
         probes(&mut qos, t0, &[(20, 0); 8]);
@@ -2300,6 +2364,109 @@ mod tests {
         assert_eq!(qos.receipt_view(host(120)), view);
     }
 
+    /// A Balanced H.264 session at 1080p60 accepted at `now`, after the
+    /// session its transport ended last left `previous`.
+    fn balanced_after(previous: ClosingRate, now: Instant) -> Qos {
+        Qos::new(
+            limits(60),
+            VideoCodec::H264,
+            QualityPreset::Balanced,
+            false,
+            RateModel::Nominal,
+            Some(previous),
+            now,
+        )
+    }
+
+    /// A session its transport ended starts the next of its preset no higher
+    /// than the bits per frame it ended at, relative to 1080p, for 2 min after
+    /// it ended: never above the preset's start, never for another preset, and
+    /// with the frame rate the preset always starts at.
+    #[test]
+    fn a_closing_rate_only_lowers_its_presets_start_for_two_minutes() {
+        let t0 = Instant::now();
+        let after = |elapsed: Duration| t0 + elapsed;
+        let uhd = VideoLimits {
+            max_width: 3840,
+            max_height: 2160,
+            max_fps: 60,
+        };
+        let scale = 4f64.powf(0.75);
+        // A 4K session at Balanced's floor ends: it leaves the floor at 1080p.
+        let mut ended = Qos::new(
+            uhd,
+            VideoCodec::H264,
+            QualityPreset::Balanced,
+            false,
+            RateModel::Nominal,
+            None,
+            t0,
+        );
+        ended.set_bpf(ended.clamp_bpf(16_667.0 * scale));
+        let record = ended.closing_rate(t0);
+        assert_eq!(record.preset, QualityPreset::Balanced);
+        assert!((record.bpf - 16_667.0).abs() < 1e-6, "{}", record.bpf);
+
+        // Up to 2 min later a 1080p session of that preset starts there; its
+        // encoder is asked for the floor's 1 Mbit/s, its first tick weighs
+        // frames at that budget, and its frame rate starts as Balanced's does.
+        for elapsed in [Duration::ZERO, Duration::from_secs(60), START_MEMORY] {
+            let qos = balanced_after(record, after(elapsed));
+            assert!(
+                (qos.bpf - 16_667.0).abs() < 1e-6,
+                "{elapsed:?}: {}",
+                qos.bpf
+            );
+            assert_eq!(qos.targets(after(elapsed)).encoder_bps, 1_000_020);
+            assert_eq!(qos.span.peak_budget, qos.nominal_budget());
+            assert_eq!((qos.fps, qos.start_high), (45, true));
+        }
+        // A 4K session starts at 4K's share of it, which the size the encoder
+        // makes rescales as it does any start.
+        let mut native = Qos::new(
+            uhd,
+            VideoCodec::H264,
+            QualityPreset::Balanced,
+            false,
+            RateModel::Nominal,
+            Some(record),
+            t0,
+        );
+        assert!(
+            (native.bpf - 16_667.0 * scale).abs() < 1e-6,
+            "{}",
+            native.bpf
+        );
+        native.set_video_size(1920, 1080);
+        assert!((native.bpf - 16_667.0).abs() < 1e-6, "{}", native.bpf);
+
+        // Later than that, or for another preset, the preset's start stands.
+        let late = balanced_after(record, after(START_MEMORY + Duration::from_millis(1)));
+        assert_eq!(late.bpf, 66_667.0);
+        let quality = Qos::new(
+            limits(60),
+            VideoCodec::H264,
+            QualityPreset::Quality,
+            false,
+            RateModel::Nominal,
+            Some(record),
+            t0,
+        );
+        assert_eq!(quality.bpf, 200_000.0);
+        // A session that ended above the start never raises it, and one just
+        // below lowers it only as far as it ended.
+        let high = ClosingRate {
+            bpf: 133_333.0,
+            ..record
+        };
+        assert_eq!(balanced_after(high, t0).bpf, 66_667.0);
+        let near = ClosingRate {
+            bpf: 60_000.0,
+            ..record
+        };
+        assert_eq!(balanced_after(near, t0).bpf, 60_000.0);
+    }
+
     #[test]
     fn gpu_output_dimensions_fit_renderer_without_upscaling() {
         assert_eq!(scaled_size(2560, 1440, 1920, 1080), (1920, 1080));
@@ -2331,6 +2498,7 @@ mod tests {
             QualityPreset::Quality,
             true,
             RateModel::Nominal,
+            None,
             t0,
         );
         assert!((chosen.bpf - 200_000.0 * 4f64.powf(0.75)).abs() < 1.0);
@@ -2342,6 +2510,7 @@ mod tests {
             QualityPreset::Quality,
             false,
             RateModel::Nominal,
+            None,
             t0,
         );
         assert_eq!(auto.ceiling_fps, 30);
@@ -2355,6 +2524,7 @@ mod tests {
             QualityPreset::Balanced,
             false,
             RateModel::Nominal,
+            None,
             t0,
         );
         let (width, height) = scaled_size(1920, 1080, uhd.max_width, uhd.max_height);
@@ -2462,6 +2632,7 @@ mod tests {
             QualityPreset::Balanced,
             false,
             RateModel::Timestamp,
+            None,
             t0,
         );
         // A short path lifts Balanced to its ceiling.
@@ -2714,6 +2885,7 @@ mod tests {
             QualityPreset::Smooth,
             false,
             RateModel::Nominal,
+            None,
             t0,
         );
         qos.set_video_size(960, 540);
@@ -2740,6 +2912,7 @@ mod tests {
                 QualityPreset::Smooth,
                 false,
                 RateModel::Nominal,
+                None,
                 t0,
             );
             qos.set_viewer_cap(5);

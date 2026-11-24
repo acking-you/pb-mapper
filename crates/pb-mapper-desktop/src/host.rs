@@ -14,6 +14,7 @@ use crate::{
     launch::{Launch, Recovery},
     platform,
     protocol::{MAX_VIEWERS, PeerColor, PeerSlot, RateModel, SessionState, StopReason},
+    qos::ClosingRate,
     security::HostIdentity,
     session::{Session, stop_message},
     shared::Policy,
@@ -71,6 +72,10 @@ struct Shared {
     /// Bumped wherever `status` may now read otherwise: see
     /// [`Host::changes`].
     changes: ChangeSignal,
+    /// Where the last session its transport ended left its rate: the next
+    /// session of its preset, within `qos::START_MEMORY`, starts no higher.
+    /// Kept here rather than in a room, which ends with its last viewer.
+    closing_rate: Mutex<Option<ClosingRate>>,
 }
 
 pub(super) struct RoomSlot {
@@ -427,6 +432,7 @@ impl Host {
             restore_pending: AtomicBool::new(true),
             restore: tokio::sync::Notify::new(),
             changes: ChangeSignal::new(),
+            closing_rate: Mutex::new(None),
         });
         let cancel = CancellationToken::new();
         let restore = launch
