@@ -530,10 +530,14 @@ impl Sps {
 
     /// This SPS saying that no picture is reordered and that a decoder
     /// needs no more pictures than the reference frames: the VUI's
-    /// restriction set to that, added with the inferred values of its other
-    /// fields where there was none, and a VUI with no other field where
-    /// there was no VUI. Nothing else changes, the constraint flags
-    /// included.
+    /// restriction set to that, and a VUI with no other field where there
+    /// was no VUI. A restriction added where there was none states, besides,
+    /// what VideoToolbox writes in its own: motion vectors may cross picture
+    /// boundaries, at the length an absent restriction allows
+    /// (`LOG2_MAX_MV_LENGTH`), as H.264 E.2.1 infers both; and both
+    /// denominators 0, which states no bound on a picture's or a
+    /// macroblock's size, where E.2.1 would infer 2 and 1. Nothing else
+    /// changes, the constraint flags included.
     fn without_reorder(&self) -> Self {
         let buffering = self.max_num_ref_frames;
         let mut sps = self.clone();
@@ -828,7 +832,7 @@ pub(crate) mod tests {
     /// and an HRD in the VUI with a restriction that allows 2 reordered
     /// frames; scaling matrices, picture order type 1 and field coding;
     /// 4:4:4 with a separate colour plane and a VUI without a restriction.
-    const BUILT: [Sample; 3] = [
+    pub(crate) const BUILT: [Sample; 3] = [
         Sample {
             name: "timing, NAL HRD, 2 reordered frames",
             sps: "6764002aacb403c0113f2e02d404040500000300010000030078606000f424000f425bdef81e1108b240",
@@ -854,7 +858,8 @@ pub(crate) mod tests {
         },
     ];
 
-    fn samples() -> impl Iterator<Item = &'static Sample> {
+    /// Every sample: VideoToolbox's, then the built ones.
+    pub(crate) fn samples() -> impl Iterator<Item = &'static Sample> {
         VIDEO_TOOLBOX.iter().chain(BUILT.iter())
     }
 
@@ -1071,60 +1076,5 @@ pub(crate) mod tests {
             restrict_reorder(&sps),
             "a padded SPS is rewritten as the bare one"
         );
-    }
-
-    /// Core Media takes every rewrite with its PPS as a decoder's format,
-    /// at the same dimensions as the encoder's own SPS: what the Mac viewer
-    /// builds its decoder from.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn core_media_takes_every_rewrite() {
-        use objc2_core_foundation::CFRetained;
-        use objc2_core_media::{
-            CMFormatDescription, CMVideoFormatDescriptionCreateFromH264ParameterSets,
-            CMVideoFormatDescriptionGetDimensions,
-        };
-        use std::ptr::NonNull;
-
-        let format = |sps: &[u8], pps: &[u8]| {
-            let pointers = [NonNull::from(&sps[0]), NonNull::from(&pps[0])];
-            let sizes = [sps.len(), pps.len()];
-            let mut out: *const CMFormatDescription = std::ptr::null();
-            // SAFETY: two parameter sets the arrays point to and size, which
-            // outlive the call, and an out pointer to a local.
-            let status = unsafe {
-                CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                    None,
-                    2,
-                    NonNull::from(&pointers[0]),
-                    NonNull::from(&sizes[0]),
-                    4,
-                    NonNull::from(&mut out),
-                )
-            };
-            assert_eq!(status, 0);
-            // SAFETY: a Create-rule result.
-            let description =
-                unsafe { CFRetained::from_raw(NonNull::new(out.cast_mut()).unwrap()) };
-            // SAFETY: a video format description.
-            let dimensions = unsafe { CMVideoFormatDescriptionGetDimensions(&description) };
-            (dimensions.width, dimensions.height)
-        };
-        let mut rewrites = 0;
-        for sample in samples().filter(|sample| sample.name != BUILT[2].name) {
-            let (sps, pps) = (hex(sample.sps), hex(sample.pps));
-            let (_, rewritten) = restrict_reorder(&sps);
-            let Some(rewritten) = rewritten else {
-                continue;
-            };
-            assert_eq!(
-                format(&rewritten, &pps),
-                format(&sps, &pps),
-                "{}",
-                sample.name
-            );
-            rewrites += 1;
-        }
-        assert_eq!(rewrites, 7);
     }
 }

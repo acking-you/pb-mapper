@@ -125,6 +125,62 @@ fn keyframes_come_only_when_asked_and_carry_their_parameter_sets() {
     assert_eq!(encoder.pending(), 0);
 }
 
+/// Core Media takes every rewrite of `codec::sps`'s samples with its PPS
+/// as a decoder's format, at the same dimensions as the encoder's own SPS:
+/// what the Mac viewer builds its decoder from. The 4:4:4 sample is left
+/// out, since its PPS is VideoToolbox's 4:2:0 one.
+#[test]
+fn core_media_takes_every_sps_rewrite() {
+    use crate::codec::sps::{
+        restrict_reorder,
+        tests::{BUILT, hex, samples},
+    };
+    use objc2_core_media::{
+        CMFormatDescription, CMVideoFormatDescriptionCreateFromH264ParameterSets,
+        CMVideoFormatDescriptionGetDimensions,
+    };
+
+    let format = |sps: &[u8], pps: &[u8]| {
+        let pointers = [NonNull::from(&sps[0]), NonNull::from(&pps[0])];
+        let sizes = [sps.len(), pps.len()];
+        let mut out: *const CMFormatDescription = std::ptr::null();
+        // SAFETY: two parameter sets the arrays point to and size, which
+        // outlive the call, and an out pointer to a local.
+        let status = unsafe {
+            CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                None,
+                2,
+                NonNull::from(&pointers[0]),
+                NonNull::from(&sizes[0]),
+                4,
+                NonNull::from(&mut out),
+            )
+        };
+        assert_eq!(status, 0);
+        // SAFETY: a Create-rule result.
+        let description = unsafe { CFRetained::from_raw(NonNull::new(out.cast_mut()).unwrap()) };
+        // SAFETY: a video format description.
+        let dimensions = unsafe { CMVideoFormatDescriptionGetDimensions(&description) };
+        (dimensions.width, dimensions.height)
+    };
+    let mut rewrites = 0;
+    for sample in samples().filter(|sample| sample.name != BUILT[2].name) {
+        let (sps, pps) = (hex(sample.sps), hex(sample.pps));
+        let (_, rewritten) = restrict_reorder(&sps);
+        let Some(rewritten) = rewritten else {
+            continue;
+        };
+        assert_eq!(
+            format(&rewritten, &pps),
+            format(&sps, &pps),
+            "{}",
+            sample.name
+        );
+        rewrites += 1;
+    }
+    assert_eq!(rewrites, 7);
+}
+
 /// Thread C's waits end on time where the kernel coalesces the process's
 /// timers: on a CI runner a 2 ms condition-variable wait ended 8 ms late,
 /// while this waiter's critical timer ends within about 1 ms.
