@@ -53,6 +53,23 @@ bool get nativePointerCursors =>
 /// The channel-backed cursors.
 const DesktopPointerCursors desktopPointerCursors = _ChannelPointerCursors();
 
+/// The lines a notch of this computer's mouse wheel scrolls, where its
+/// runner says: Windows' `SPI_GETWHEELSCROLLLINES`, which the runner reads
+/// as it starts, when Flutter's embedder reads it for the scroll distance
+/// it reports. Null where no runner answers, or it could not read it.
+Future<int?> desktopWheelLines() async {
+  if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) return null;
+  try {
+    return await _ChannelPointerCursors._channel.invokeMethod<int>(
+      'wheel_lines',
+    );
+  } on PlatformException {
+    return null;
+  } on MissingPluginException {
+    return null;
+  }
+}
+
 final class _ChannelPointerCursors implements DesktopPointerCursors {
   const _ChannelPointerCursors();
 
