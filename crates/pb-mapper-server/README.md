@@ -15,6 +15,12 @@ Use a separate UDP port from direct coordination. TCP remains available for old
 clients and authenticated certificate discovery; existing entry points keep
 their TCP behavior.
 
+On Linux, `set_tcp_congestion(&listener, &TcpCongestion::new("bbr")?)` before
+the listener goes to `run_server_on_listener_with_options` has every
+connection it accepts send with that congestion control, as
+`pb-mapper server --tcp-congestion bbr` does; a kernel that refuses it returns
+`TcpCongestionError`, whose `fix()` says how to allow it.
+
 Applications embedding the relay can depend on the library directly:
 
 ```toml

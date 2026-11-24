@@ -14,6 +14,7 @@ their traffic crosses the relay only when no direct path works.
 docker run -d --name pb-mapper \
   --restart unless-stopped \
   -p 7666:7666/tcp -p 7666:7666/udp \
+  --sysctl net.ipv4.tcp_slow_start_after_idle=0 \
   -e RUST_LOG=error \
   -v pb-mapper-auth:/var/lib/pb-mapper/auth \
   ackingliu/pb-mapper:latest
@@ -33,6 +34,8 @@ services:
     ports:
       - "7666:7666/tcp"
       - "7666:7666/udp"   # direct (peer-to-peer) coordination
+    sysctls:
+      net.ipv4.tcp_slow_start_after_idle: 0   # see TCP tuning below
     restart: unless-stopped
 
 volumes:
@@ -66,11 +69,49 @@ need it. See the
 | `PB_MAPPER_AUTH_STATE_DIR` | `/var/lib/pb-mapper/auth` | Where the encrypted authentication state is kept |
 | `PB_MAPPER_RELAY_ONLY` | `false` | `true` serves the relay alone: no UDP port, no direct connections |
 | `PB_MAPPER_DIRECT_ADVERTISE` | unset | The public `IP:PORT` for direct coordination when the UDP port is mapped differently from the TCP one; by default clients use the address they dialed |
+| `PB_MAPPER_TCP_CONGESTION` | unset | The TCP congestion control the relay sends with, such as `bbr` (see TCP tuning below); unset keeps the kernel's default |
 | `RUST_LOG` | `info` | Log level: `error`, `warn`, `info`, `debug` or `trace` |
 
 For another port, set `PB_MAPPER_PORT` and publish that port over both TCP and
 UDP. With `USE_IPV6: true`, publish on the IPv6 address:
 `"[::]:7666:7666/tcp"` and `"[::]:7666:7666/udp"`.
+
+## TCP tuning
+
+Two kernel settings decide how quickly the relay sends after a pause and over
+a lossy path. Both change only what the relay sends, such as a remote
+desktop's picture on its way to the viewer; what the shared computer sends to
+the relay runs on that computer's own network stack.
+
+- `net.ipv4.tcp_slow_start_after_idle`: Linux restarts the congestion window of
+  a TCP connection that was idle, so the first picture after a still screen
+  starts slowly again. The examples above turn this off with `--sysctl` and
+  `sysctls`. It applies to the container's own network namespace only, needs
+  Linux 4.15 or later (on an older kernel the container does not start: remove
+  the setting there) and cannot be set with `--network host`. While it is on,
+  the relay logs `relay_tcp_idle_restart` at `info`, which the examples'
+  `RUST_LOG=error` hides.
+- `PB_MAPPER_TCP_CONGESTION=bbr`: every TCP connection the relay accepts sends
+  with BBR, which random loss on a long cross-border or mobile path does not
+  slow as it does Linux's default, Cubic. It is off by default because BBR
+  shares a congested link with Cubic flows less evenly. The Docker host needs
+  the `tcp_bbr` module (`sudo modprobe tcp_bbr`, and `tcp_bbr` in a file under
+  `/etc/modules-load.d/` to keep it after a reboot), and either `bbr` in the
+  host's `net.ipv4.tcp_allowed_congestion_control` or the container started
+  with `--cap-add NET_ADMIN` (`cap_add: [NET_ADMIN]` in Compose). When the
+  kernel refuses, the relay logs `relay_tcp_congestion_unavailable` as an
+  error, with the fix, and keeps the default; with `RUST_LOG=info` it logs
+  `relay_tcp_congestion` once BBR took effect. On the host,
+  `sudo nsenter -t "$(docker inspect -f '{{.State.Pid}}' pb-mapper)" -n ss -ti`
+  shows the algorithm of each of the relay's connections.
+
+Both settings reach only the connections the relay itself accepts. Where a
+user-space proxy carries the published port, the viewer's connection ends at
+that proxy on the host instead, and the host's own settings apply to it: that
+is `docker-proxy` when publishing on IPv6 without `ip6tables`, and the port
+driver of rootless Docker or Podman. There, set
+`net.ipv4.tcp_slow_start_after_idle` (and, for BBR,
+`net.ipv4.tcp_congestion_control`) on the host.
 
 ## Tags
 

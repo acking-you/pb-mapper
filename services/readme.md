@@ -16,7 +16,10 @@ random administrator key at `/var/lib/pb-mapper/auth/admin.key` with mode
 `0600`. Keep that directory persistent. If upgrading from the old
 machine-derived mode, the first v0.4 start automatically copies
 `/var/lib/pb-mapper-server/msg_header_key` to the new path when neither an
-administrator key file nor `MSG_HEADER_KEY` is already configured.
+administrator key file nor `MSG_HEADER_KEY` is already configured. The unit
+also reads `/etc/pb-mapper/server.env`: `PB_MAPPER_TCP_CONGESTION=bbr` there,
+for one, has a Linux relay send with BBR (see
+[Tuning a Linux relay](../docs/user-guide.md#tuning-a-linux-relay)).
 
 Use the administrator key locally for management, then issue a scoped temporary
 credential for each tenant or workload:
