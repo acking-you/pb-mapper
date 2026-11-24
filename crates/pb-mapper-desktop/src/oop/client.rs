@@ -143,7 +143,8 @@ impl<T: Transport> RemoteBackend<T> {
             shape,
         } = response;
         self.pending = pending as usize;
-        // Only a capture's answer says whether it found nothing new; absent,
+        // Only a capture's answer says whether it left the tick armed (it
+        // found nothing new, or an encoder not yet asking for input); absent,
         // as every failure and every helper before protocol 10 answers, the
         // tick was spent.
         if matches!(request, Request::Video { submit: true, .. }) {
@@ -316,7 +317,8 @@ impl<T: Transport> Backend for RemoteBackend<T> {
         false
     }
     /// What the last capture's answer said: a worker whose source had no new
-    /// picture leaves the tick armed, and thread C polls it.
+    /// picture, or whose encoder had not asked for input, leaves the tick
+    /// armed, and thread C polls it.
     fn submitted_video(&self) -> bool {
         self.submitted
     }

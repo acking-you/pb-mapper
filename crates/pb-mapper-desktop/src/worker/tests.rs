@@ -104,6 +104,23 @@ struct Fake {
     /// The encoder is at a bound of its own, as a Mac host's VideoToolbox
     /// with two units in flight.
     full: Arc<AtomicBool>,
+    /// An encoder that asks for input only once it has output its last
+    /// unit, as some Windows MFTs do: a capture that finds a unit still
+    /// inside after draining submits nothing and leaves the tick armed
+    /// (`Submit::Waiting`).
+    serial: Arc<AtomicBool>,
+    /// Its output wakes thread C (`drain_poll` is `None`) while its capture
+    /// is still polled, as the Windows encoder's with its event watcher;
+    /// while a serial encoder waits for input it names a retry `DRAIN_POLL`
+    /// after the capture that found it waiting, and asks for input (the
+    /// wake) once its unit is out.
+    push_drain: Arc<AtomicBool>,
+    /// When the last capture found a serial encoder waiting for input.
+    waiting: Arc<Mutex<Option<Instant>>>,
+    /// The next capture that finds a serial encoder waiting has its unit
+    /// finish, and the encoder ask for input, right after its drain: the
+    /// request lands before thread C chooses when to ask again.
+    asks_late: Arc<AtomicBool>,
     repeatable: bool,
     submitted_video: bool,
 }
@@ -133,6 +150,10 @@ impl Fake {
             still: Arc::default(),
             duplicate: Arc::default(),
             full: Arc::default(),
+            serial: Arc::default(),
+            push_drain: Arc::default(),
+            waiting: Arc::default(),
+            asks_late: Arc::default(),
             repeatable: false,
             submitted_video: true,
         }
@@ -209,6 +230,23 @@ impl Backend for Fake {
         if self.fail_capture.load(Ordering::SeqCst) {
             return Err(error("no compatible hardware encoder"));
         }
+        // As the Windows encoder: drain what is finished, then submit, which
+        // a serial encoder still holding a unit refuses.
+        let mut drained = None;
+        if self.serial.load(Ordering::SeqCst) {
+            drained = self.finished();
+            let holding = !self.encoding.lock().is_empty();
+            *self.waiting.lock() = holding.then_some(started);
+            if holding {
+                if self.asks_late.swap(false, Ordering::SeqCst)
+                    && let Some(unit) = self.encoding.lock().front_mut()
+                {
+                    unit.1 = started;
+                }
+                self.submitted_video = false;
+                return Ok(drained);
+            }
+        }
         let idle = self.idle_until.lock().is_some_and(|until| until > started)
             || self.still.load(Ordering::SeqCst);
         self.submitted_video = !idle || (self.repeatable && keyframe);
@@ -233,7 +271,9 @@ impl Backend for Fake {
             return Ok(Some(frame));
         }
         // As the Windows encoder: drain what is finished, then submit.
-        let finished = if self.discard.load(Ordering::SeqCst) && calls % 2 == 0 {
+        let finished = if drained.is_some() {
+            drained
+        } else if self.discard.load(Ordering::SeqCst) && calls % 2 == 0 {
             self.encoding.lock().pop_front();
             None
         } else {
@@ -256,7 +296,27 @@ impl Backend for Fake {
     fn submitted_video(&self) -> bool {
         self.submitted_video
     }
+    fn drain_poll(&self) -> Option<Duration> {
+        (!self.push_drain.load(Ordering::SeqCst)).then_some(DRAIN_POLL)
+    }
+    fn capture_poll(&self) -> Option<Duration> {
+        Some(DRAIN_POLL)
+    }
     fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        // As the Windows encoder: a pushing serial encoder waits for its
+        // input request, which comes with its unit's output, and is asked
+        // again `DRAIN_POLL` later meanwhile, and at once once it asked.
+        if self.push_drain.load(Ordering::SeqCst)
+            && let Some(waiting) = *self.waiting.lock()
+        {
+            let now = (self.clock)();
+            let asked = self
+                .encoding
+                .lock()
+                .front()
+                .is_none_or(|(_, ready, _)| *ready <= now);
+            return Some(if asked { waiting } else { waiting + DRAIN_POLL });
+        }
         // The first call opens the push source and learns it has no picture.
         let until = self
             .idle_until
@@ -1563,6 +1623,142 @@ fn an_injected_input_brings_a_still_desktops_poll_in_and_keeps_it_active() {
     h.run(Duration::from_millis(200), true);
     let still = captures_since(&h, injected + HOT_WINDOW);
     assert!(still.len() >= 12, "{} captures", still.len());
+    let gaps = spacing(&still);
+    assert!(gaps.iter().all(|gap| *gap == period), "{gaps:?}");
+}
+
+/// The capture that submitted the unit after `first`'s, on a serial encoder
+/// whose unit from `first` is ready at `ready`: the first capture that
+/// started then or later.
+fn next_submit_after(h: &Harness, ready: Instant) -> Instant {
+    captures_since(h, ready)
+        .first()
+        .map(|(started, ..)| *started)
+        .unwrap()
+}
+
+/// An encoder that asks for input only once it has output its last unit, as
+/// some Windows MFTs do, taking a period and a half per unit. A tick that
+/// finds it still holding one stays armed, and thread C asks again every
+/// poll interval, also on a desktop that was still, so the next picture goes
+/// in within a poll of the encoder freeing up rather than at the tick after.
+#[test]
+fn an_encoder_that_has_not_asked_for_input_is_asked_again_at_the_next_poll() {
+    let mut h = Harness::new(true, None);
+    let period = Duration::from_secs(1) / 60;
+    h.step();
+    h.fake.still.store(true, Ordering::SeqCst);
+    h.run(HOT_WINDOW * 2, true);
+    let latency = period * 3 / 2;
+    *h.fake.latency.lock() = latency;
+    h.fake.serial.store(true, Ordering::SeqCst);
+    h.fake.still.store(false, Ordering::SeqCst);
+    let first = h.next_capture();
+    h.run(period * 3, true);
+    let armed = captures_since(&h, first + Duration::from_micros(1));
+    assert!(
+        armed[0].0 >= first + period * 3 / 4,
+        "{:?}",
+        armed[0].0 - first
+    );
+    let ready = first + latency;
+    let taken = next_submit_after(&h, ready);
+    assert!(taken - ready <= DRAIN_POLL, "{:?}", taken - ready);
+    assert!(taken < first + period * 2, "{:?}", taken - first);
+    // Each armed ask came a poll after the last.
+    let waiting: Vec<_> = armed
+        .iter()
+        .take_while(|(started, ..)| *started < ready)
+        .cloned()
+        .collect();
+    assert!(waiting.len() >= 3, "{} asks", waiting.len());
+    let gaps = spacing(&waiting);
+    assert!(gaps.iter().all(|gap| *gap == DRAIN_POLL), "{gaps:?}");
+    // Waiting for input is no backpressure: no tick was skipped for it.
+    assert_eq!(h.state().skipped_ticks, 0);
+}
+
+/// The same encoder, pushing its output (its event watcher wakes thread C)
+/// while its capture is pulled: while it waits for input it names a retry a
+/// poll later, and its request, which wakes thread C, is answered at once,
+/// between polls, rather than at the next poll or tick.
+#[test]
+fn a_pushing_encoder_waiting_for_input_is_asked_as_its_request_wakes_thread_c() {
+    let mut h = Harness::new(true, None);
+    let period = Duration::from_secs(1) / 60;
+    h.fake.push_drain.store(true, Ordering::SeqCst);
+    h.step();
+    h.fake.still.store(true, Ordering::SeqCst);
+    h.run(HOT_WINDOW * 2, true);
+    // Ready off the poll grid, so the wake and a poll cannot coincide.
+    let latency = period * 3 / 2 + Duration::from_micros(700);
+    *h.fake.latency.lock() = latency;
+    h.fake.serial.store(true, Ordering::SeqCst);
+    h.fake.still.store(false, Ordering::SeqCst);
+    let first = h.next_capture();
+    let ready = first + latency;
+    h.run(ready - h.now() - Duration::from_micros(1), true);
+    let waiting = captures_since(&h, first + Duration::from_micros(1));
+    assert!(waiting.len() >= 3, "{} asks", waiting.len());
+    let gaps = spacing(&waiting);
+    assert!(gaps.iter().all(|gap| *gap == DRAIN_POLL), "{gaps:?}");
+    // The unit is out and the encoder asks for input: thread C is woken.
+    *h.now.lock() = ready;
+    h.step();
+    assert_eq!(next_submit_after(&h, ready), ready);
+    assert_eq!(h.fake.encoding.lock().len(), 1, "the next unit went in");
+    assert_eq!(h.sent().len(), 1);
+}
+
+/// The same, with the request landing after the capture that found the
+/// encoder waiting drained it, and before thread C chose when to ask again:
+/// it is answered at once all the same, rather than at the next poll.
+#[test]
+fn an_input_request_that_lands_as_a_waiting_capture_returns_is_answered_at_once() {
+    let mut h = Harness::new(true, None);
+    let period = Duration::from_secs(1) / 60;
+    h.fake.push_drain.store(true, Ordering::SeqCst);
+    h.step();
+    h.fake.still.store(true, Ordering::SeqCst);
+    h.run(HOT_WINDOW * 2, true);
+    *h.fake.latency.lock() = period * 3;
+    h.fake.serial.store(true, Ordering::SeqCst);
+    h.fake.still.store(false, Ordering::SeqCst);
+    let first = h.next_capture();
+    h.run(period + DRAIN_POLL * 2, true);
+    assert!(
+        h.fake.waiting.lock().is_some(),
+        "a capture found the encoder waiting for input"
+    );
+    h.fake.asks_late.store(true, Ordering::SeqCst);
+    let waiting = h.next_capture();
+    assert!(waiting > first + period);
+    assert_eq!(h.fake.encoding.lock().len(), 1);
+    assert_eq!(h.next_capture(), waiting, "answered at once");
+    assert_eq!(h.fake.encoding.lock().len(), 1, "the next unit went in");
+    assert_eq!(h.sent().len(), 1);
+}
+
+/// A source whose encoder pushes (`drain_poll` is `None`) while its capture
+/// is pulled (`capture_poll` is `Some`), as the Windows encoder with its
+/// event watcher: its armed ticks are still asked again every poll interval
+/// while the desktop is active, and once a period while it is still.
+#[test]
+fn a_pushing_encoder_with_a_pulled_capture_still_polls_armed_ticks_while_active() {
+    let mut h = Harness::new(true, None);
+    let period = Duration::from_secs(1) / 60;
+    h.fake.push_drain.store(true, Ordering::SeqCst);
+    h.step();
+    assert!(h.sent()[0].keyframe);
+    h.fake.still.store(true, Ordering::SeqCst);
+    h.run(HOT_WINDOW, true);
+    let active = h.captures();
+    assert!(active.len() > 100, "{} captures", active.len());
+    let gaps = spacing(&active[1..]);
+    assert!(gaps.iter().all(|gap| *gap == DRAIN_POLL), "{gaps:?}");
+    h.run(Duration::from_secs(1), true);
+    let still = h.captures().split_off(active.len());
+    assert!((60..=61).contains(&still.len()), "{} captures", still.len());
     let gaps = spacing(&still);
     assert!(gaps.iter().all(|gap| *gap == period), "{gaps:?}");
 }
