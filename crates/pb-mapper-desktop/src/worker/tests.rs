@@ -489,7 +489,7 @@ impl Armed {
         match call {
             Call::Refine => self.repeats.refined(now, self.pts),
             _ if !duplicate || keyframe => self.repeats.fresh(now),
-            _ => {}
+            _ => self.repeats.liveness(),
         }
         let bytes = vec![1; 8];
         self.repeats

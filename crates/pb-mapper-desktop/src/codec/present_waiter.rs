@@ -52,8 +52,9 @@ pub(crate) const FRESH_FOR: Duration = DRAIN_POLL;
 /// How long an armed thread that thread C has not asked again goes on
 /// looking: past the slowest pace's period (1 s), at which a privileged
 /// helper's host asks, and past the liveness repeat, by which thread C
-/// asks in process, so that only a caller that stopped asking (every viewer
-/// paused, or the host went) trips it.
+/// asks in process (a refinement repeat, which leaves the thread armed,
+/// asks it again, `PresentWaiter::keep_armed`), so that only a caller that
+/// stopped asking (every viewer paused, or the host went) trips it.
 pub(crate) const ASKED_WITHIN: Duration = Duration::from_secs(2);
 const _: () = assert!(
     ASKED_WITHIN.as_millis() > 1_000 && ASKED_WITHIN.as_millis() > LIVENESS_INTERVAL.as_millis(),
@@ -387,6 +388,17 @@ impl<S: PresentSource> PresentWaiter<S> {
     /// under way still publishes what it finds.
     pub(crate) fn disarm(&self) {
         self.shared.state.lock().disarm();
+    }
+
+    /// Thread C sent something that leaves its tick armed (a refinement
+    /// repeat): an armed thread goes on looking as if asked again, so that
+    /// it stops on its own only `ASKED_WITHIN` after thread C last did
+    /// either. An unarmed one stays so.
+    pub(crate) fn keep_armed(&self) {
+        let mut state = self.shared.state.lock();
+        if state.armed.is_some() {
+            state.asked = Instant::now();
+        }
     }
 
     pub(crate) fn status(&self) -> Status {
@@ -914,6 +926,32 @@ mod tests {
         rig.waiter.arm(false, target(&mut made)).unwrap();
         until(|| rig.looks() > looks);
         assert_eq!(rig.log.lock().looks.get(looks), Some(&Duration::ZERO));
+        assert_eq!(made, 1);
+    }
+
+    /// A thread kept armed after each of its looks (thread C sending a
+    /// burst of refinement repeats) goes on looking well past its source's
+    /// `ASKED_WITHIN`, and stops on its own once nothing asks it again.
+    /// Unarmed, keeping it armed arms nothing.
+    #[test]
+    fn an_armed_thread_kept_armed_goes_on_looking() {
+        let rig = Rig::<32>::new(false);
+        let mut made = 0;
+        until(|| rig.parks() > 0);
+        rig.waiter.keep_armed();
+        assert_eq!(rig.waiter.status(), Status::default());
+        rig.waiter.arm(false, target(&mut made)).unwrap();
+        let armed = rig.waiter.status().armed;
+        assert!(armed.is_some());
+        // Twice the looks that `ASKED_WITHIN` allows unasked.
+        let past = 2 * (2 + Stub::<32>::ASKED_WITHIN.as_millis() / 32) as usize;
+        while rig.looks() < past {
+            let looks = rig.looks();
+            rig.waiter.keep_armed();
+            until(|| rig.looks() > looks);
+            assert_eq!(rig.waiter.status().armed, armed);
+        }
+        until(|| rig.waiter.status().armed.is_none());
         assert_eq!(made, 1);
     }
 

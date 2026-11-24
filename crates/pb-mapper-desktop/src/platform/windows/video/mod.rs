@@ -299,8 +299,9 @@ pub struct Encoded {
     /// A refinement repeat's unit (`Submit::Refined`).
     pub refined: bool,
     /// The QP the encoder says it coded the unit at
-    /// (`MFSampleExtension_VideoEncodeQP`), where it says, and only while
-    /// it is read: by an encoder that refines, or after `read_qp`.
+    /// (`MFSampleExtension_VideoEncodeQP`), where it says, and only where
+    /// it is read: a refinement repeat's unit, which its burst judges by
+    /// it, or every unit after `read_qp`.
     pub qp: Option<u32>,
     /// Monotonic capture timestamp relative to this encoder's creation.
     pub pts_us: u64,
@@ -566,8 +567,8 @@ pub struct Encoder {
     /// When the last picture goes again on its own: refinement bursts
     /// where the encoder earned them, and liveness.
     repeats: Repeats,
-    /// Read each output's QP (`Encoded::qp`): an encoder that refines, or
-    /// one `read_qp` asked.
+    /// Read every output's QP (`Encoded::qp`), as `read_qp` asked; a
+    /// refinement repeat's is read anyway.
     read_qp: bool,
     /// When the last output was collected, discarded or not.
     last_output: Option<Instant>,
@@ -930,7 +931,7 @@ impl Encoder {
             pending: VecDeque::with_capacity(MAX_IN_FLIGHT),
             // Paced at the nominal rate until the caller sets its pace.
             repeats: Repeats::new(refine, bitrate, fps, fps),
-            read_qp: refine,
+            read_qp: false,
             last_output: None,
             width,
             height,
@@ -1033,8 +1034,9 @@ impl Encoder {
     }
 
     /// Read the QP the encoder says it coded each unit at into
-    /// `Encoded::qp` (`video_bench`), as an encoder that refines does
-    /// anyway. A session that does not refine never does.
+    /// `Encoded::qp` (`video_bench`). A session reads it only from a
+    /// refinement repeat's unit, by which its burst is judged, and so never
+    /// on an encoder that does not refine.
     pub fn read_qp(&mut self) {
         self.read_qp = true;
     }
@@ -1278,7 +1280,11 @@ impl Encoder {
                     self.stats.bytes += bytes.len() as u64;
                     let encode_us = now.saturating_duration_since(at).as_micros();
                     self.stats.encode_time_us += encode_us as u64;
-                    let qp = self.read_qp.then(|| sample_qp(&sample)).flatten();
+                    // Only a burst's repeats are judged by their QP: a
+                    // session reads no other unit's.
+                    let qp = (self.read_qp || (refined && !keyframe))
+                        .then(|| sample_qp(&sample))
+                        .flatten();
                     self.repeats
                         .output(pts_us, duplicate, keyframe, bytes.len(), qp);
                     ready = Some(Encoded {
@@ -1396,11 +1402,13 @@ impl Encoder {
         }
         // A new picture or a keyframe ends a refinement burst, and may need
         // one once it stands still; a refinement repeat counts towards its
-        // burst. A liveness repeat changes nothing.
+        // burst; a liveness repeat ends the picture's claim to one.
         if fresh.is_some() || self.force_keyframe {
             self.repeats.fresh(now);
         } else if refine {
             self.repeats.refined(now, pts_us);
+        } else {
+            self.repeats.liveness();
         }
         self.force_keyframe = false;
         self.last_submit = Some(now);
@@ -1457,11 +1465,14 @@ impl Encoder {
                 self.starved = true;
                 return Ok(Taken::Full);
             };
-            if !refine {
+            if refine {
+                // A refinement repeat leaves the thread armed, which wakes
+                // the caller for a present at once, and asks it again, as
+                // an arming would: a burst never outlasts its arming.
+                self.capture.keep_armed();
+            } else {
                 // The tick is spent: a present after this waits in DXGI
-                // for the next tick, which takes the newest. A refinement
-                // repeat leaves the thread armed, which wakes the caller
-                // for it at once.
+                // for the next tick, which takes the newest.
                 self.capture.disarm();
             }
             let context = &self.context;

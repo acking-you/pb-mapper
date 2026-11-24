@@ -4,14 +4,16 @@
 //! An encoder that budgets each frame (Media Foundation's on NVIDIA, measured
 //! `nominal`) codes a large change, a scroll or a window switch, only as
 //! well as one frame's share of the bitrate allows. A repeat of the
-//! unchanged picture codes part of what that left out, so each repeat
-//! sharpens it by about one more frame's share; the liveness repeat comes
-//! only every `LIVENESS_INTERVAL`. So once a picture that its budget limited
-//! has stood still `REFINE_AFTER`, [`Repeats`] repeats it at the capture
-//! pace, a refinement burst, until a repeat shows that the encoder has
-//! little left to code, or the burst's cap; then the liveness repeat takes
-//! over, unchanged. A refinement repeat leaves the caller's capture tick
-//! armed, so a new picture that comes during a burst goes at once.
+//! unchanged picture is expected to code up to one more frame's share of
+//! what that left out; the liveness repeat comes only every
+//! `LIVENESS_INTERVAL`. Whether that sharpens the picture on a given
+//! encoder, and how fast, is what the still-refinement device run
+//! measures. So once a picture that its budget limited has stood still
+//! `REFINE_AFTER`, [`Repeats`] repeats it at the capture pace, a refinement
+//! burst, until a repeat shows that the encoder has little left to code,
+//! or the burst's cap; then the liveness repeat takes over, unchanged. A
+//! refinement repeat leaves the caller's capture tick armed, so a new
+//! picture that comes during a burst goes at once.
 //!
 //! Neutral, with an injected clock, and tested everywhere. Only the Windows
 //! encoder refines, on a GPU whose encoder earned it by a device run. An
@@ -41,8 +43,10 @@ pub(crate) const REFINE_DONE_BYTES: usize = 512;
 /// first repeats, which then come out small, or at a QP that does not drop,
 /// before the picture converged.
 pub(crate) const REFINE_MIN: u8 = 3;
-/// The most refinement repeats one picture gets, however often new pictures
-/// interrupt them: a start, which a device bench sets.
+/// The most refinement repeats one picture gets, from a new picture's unit
+/// that filled its budget to the next, however often new pictures
+/// interrupt its bursts or keyframes of it start them again: a start, which
+/// a device bench sets.
 pub(crate) const REFINE_MAX: u8 = 15;
 /// The longest one burst runs, from its first repeat: a start, which a
 /// device bench sets.
@@ -53,7 +57,8 @@ pub(crate) const REFINE_MAX_TIME: Duration = Duration::from_secs(1);
 pub(crate) const REFINE_QP_FLOOR: u32 = 18;
 /// A new picture's unit at least this share of one frame's budget was
 /// limited by it, `(numerator, denominator)`: a typed character or a caret
-/// blink codes far under it, already sharp, and starts no burst.
+/// blink codes far under it, already sharp, and starts no burst on its own
+/// (it can resume one that the change before it left unfinished).
 const LIMITED: (usize, usize) = (3, 4);
 const _: () = assert!(
     REFINE_MIN >= 2 && REFINE_MIN <= REFINE_MAX,
@@ -74,8 +79,9 @@ pub(crate) enum Repeat {
 /// When an encoder sends its last picture again on its own (a keyframe aside,
 /// which the caller asks for): the refinement bursts and the liveness
 /// repeat. The encoder tells it each fresh picture (a new one, or a
-/// keyframe) and each refinement repeat it submits, and each unit it
-/// outputs; it answers when the next repeat is due and which.
+/// keyframe), each refinement repeat and each liveness repeat it submits,
+/// and each unit it outputs; it answers when the next repeat is due and
+/// which.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Repeats {
     /// Bursts run at all: an encoder whose vendor earned them. Otherwise
@@ -90,10 +96,13 @@ pub(crate) struct Repeats {
     /// The last fresh picture submitted: when.
     fresh: Option<Instant>,
     /// A fresh unit since the picture last finished refining filled its
-    /// budget: the picture is due a burst once it stands still.
+    /// budget: the picture is due a burst once it stands still. A burst's
+    /// stop, its cap or a liveness repeat clears it.
     limited: bool,
-    /// The refinement repeats spent since `limited` was set, across the
-    /// bursts new pictures interrupted.
+    /// The refinement repeats spent since a new picture's unit last filled
+    /// its budget, across the bursts new pictures interrupted and those
+    /// keyframes of the unchanged picture started: at `REFINE_MAX`, no
+    /// more until the next such unit.
     spent: u8,
     /// The burst under way, from its first repeat; a new picture or a
     /// keyframe ends it, and so do its own stops.
@@ -142,7 +151,7 @@ impl Repeats {
     /// stood `REFINE_AFTER`, if a fresh unit since the picture last finished
     /// refining filled its budget. A burst a new picture interrupts did not
     /// finish its picture, which therefore still refines, within what is
-    /// left of `REFINE_MAX`.
+    /// left of `REFINE_MAX`; so does one a keyframe of it ends.
     pub(crate) fn fresh(&mut self, at: Instant) {
         self.fresh = Some(at);
         self.burst = None;
@@ -172,11 +181,14 @@ impl Repeats {
     /// The encoder output a unit of sample time `pts_us`, `len` bytes long,
     /// coded at `qp` where it says. A fresh one (not a `duplicate`, or a
     /// `keyframe`) that fills `LIMITED` of a frame's budget makes its
-    /// picture due a burst. A repeat output of the burst under way that
-    /// shows the encoder has little left to code ends it, once it has had
-    /// `REFINE_MIN` outputs (bar a QP at `REFINE_QP_FLOOR`, which ends it at
-    /// once): two in a row under `REFINE_DONE_BYTES`, or two that did not
-    /// lower the QP. Outputs older than the burst say nothing of it.
+    /// picture due a burst: a new picture's with a whole `REFINE_MAX`, a
+    /// keyframe of the unchanged one with what is left of it, so that the
+    /// IDRs viewers ask for on a still desktop never add up to more. A
+    /// repeat output of the burst under way that shows the encoder has
+    /// little left to code ends it, once it has had `REFINE_MIN` outputs
+    /// (bar a QP at `REFINE_QP_FLOOR`, which ends it at once): two in a row
+    /// under `REFINE_DONE_BYTES`, or two that did not lower the QP. Outputs
+    /// older than the burst say nothing of it.
     pub(crate) fn output(
         &mut self,
         pts_us: u64,
@@ -191,7 +203,9 @@ impl Repeats {
         if !duplicate || keyframe {
             if len.saturating_mul(LIMITED.1) >= self.budget.saturating_mul(LIMITED.0) {
                 self.limited = true;
-                self.spent = 0;
+                if !duplicate {
+                    self.spent = 0;
+                }
             }
             // An IDR the encoder made of a repeat on its own codes the
             // picture anew: the burst judges from it.
@@ -226,19 +240,32 @@ impl Repeats {
         }
     }
 
+    /// A liveness repeat went to the encoder: the picture stood still past
+    /// any burst (at a pace too slow for one, the liveness repeats refined
+    /// it instead), and refines again only once a fresh unit fills its
+    /// budget, not as soon as a faster pace would allow a burst.
+    pub(crate) fn liveness(&mut self) {
+        self.finished();
+    }
+
     /// The picture refined as far as it will: no burst until a fresh unit
-    /// fills its budget again.
+    /// fills its budget again, and then only with what is left of
+    /// `REFINE_MAX` unless that unit is a new picture's.
     fn finished(&mut self) {
         self.burst = None;
         self.limited = false;
-        self.spent = 0;
     }
 
     /// When the next refinement repeat is due, given the last submit at
-    /// `last_submit`, while the picture is due one: `REFINE_AFTER` after
-    /// the last fresh picture, and a period after the last submit.
+    /// `last_submit`, while the picture is due one with repeats left:
+    /// `REFINE_AFTER` after the last fresh picture, and a period after the
+    /// last submit.
     fn refine_due(&self, last_submit: Instant) -> Option<Instant> {
-        if !self.enabled || !self.limited || self.period >= LIVENESS_INTERVAL {
+        if !self.enabled
+            || !self.limited
+            || self.spent >= REFINE_MAX
+            || self.period >= LIVENESS_INTERVAL
+        {
             return None;
         }
         let still = self.fresh? + REFINE_AFTER;
@@ -331,6 +358,15 @@ mod tests {
             self.repeats.refined(at, self.pts);
             self.pts
         }
+        /// A liveness repeat submitted at `at`, which must be due then, as
+        /// the encoder submits it; its sample time.
+        fn liveness(&mut self, at: Instant) -> u64 {
+            assert_eq!(self.due(at), Some(Repeat::Liveness), "at {at:?}");
+            self.last = at;
+            self.pts += 1;
+            self.repeats.liveness();
+            self.pts
+        }
         /// A refinement repeat at each due time, the n-th output
         /// `sizes[n]` bytes long (the last size for the rest) at `qps[n]`,
         /// until no refinement is due: how many went.
@@ -409,6 +445,30 @@ mod tests {
         rig.repeats.rate(BITRATE / 2, 60, PACE);
         rig.change(ms(0), BUDGET / 2);
         assert_eq!(rig.next(), rig.at(REFINE_AFTER));
+    }
+
+    /// At a pace too slow for a burst the liveness repeats refine the
+    /// picture instead: once one went, a faster pace (the QoS ramp after an
+    /// unresponsive spell, a raised cap) starts no burst on the picture
+    /// that stood still meanwhile. A new picture that fills its budget
+    /// refines at the faster pace.
+    #[test]
+    fn a_liveness_repeat_ends_a_pictures_claim_to_a_burst() {
+        let mut rig = Rig::new();
+        rig.repeats.rate(BITRATE, 60, 2);
+        rig.change(ms(0), BUDGET * 4);
+        for n in 1..=240 {
+            rig.liveness(rig.at(LIVENESS_INTERVAL * n));
+        }
+        rig.repeats.rate(BITRATE, 60, PACE);
+        let period = Duration::from_secs(1) / PACE;
+        assert_eq!(rig.next(), rig.last + LIVENESS_INTERVAL);
+        assert_eq!(rig.due(rig.last + period), None);
+
+        let changed = rig.last + ms(100);
+        rig.change(changed - rig.t0, BUDGET * 4);
+        assert_eq!(rig.next(), changed + REFINE_AFTER);
+        assert_eq!(rig.burst(&[BUDGET], &[None]), usize::from(REFINE_MAX));
     }
 
     /// The first repeats after a large unit can be starved, coming out
@@ -504,14 +564,50 @@ mod tests {
         let left = usize::from(REFINE_MAX) - 3;
         assert_eq!(rig.burst(&[BUDGET], &[None]), left);
 
-        // A keyframe ends the burst, and its IDR, filling its budget, gives
-        // the picture a whole burst again.
+        // A keyframe ends the burst, and its IDR, filling its budget, has
+        // the picture refine again, with what is left of its cap.
         let mut rig = Rig::new();
         rig.change(ms(0), BUDGET * 4);
         rig.refine(rig.at(ms(200)));
         let idr = rig.fresh(ms(210));
         rig.repeats.output(idr, true, true, BUDGET * 20, None);
         assert_eq!(rig.next(), rig.at(ms(410)));
+        assert_eq!(rig.burst(&[BUDGET], &[None]), usize::from(REFINE_MAX) - 1);
+    }
+
+    /// Keyframes of an unchanged picture, as the IDRs viewers ask for on a
+    /// still desktop (a lagging viewer's resync, a viewer joining), each
+    /// have it refine again, but share its `REFINE_MAX`: however many come,
+    /// and whether its bursts converged or were cut short, its refinement
+    /// repeats never add up to more. A new picture's unit that fills its
+    /// budget gives it a whole burst again.
+    #[test]
+    fn keyframes_of_a_still_picture_share_its_cap() {
+        let mut rig = Rig::new();
+        rig.change(ms(0), BUDGET * 4);
+        // A burst that converges at `REFINE_MIN`.
+        let mut refined = rig.burst(&[100], &[None]);
+        assert_eq!(refined, usize::from(REFINE_MIN));
+        let mut at = rig.last - rig.t0;
+        for _ in 0..20 {
+            // An IDR of the unchanged picture, then at most two repeats of
+            // the burst it starts before the next IDR cuts it short.
+            at += ms(300);
+            let idr = rig.fresh(at);
+            rig.repeats.output(idr, true, true, BUDGET * 20, None);
+            for _ in 0..2 {
+                let due = rig.next();
+                if rig.due(due) == Some(Repeat::Refine) {
+                    let pts = rig.refine(due);
+                    rig.repeats.output(pts, true, false, BUDGET, None);
+                    refined += 1;
+                }
+            }
+        }
+        assert_eq!(refined, usize::from(REFINE_MAX));
+        assert_eq!(rig.next(), rig.last + LIVENESS_INTERVAL);
+
+        rig.change(at + ms(300), BUDGET * 4);
         assert_eq!(rig.burst(&[BUDGET], &[None]), usize::from(REFINE_MAX));
     }
 
@@ -525,10 +621,8 @@ mod tests {
         let ended = rig.last;
         assert_eq!(rig.next(), ended + LIVENESS_INTERVAL);
         assert_eq!(rig.due(ended + ms(249)), None);
-        assert_eq!(rig.due(ended + LIVENESS_INTERVAL), Some(Repeat::Liveness));
-        rig.last = ended + LIVENESS_INTERVAL;
-        rig.repeats
-            .output(rig.pts + 1, true, false, BUDGET * 2, None);
+        let pts = rig.liveness(ended + LIVENESS_INTERVAL);
+        rig.repeats.output(pts, true, false, BUDGET * 2, None);
         assert_eq!(rig.next(), rig.last + LIVENESS_INTERVAL);
         // Nothing submitted fresh yet: liveness only.
         let none = Repeats::new(true, BITRATE, 60, PACE);
