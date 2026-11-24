@@ -216,7 +216,7 @@ impl CursorSource for MacCursor {
         let point = CGEvent::location(here.as_deref());
         let shown = self.geometry.get().pixel((point.x, point.y));
         let mut pointer = self.pointer.get();
-        let at = pointer.settle(shown, Instant::now());
+        let at = pointer.settle(shown, Instant::now()).at;
         self.pointer.set(pointer);
         Ok(Some(match at {
             Some((x, y)) => (x, y, true),
