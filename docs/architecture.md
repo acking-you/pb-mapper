@@ -387,7 +387,12 @@ Nothing in the SDK crates knows it exists.
     thread C, the D3D11 scaler in `converter.rs`, the per-adapter H.265
     probe in `probe.rs`; H.265 only for a viewer that lists `h265`, on a GPU
     whose hardware HEVC encoder passes a probe kept per adapter, and one
-    encoder failure turns it off for the process), `input` (enigo, and
+    encoder failure turns it off for the process; H.264 in a High profile
+    with CABAC, Baseline where the encoder refuses High or may reorder in
+    it, and for the process once a High encoder reordered), `gpu_priority`
+    (the capture device's GPU thread priority and the process's GPU
+    scheduling class, raised while an encoder that asks for it lives),
+    `input` (enigo, and
     `SendInput` for absolute moves and physical keys' scancodes), `pointer`
     (what `input` and `cursor` share of a move: the injected pixel until it
     shows, the move's absolute coordinate, and placing the pointer while a
@@ -455,8 +460,11 @@ Nothing in the SDK crates knows it exists.
     hand-off to the service) and `background::{readiness, status_of}` (a
     status read that checks the helper once)
   - `codec/`: neutral Annex B scanning and keyframe detection
-    (`annexb.rs`), length-prefixed (AVCC/HVCC) samples to Annex B
-    (`avcc.rs`, for VideoToolbox), and the encoder rules both platforms
+    (`annexb.rs`, which keeps the parameter sets and sends an H.264 SPS
+    rewritten when it leaves picture reordering open), the H.264 SPS
+    reader and writer that rewrite uses (`sps.rs`), length-prefixed
+    (AVCC/HVCC) samples to Annex B (`avcc.rs`, for VideoToolbox), and the
+    encoder rules both platforms
     share (`pipeline.rs`: late output, first-submit and output waits,
     liveness, what an H.265 failure is); `rate_fit.rs`, test-only, fits a
     pace sweep to a rate model for the macOS encoder's measurement and, by
