@@ -10,14 +10,23 @@
 //! `LastPresentTime`, a performance counter reading), which thread C anchors
 //! its pacing on and its sample time follows.
 //!
+//! The video processor converts a new picture straight from the
+//! duplication's surface into the sample it is submitted in, turned upright
+//! for a rotated display, while DXGI holds the frame; where it refuses that
+//! surface, the picture is copied out first, as before. The last submitted
+//! sample is kept, so that a repeat on a still desktop (liveness, a
+//! keyframe) copies its NV12 picture instead of converting again.
+//!
 //! Given a waker, the encoder's events wake its caller: each output, and the
 //! input request a `Submit::Waiting` waits for (`codec.rs`).
 
 mod codec;
 mod converter;
+mod gpu_time;
 mod probe;
 
 pub use crate::codec::sps::SpsReorder;
+pub use gpu_time::GpuSpan;
 pub use probe::h265_available;
 
 use super::gpu_priority::GpuPriority;
@@ -29,10 +38,12 @@ use crate::{
     },
     error,
     qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN, scaled_size},
+    scale::{Rotation, crop_only, downscales},
     scheduler::{Waiter, Wake},
 };
 use codec::{Codec, EncoderSettings, attributes, media_type, sample_bytes};
-use converter::Converter;
+use converter::{Converter, Sample};
+use gpu_time::GpuTimer;
 use std::{
     collections::VecDeque,
     sync::OnceLock,
@@ -43,7 +54,7 @@ use windows::{
     Win32::{
         Graphics::{
             Direct3D11::*,
-            Dxgi::{Common::*, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO},
+            Dxgi::{Common::*, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIResource},
         },
         Media::MediaFoundation::*,
         System::{
@@ -65,9 +76,13 @@ const MAX_IN_FLIGHT: usize = crate::worker::ENCODER_DEPTH;
 /// The NV12 samples the scaler writes into: allocated up front, and at most.
 const SAMPLES: (u32, u32) = (4, 6);
 const _: () = assert!(
-    MAX_IN_FLIGHT <= SAMPLES.1 as usize,
-    "the sample pool holds every unit in flight"
+    MAX_IN_FLIGHT + 2 <= SAMPLES.1 as usize,
+    "the sample pool holds every unit in flight, the last one a repeat copies once it is out, and a spare"
 );
+/// The PCI vendor IDs whose video processor is asked for quality where it
+/// scales the picture down (`VpUsage::Auto`): none until a device run shows
+/// sharper text there for under 1 ms of processor time.
+const QUALITY_DOWNSCALE_VENDORS: [u32; 0] = [];
 /// The largest capture, and the largest encoded size.
 const MAX_SIZE: (u32, u32) = (7680, 4320);
 /// The oldest present that still dates a picture.
@@ -103,6 +118,58 @@ pub struct EncoderOptions {
     /// process's GPU scheduling class at `HIGH` while the encoder lives
     /// (`gpu_priority.rs`).
     pub gpu_priority: bool,
+    /// What the D3D11 video processor is asked to favour.
+    pub vp_usage: VpUsage,
+}
+
+/// What the D3D11 video processor that scales and converts each picture is
+/// asked to favour (`D3D11_VIDEO_USAGE`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VpUsage {
+    /// A session's: quality where the picture is scaled down on a GPU whose
+    /// vendor has earned it by a device run (none yet), else speed.
+    #[default]
+    Auto,
+    /// `D3D11_VIDEO_USAGE_OPTIMAL_QUALITY`, at every size.
+    Quality,
+    /// `D3D11_VIDEO_USAGE_OPTIMAL_SPEED`, at every size.
+    Speed,
+}
+
+/// Whether the video processor is asked for quality: as `usage` says, or
+/// for `Auto`, where the picture is scaled down (`downscale`) on an adapter
+/// of a `vendor` `QUALITY_DOWNSCALE_VENDORS` lists.
+fn vp_quality(usage: VpUsage, vendor: u32, downscale: bool) -> bool {
+    match usage {
+        VpUsage::Auto => downscale && QUALITY_DOWNSCALE_VENDORS.contains(&vendor),
+        VpUsage::Quality => true,
+        VpUsage::Speed => false,
+    }
+}
+
+/// The turn that stands a duplication's pictures upright, from its
+/// `DXGI_OUTDUPL_DESC::Rotation`: the same angle, clockwise
+/// (`ROTATE90` scans the desktop out turned so that the captured top row is
+/// the desktop's right column), as Microsoft's Desktop Duplication sample
+/// maps it. `UNSPECIFIED` is taken for none.
+fn display_rotation(rotation: DXGI_MODE_ROTATION) -> Result<Rotation> {
+    match rotation {
+        DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED => Ok(Rotation::Identity),
+        DXGI_MODE_ROTATION_ROTATE90 => Ok(Rotation::Cw90),
+        DXGI_MODE_ROTATION_ROTATE180 => Ok(Rotation::Cw180),
+        DXGI_MODE_ROTATION_ROTATE270 => Ok(Rotation::Cw270),
+        other => Err(error(format!("unknown display rotation {}", other.0))),
+    }
+}
+
+/// The rotation's angle in degrees, for a log line.
+fn degrees(rotation: Rotation) -> u32 {
+    match rotation {
+        Rotation::Identity => 0,
+        Rotation::Cw90 => 90,
+        Rotation::Cw180 => 180,
+        Rotation::Cw270 => 270,
+    }
 }
 
 /// What a hardware encoder took of its settings, read back as it opened:
@@ -219,14 +286,25 @@ pub struct Statistics {
     pub unique_encoded: u64,
     pub bytes: u64,
     pub max_in_flight: usize,
+    /// Submits that sent the last picture again (a liveness repeat, or a
+    /// keyframe on a still desktop), copied from its sample rather than
+    /// converted.
+    pub repeats: u64,
+    /// Whether new pictures are converted straight from the duplication's
+    /// surface; false once its video processor refused that surface, after
+    /// which each is copied out of it first.
+    pub direct_capture: bool,
+    /// Whether the video processor was asked for quality
+    /// (`D3D11_VIDEO_USAGE_OPTIMAL_QUALITY`) rather than speed.
+    pub vp_quality: bool,
     pub encode_time_us: u64,
     /// The GOP size the encoder reads back: a `GOP_CANDIDATES` entry, or what
     /// it clamped them to. 0 when it reports none.
     pub gop: u32,
     /// The presents no submitted picture showed: for each dated new picture
     /// submitted, those it covers beyond one (`Presented::presents - 1`),
-    /// whether DXGI accumulated them into one acquire or a newer acquire
-    /// replaced a picture still waiting for the encoder. Thread C's
+    /// which DXGI accumulated into its acquire: a picture is acquired only
+    /// with a sample to convert it into, and submitted at once. Thread C's
     /// `coalesced_per_s` counts the same.
     pub coalesced_presents: u64,
     /// This encoder's first acquire, once there was one.
@@ -341,18 +419,32 @@ pub struct Encoder {
     capture: DxgiDuplicationApi,
     codec: Codec,
     converter: Converter,
-    /// `video_bench --dump-source`'s: the last submitted sample, kept for
-    /// `source_nv12`, and the texture it is read back through. Released
-    /// before the sample allocator.
+    /// The last submitted sample, a new picture or a repeat: what a repeat
+    /// copies, and `source_nv12` reads back. One of the pool, released with
+    /// `spare` before the sample allocator.
+    last: Option<Sample>,
+    /// A sample allocated for a submit that then had nothing to send, kept
+    /// for the next, so that polling a still desktop allocates none.
+    spare: Option<Sample>,
+    /// `video_bench --dump-source`'s read-back of `last`.
     source: Option<Source>,
+    /// `video_bench --gpu-time`'s timestamps around each picture's work.
+    gpu_timer: Option<GpuTimer>,
     allocator: IMFVideoSampleAllocatorEx,
     _manager: IMFDXGIDeviceManager,
-    latest: Option<ID3D11Texture2D>,
-    latest_pending: bool,
-    /// When the display presented `latest`'s picture, where DXGI says, and
-    /// the presents it covers, summed while it waits (`latest_pending`).
-    latest_at: Option<Instant>,
-    latest_presents: u32,
+    /// The captured picture's size, as scanned out before any turn, which
+    /// the duplication's mode and rotation give (`Rotation::scanned_out`):
+    /// what each frame's texture must be.
+    input: (u32, u32),
+    /// Whether new pictures are converted straight from the duplication's
+    /// surface: until the video processor refuses it, after which each is
+    /// copied out into `copied` first.
+    direct: bool,
+    copied: Option<ID3D11Texture2D>,
+    /// The last submit found no free sample, and captured nothing.
+    starved: bool,
+    /// The last submit sent `last` again rather than a new picture.
+    repeated: bool,
     /// The last submit's new, dated picture.
     presented: Option<Presented>,
     /// The last sample time, in microseconds since `created`.
@@ -379,11 +471,19 @@ pub struct Encoder {
     runtime: Runtime,
 }
 
-/// The last submitted sample, which `Encoder::source_nv12` reads back.
+/// `Encoder::source_nv12`'s: whether the last submitted sample is still to
+/// be read back, and the texture it is read back through.
 #[derive(Default)]
 struct Source {
-    sample: Option<IMFSample>,
+    unread: bool,
     staging: Option<ID3D11Texture2D>,
+}
+
+/// A new picture converted into a sample: when the display presented it,
+/// where DXGI dates it, and the presents it covers.
+struct Fresh {
+    at: Option<Instant>,
+    presents: u32,
 }
 
 /// The encoded size: the capture fitted inside these bounds, keeping its aspect
@@ -396,8 +496,10 @@ enum OutputSize {
 
 impl Encoder {
     /// Scale on the D3D11 video processor before hardware encoding, to fit
-    /// inside `max_width` × `max_height` without upscaling. The latest captured
-    /// desktop texture remains at native resolution; no CPU readback. Given a
+    /// inside `max_width` × `max_height` without upscaling: a rotated
+    /// display's picture is turned upright first, and a size one pixel over
+    /// the even encoded size is cropped rather than scaled. The captured
+    /// desktop stays on the GPU; no CPU readback. Given a
     /// `waker`, the encoder's events wake it where they can
     /// (`Statistics::events_pushed`, `drain_poll`); without one, `drain`
     /// polls them. A session takes the default `options`.
@@ -493,25 +595,59 @@ impl Encoder {
         let capture = DxgiDuplicationApi::new_options(monitor, &[DxgiDuplicationFormat::Bgra8])
             .map_err(error)?;
         let desc = capture.duplication_desc();
-        if desc.Rotation != DXGI_MODE_ROTATION_IDENTITY {
-            return Err(error(
-                "GPU video capture does not yet support a rotated display",
-            ));
-        }
-        let input_width = desc.ModeDesc.Width;
-        let input_height = desc.ModeDesc.Height;
-        if input_width < 2
-            || input_height < 2
-            || input_width > MAX_SIZE.0
-            || input_height > MAX_SIZE.1
-        {
+        let rotation = display_rotation(desc.Rotation)?;
+        // A turned display's mode is read upright, the size of its output's
+        // desktop rectangle, and its pictures as scanned out, that size
+        // turned back, as WebRTC's Desktop Duplication capturer requires;
+        // the rectangle also tells a mode given the other way round
+        // (`Rotation::scanned_out`), and the first frame's texture is
+        // checked against the result.
+        let mode = (desc.ModeDesc.Width, desc.ModeDesc.Height);
+        let desktop = unsafe { capture.output().GetDesc() }
+            .map(|output| {
+                let rect = output.DesktopCoordinates;
+                let span = |from: i32, to: i32| u32::try_from(to.saturating_sub(from)).unwrap_or(0);
+                (span(rect.left, rect.right), span(rect.top, rect.bottom))
+            })
+            // None read: the mode is taken upright.
+            .unwrap_or_default();
+        let input = rotation.scanned_out(mode, desktop);
+        if input.0 < 2 || input.1 < 2 || input.0 > MAX_SIZE.0 || input.1 > MAX_SIZE.1 {
             return Err(error("unsupported GPU capture dimensions"));
         }
+        let upright = rotation.upright(input);
         let (width, height) = match size {
-            OutputSize::Fit(..) => scaled_size(input_width, input_height, max_width, max_height),
+            OutputSize::Fit(..) => scaled_size(upright.0, upright.1, max_width, max_height),
             OutputSize::Exact(..) => ((max_width & !1).max(2), (max_height & !1).max(2)),
         };
         let device = capture.device();
+        // The video processor before the encoder: a GPU that cannot turn a
+        // rotated display's picture fails the capture here, as one failed
+        // on any rotated display before, without opening an encoder each
+        // time it is retried. Its vendor is the adapter's, which the
+        // encoder reads again for `EncoderOpened::vendor`.
+        let vendor = unsafe {
+            capture
+                .dxgi_device()
+                .GetAdapter()
+                .and_then(|adapter| adapter.GetDesc())
+                .map_err(error)?
+                .VendorId
+        };
+        let quality = vp_quality(
+            options.vp_usage,
+            vendor,
+            downscales(upright, (width, height)),
+        );
+        let converter = Converter::new(
+            device,
+            capture.device_context(),
+            input,
+            (width, height),
+            rotation,
+            fps,
+            quality,
+        )?;
         let manager = device_manager(device, capture.device_context())?;
         let settings = EncoderSettings {
             kind,
@@ -548,16 +684,12 @@ impl Encoder {
                 .map_or_else(|| "unknown".to_owned(), |reorder| reorder.to_string()),
             sps = %Hex(&opened.sps),
             gpu_priority = options.gpu_priority,
+            rotation = degrees(rotation),
+            mode = format_args!("{}x{}", mode.0, mode.1),
+            captured = format_args!("{}x{}", input.0, input.1),
+            cropped = crop_only(upright, (width, height)) && upright != (width, height),
+            vp_quality = quality,
         );
-        let converter = Converter::new(
-            device,
-            capture.device_context(),
-            desc.ModeDesc.Width,
-            desc.ModeDesc.Height,
-            width,
-            height,
-            fps,
-        )?;
         let mut allocator = std::ptr::null_mut();
         unsafe {
             MFCreateVideoSampleAllocatorEx(&IMFVideoSampleAllocatorEx::IID, &mut allocator)
@@ -583,6 +715,8 @@ impl Encoder {
         let stats = Statistics {
             gop: codec.gop,
             events_pushed: codec.pushes(),
+            direct_capture: true,
+            vp_quality: quality,
             opened,
             ..Statistics::default()
         };
@@ -590,13 +724,17 @@ impl Encoder {
             capture,
             codec,
             converter,
+            last: None,
+            spare: None,
             source: None,
+            gpu_timer: None,
             allocator,
             _manager: manager,
-            latest: None,
-            latest_pending: false,
-            latest_at: None,
-            latest_presents: 0,
+            input,
+            direct: true,
+            copied: None,
+            starved: false,
+            repeated: false,
             presented: None,
             last_pts_us: None,
             pending: VecDeque::with_capacity(MAX_IN_FLIGHT),
@@ -632,6 +770,12 @@ impl Encoder {
     pub fn presented(&self) -> Option<Presented> {
         self.presented
     }
+    /// Whether the last `submit` sent the last picture again (a liveness
+    /// repeat, or a keyframe on a still desktop), copied rather than
+    /// converted.
+    pub fn repeated(&self) -> bool {
+        self.repeated
+    }
     /// How soon the caller drains again if nothing wakes it first:
     /// `DRAIN_POLL` while the events are polled, and while an output they
     /// announced is still uncollected (a drain collects at most one, and
@@ -659,11 +803,36 @@ impl Encoder {
         })
     }
 
-    /// Keep each sample `submit` gives the encoder, for `source_nv12`
-    /// (`video_bench --dump-source`): a reference to one sample of the pool.
-    /// A session never does.
+    /// Have `source_nv12` read back the sample each `submit` gives the
+    /// encoder (`video_bench --dump-source`), which the encoder keeps
+    /// anyway for a repeat. A session never does.
     pub fn keep_source(&mut self) {
         self.source.get_or_insert_with(Source::default);
+    }
+
+    /// Time the GPU work of each submitted picture with D3D11 timestamp
+    /// queries, which `gpu_times` reads back (`video_bench --gpu-time`).
+    /// A session never does.
+    pub fn time_gpu(&mut self) {
+        self.gpu_timer.get_or_insert_with(GpuTimer::default);
+    }
+
+    /// Move the spans of GPU work `time_gpu` timed, once the GPU has
+    /// finished them, into `out`; never waits.
+    pub fn gpu_times(&mut self, out: &mut Vec<GpuSpan>) {
+        if let Some(timer) = &mut self.gpu_timer {
+            timer.collect(self.capture.device_context(), out);
+        }
+    }
+
+    /// Copy each new picture out of the duplication before converting it,
+    /// as a video processor that refuses the duplication's surface has it,
+    /// and as every picture was before (`video_bench --copy-capture`, the
+    /// comparison's baseline). A session never does.
+    pub fn copy_captures(&mut self) {
+        self.direct = false;
+        self.stats.direct_capture = false;
+        self.converter.forget_inputs();
     }
 
     /// Read the NV12 picture the last `submit` gave the encoder back from
@@ -678,20 +847,11 @@ impl Encoder {
         let Some(source) = self.source.as_mut() else {
             return Ok(false);
         };
-        let Some(sample) = source.sample.take() else {
+        let Some(last) = self.last.as_ref().filter(|_| source.unread) else {
             return Ok(false);
         };
-        let buffer = unsafe { sample.GetBufferByIndex(0).map_err(error)? };
-        let buffer: IMFDXGIBuffer = buffer.cast().map_err(error)?;
-        let mut raw = std::ptr::null_mut();
-        unsafe {
-            buffer
-                .GetResource(&ID3D11Texture2D::IID, &mut raw)
-                .map_err(error)?;
-        }
-        // SAFETY: `GetResource` returned a referenced texture of the IID asked.
-        let texture = unsafe { ID3D11Texture2D::from_raw(raw) };
-        let subresource = unsafe { buffer.GetSubresourceIndex().map_err(error)? };
+        source.unread = false;
+        let (texture, subresource) = (&last.texture, last.subresource);
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.GetDesc(&mut desc) };
         // The pool's textures may be taller than the picture: the staging
@@ -723,7 +883,7 @@ impl Encoder {
         let context = self.capture.device_context();
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe {
-            context.CopySubresourceRegion(staging, 0, 0, 0, 0, &texture, subresource, None);
+            context.CopySubresourceRegion(staging, 0, 0, 0, 0, texture, subresource, None);
             context
                 .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .map_err(error)?;
@@ -786,9 +946,9 @@ impl Encoder {
             .collect()
             .map_err(|failure| self.codec_failed(failure))?;
         if self.stats.submitted == 0 && self.created.elapsed() > FIRST_SUBMIT_WAIT {
-            let (asked, image) = (self.codec.input_requested(), self.latest.is_some());
-            let failure = unsubmitted(self.codec.kind, asked, image);
-            if encoder_blamed(asked, image) {
+            let (asked, starved) = (self.codec.input_requested(), self.starved);
+            let failure = unsubmitted(self.codec.kind, asked, starved);
+            if encoder_blamed(asked, starved) {
                 self.codec.failed(&failure);
             }
             return Err(failure);
@@ -918,15 +1078,16 @@ impl Encoder {
     /// caller paces, and this never waits. Call `drain` first, which collects
     /// the encoder's output and, when they are polled, its input requests.
     /// Submits nothing while the encoder has no room (`Full`: `MAX_IN_FLIGHT`,
-    /// no free sample), before it asks for input (`Waiting`: nothing is
-    /// captured), or when nothing is worth sending (`Unchanged`: no new
-    /// image, no keyframe due, and a submit within `LIVENESS_INTERVAL`; or no
-    /// image yet). A requested keyframe stays requested until a sample
-    /// carries it.
+    /// or no free sample, before anything is captured), before it asks for
+    /// input (`Waiting`: nothing is captured), or when nothing is worth
+    /// sending (`Unchanged`: no new image, no keyframe due, and a submit
+    /// within `LIVENESS_INTERVAL`; or no image yet). A requested keyframe
+    /// stays requested until a sample carries it.
     pub fn submit(&mut self, force_keyframe: bool) -> Result<Submit> {
         self.check_thread()?;
         self.presented = None;
         self.waiting = None;
+        self.repeated = false;
         self.force_keyframe |= force_keyframe;
         if self.pending.len() >= MAX_IN_FLIGHT {
             return Ok(Submit::Full);
@@ -936,32 +1097,57 @@ impl Encoder {
             self.stats.waiting += 1;
             return Ok(Submit::Waiting);
         }
-        self.latest_pending |= self.acquire()?;
-        // Static desktops still send a fresh, verified liveness frame. These
-        // repetitions are excluded from unique_captures and benchmark FPS.
-        if !self.latest_pending
-            && !self.force_keyframe
-            && self
-                .last_submit
-                .is_some_and(|at| at.elapsed() < LIVENESS_INTERVAL)
-        {
-            return Ok(Submit::Unchanged);
+        // The sample comes first: with none free nothing is acquired, and
+        // DXGI keeps folding the desktop's updates into its next frame.
+        let sample = match self.spare.take() {
+            Some(sample) => sample,
+            None => match unsafe { self.allocator.AllocateSample() } {
+                Ok(sample) => Sample::new(sample)?,
+                Err(e) if e.code() == MF_E_SAMPLEALLOCATOR_EMPTY => {
+                    self.starved = true;
+                    return Ok(Submit::Full);
+                }
+                Err(e) => return Err(error(e)),
+            },
+        };
+        self.starved = false;
+        let fresh = self.acquire(&sample)?;
+        if fresh.is_none() {
+            // Static desktops still send a fresh, verified liveness frame.
+            // These repetitions are excluded from unique_captures and
+            // benchmark FPS.
+            let due = self.force_keyframe
+                || self
+                    .last_submit
+                    .is_none_or(|at| at.elapsed() >= LIVENESS_INTERVAL);
+            let Some(last) = self.last.as_ref().filter(|_| due) else {
+                self.spare = Some(sample);
+                return Ok(Submit::Unchanged);
+            };
+            // The last picture's NV12, copied whole from its sample: the
+            // video processor does not run again, and the encoder never
+            // writes the samples it takes.
+            let timing = time_begin(&mut self.gpu_timer, &self.capture)?;
+            unsafe {
+                self.capture.device_context().CopySubresourceRegion(
+                    &sample.texture,
+                    sample.subresource,
+                    0,
+                    0,
+                    0,
+                    &last.texture,
+                    last.subresource,
+                    None,
+                );
+            }
+            time_end(&mut self.gpu_timer, &self.capture, timing, true);
+            self.repeated = true;
         }
-        let Some(texture) = &self.latest else {
-            return Ok(Submit::Unchanged);
-        };
-        let sample = match unsafe { self.allocator.AllocateSample() } {
-            Ok(sample) => sample,
-            Err(e) if e.code() == MF_E_SAMPLEALLOCATOR_EMPTY => return Ok(Submit::Full),
-            Err(e) => return Err(error(e)),
-        };
-        self.converter.convert(texture, &sample)?;
         let now = Instant::now();
         // A new picture's sample time is when the display presented it, so
         // durations follow the display's cadence rather than the polls'; a
         // repeat's is now. Strictly increasing either way.
-        let fresh = self.latest_pending;
-        let presented = self.latest_at.filter(|_| fresh);
+        let presented = fresh.as_ref().and_then(|fresh| fresh.at);
         let pts_us = sample_time(presented.unwrap_or(now), self.created, self.last_pts_us);
         // Variable frame rate: a sample lasts the real interval since the
         // previous one, while MF_MT_FRAME_RATE stays nominal. Pace changes
@@ -970,8 +1156,12 @@ impl Encoder {
             Duration::from_micros(pts_us - last).clamp(self.frame_period(), Duration::from_secs(1))
         });
         unsafe {
-            sample.SetSampleTime((pts_us * 10) as i64).map_err(error)?;
             sample
+                .sample
+                .SetSampleTime((pts_us * 10) as i64)
+                .map_err(error)?;
+            sample
+                .sample
                 .SetSampleDuration((duration.as_nanos() / 100) as i64)
                 .map_err(error)?;
         }
@@ -983,49 +1173,51 @@ impl Encoder {
         unsafe {
             self.codec
                 .transform
-                .ProcessInput(self.codec.input_id, &sample, 0)
+                .ProcessInput(self.codec.input_id, &sample.sample, 0)
                 .map_err(|failure| self.codec_failed(error(failure)))?;
         }
         self.codec.input_taken();
+        self.last = Some(sample);
         if let Some(source) = &mut self.source {
-            source.sample = Some(sample);
+            source.unread = true;
         }
         self.force_keyframe = false;
         self.last_submit = Some(now);
         self.last_pts_us = Some(pts_us);
-        self.pending.push_back((pts_us, now, !fresh));
-        if fresh {
-            self.presented = presented.map(|at| Presented::new(at, self.latest_presents));
+        self.pending.push_back((pts_us, now, fresh.is_none()));
+        if let Some(fresh) = fresh {
+            self.presented = fresh.at.map(|at| Presented::new(at, fresh.presents));
             if let Some(presented) = self.presented {
                 self.stats.coalesced_presents += u64::from(presented.presents.saturating_sub(1));
             }
-            self.latest_at = None;
-            self.latest_presents = 0;
+        } else {
+            self.stats.repeats += 1;
         }
-        self.latest_pending = false;
         self.stats.submitted += 1;
         self.stats.max_in_flight = self.stats.max_in_flight.max(self.pending.len());
         Ok(Submit::Submitted)
     }
 
-    /// Copy a new desktop image, if there is one, into `latest`, and release
-    /// the duplication frame at once. A frame held until the next acquire (as
-    /// windows-capture's `acquire_next_frame` does) keeps DXGI from
-    /// accumulating the next update meanwhile, so an acquire at the next tick
-    /// races that update and misses about every other one. A new image is
-    /// dated by its present, and counts the presents DXGI accumulated in it;
-    /// the first one is copied whatever its present says, so a still
-    /// desktop shows at once, and is left undated.
-    fn acquire(&mut self) -> Result<bool> {
-        let duplication = self.capture.duplication();
+    /// Convert a new desktop image, if there is one, into `sample`, and
+    /// release the duplication frame at once. A frame held until the next
+    /// acquire (as windows-capture's `acquire_next_frame` does) keeps DXGI
+    /// from accumulating the next update meanwhile, so an acquire at the
+    /// next tick races that update and misses about every other one. A new
+    /// image is dated by its present, and counts the presents DXGI
+    /// accumulated in it; the first one is converted whatever its present
+    /// says, so a still desktop shows at once, and is left undated.
+    fn acquire(&mut self, sample: &Sample) -> Result<Option<Fresh>> {
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
-        match unsafe { duplication.AcquireNextFrame(0, &mut info, &mut resource) } {
+        match unsafe {
+            self.capture
+                .duplication()
+                .AcquireNextFrame(0, &mut info, &mut resource)
+        } {
             Ok(()) => {}
-            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
+            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
             Err(e) => return Err(error(e)),
         }
-        let first = self.latest.is_none();
         if self.stats.first_acquire.is_none() {
             let acquired = FirstAcquire {
                 last_present_time: info.LastPresentTime,
@@ -1041,60 +1233,130 @@ impl Encoder {
                 resource = acquired.resource,
             );
         }
-        let copied = (|| {
-            let present = info.LastPresentTime;
-            // Zero: only the pointer moved.
-            if !(first && resource.is_some()) && (present == 0 || present == self.last_present) {
-                return Ok(false);
+        let converted = self.convert_frame(&info, resource, sample);
+        let released = unsafe { self.capture.duplication().ReleaseFrame() }.map_err(error);
+        converted.and_then(|converted| released.map(|()| converted))
+    }
+
+    /// Convert the frame `acquire` holds into `sample`, if it shows a new
+    /// picture, and hand the GPU that work before the frame goes back to
+    /// DXGI: straight from the duplication's surface, or, once the video
+    /// processor refused it, through a copy of it, as before.
+    fn convert_frame(
+        &mut self,
+        info: &DXGI_OUTDUPL_FRAME_INFO,
+        resource: Option<IDXGIResource>,
+        sample: &Sample,
+    ) -> Result<Option<Fresh>> {
+        let first = self.last.is_none();
+        let present = info.LastPresentTime;
+        // Zero: only the pointer moved.
+        if !(first && resource.is_some()) && (present == 0 || present == self.last_present) {
+            return Ok(None);
+        }
+        let frame: ID3D11Texture2D = resource
+            .ok_or_else(|| error("missing desktop frame"))?
+            .cast()
+            .map_err(error)?;
+        if first {
+            // The converter's source rectangle and turn take the frame at
+            // the size its display mode is scanned out at, a rotated
+            // display's included.
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            unsafe { frame.GetDesc(&mut desc) };
+            if (desc.Width, desc.Height) != self.input {
+                return Err(error(format!(
+                    "the desktop image is {}x{}, not the {}x{} its display mode and rotation give",
+                    desc.Width, desc.Height, self.input.0, self.input.1
+                )));
             }
-            let frame: ID3D11Texture2D = resource
-                .as_ref()
-                .ok_or_else(|| error("missing desktop frame"))?
-                .cast()
-                .map_err(error)?;
-            if self.latest.is_none() {
-                let mut desc = D3D11_TEXTURE2D_DESC::default();
-                unsafe { frame.GetDesc(&mut desc) };
-                desc.BindFlags = D3D11_BIND_RENDER_TARGET.0 as u32;
-                desc.MiscFlags = 0;
-                desc.CPUAccessFlags = 0;
-                desc.Usage = D3D11_USAGE_DEFAULT;
-                let mut texture = None;
-                unsafe {
-                    self.capture
-                        .device()
-                        .CreateTexture2D(&desc, None, Some(&mut texture))
-                        .map_err(error)?;
-                }
-                self.latest = texture;
+        }
+        let timing = time_begin(&mut self.gpu_timer, &self.capture)?;
+        if self.direct {
+            if let Err(failure) = self.converter.convert(&frame, sample) {
+                self.direct = false;
+                self.stats.direct_capture = false;
+                self.converter.forget_inputs();
+                tracing::info!(
+                    target: "pb_mapper_desktop::session",
+                    event = "desktop_capture_copied",
+                    error = %failure,
+                );
+                self.convert_copy(&frame, sample)?;
             }
-            let latest = self
-                .latest
-                .as_ref()
-                .ok_or_else(|| error("missing capture texture"))?;
-            unsafe { self.capture.device_context().CopyResource(latest, &frame) };
-            if present != 0 {
-                self.last_present = present;
-            }
-            self.stats.unique_captures += 1;
-            // A picture left waiting keeps its presents, and takes the newer
-            // one's time.
-            self.latest_at = if first {
+        } else {
+            self.convert_copy(&frame, sample)?;
+        }
+        time_end(&mut self.gpu_timer, &self.capture, timing, false);
+        unsafe { self.capture.device_context().Flush() };
+        if present != 0 {
+            self.last_present = present;
+        }
+        self.stats.unique_captures += 1;
+        Ok(Some(Fresh {
+            at: if first {
                 None
             } else {
                 present_instant(present)
-            };
-            self.latest_presents = self
-                .latest_presents
-                .saturating_add(info.AccumulatedFrames.max(1));
-            Ok(true)
-        })();
-        let released = unsafe { duplication.ReleaseFrame() }.map_err(error);
-        copied.and_then(|copied| released.map(|()| copied))
+            },
+            presents: info.AccumulatedFrames.max(1),
+        }))
+    }
+
+    /// Copy `frame` out of the duplication, then convert the copy into
+    /// `sample`: for a video processor that refuses the duplication's own
+    /// surface.
+    fn convert_copy(&mut self, frame: &ID3D11Texture2D, sample: &Sample) -> Result<()> {
+        if self.copied.is_none() {
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            unsafe { frame.GetDesc(&mut desc) };
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET.0 as u32;
+            desc.MiscFlags = 0;
+            desc.CPUAccessFlags = 0;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            let mut texture = None;
+            unsafe {
+                self.capture
+                    .device()
+                    .CreateTexture2D(&desc, None, Some(&mut texture))
+                    .map_err(error)?;
+            }
+            self.copied = texture;
+        }
+        let copied = self
+            .copied
+            .as_ref()
+            .ok_or_else(|| error("missing capture texture"))?;
+        unsafe { self.capture.device_context().CopyResource(copied, frame) };
+        self.converter.convert(copied, sample)
     }
 
     fn frame_period(&self) -> Duration {
         Duration::from_nanos(1_000_000_000 / u64::from(self.fps))
+    }
+}
+
+/// Open a span of the GPU work `capture`'s device queues, where `timer`
+/// (`Encoder::time_gpu`) asks for them.
+fn time_begin(
+    timer: &mut Option<GpuTimer>,
+    capture: &DxgiDuplicationApi,
+) -> Result<Option<gpu_time::Queries>> {
+    match timer {
+        Some(timer) => timer.begin(capture.device(), capture.device_context()),
+        None => Ok(None),
+    }
+}
+
+/// Close the span `time_begin` opened, for a `repeat` or a new picture.
+fn time_end(
+    timer: &mut Option<GpuTimer>,
+    capture: &DxgiDuplicationApi,
+    timing: Option<gpu_time::Queries>,
+    repeat: bool,
+) {
+    if let (Some(timer), Some(queries)) = (timer, timing) {
+        timer.end(capture.device_context(), queries, repeat);
     }
 }
 
@@ -1139,12 +1401,13 @@ fn counter_instant(ticks: i64, now: i64, frequency: i64, at: Instant) -> Option<
 }
 
 /// Why an encoder took no input in its first `FIRST_SUBMIT_WAIT`. It asked
-/// for input and capture had no desktop image to give it: capture is stuck,
-/// and is retried. It never asked, or had an image and no free sample for it:
-/// the encoder is stuck, a codec error. The probe encodes no frame, so this is
+/// for input, a sample was free, and capture had no desktop image to give
+/// it: capture is stuck, and is retried. It never asked, or the last submit
+/// found the sample pool `starved` (the encoder holds every sample): the
+/// encoder is stuck, a codec error. The probe encodes no frame, so this is
 /// where an H.265 encoder that never asks for input is turned off.
-fn unsubmitted(kind: VideoCodec, asked: bool, image: bool) -> std::io::Error {
-    if encoder_blamed(asked, image) {
+fn unsubmitted(kind: VideoCodec, asked: bool, starved: bool) -> std::io::Error {
+    if encoder_blamed(asked, starved) {
         codec_error(kind, error("hardware video encoder stalled"))
     } else {
         error("desktop capture delivered no image")
@@ -1152,9 +1415,10 @@ fn unsubmitted(kind: VideoCodec, asked: bool, image: bool) -> std::io::Error {
 }
 
 /// Whether an encoder that took no input in its first `FIRST_SUBMIT_WAIT`
-/// is itself stuck: it never `asked` for input, or had an `image` to take.
-fn encoder_blamed(asked: bool, image: bool) -> bool {
-    !asked || image
+/// is itself stuck: it never `asked` for input, or holds the samples a
+/// picture would go in (`starved`).
+fn encoder_blamed(asked: bool, starved: bool) -> bool {
+    !asked || starved
 }
 
 /// A DXGI device manager over `device`, which the encoder's own threads use.
@@ -1183,17 +1447,17 @@ mod tests {
     use super::*;
     #[test]
     fn an_encoder_that_never_asks_for_input_is_blamed_not_capture() {
-        let h265_failed = |asked, image| {
-            crate::failure_kind(&unsubmitted(VideoCodec::H265, asked, image))
+        let h265_failed = |asked, starved| {
+            crate::failure_kind(&unsubmitted(VideoCodec::H265, asked, starved))
                 == Some(FailureKind::EncoderFailed {
                     codec: VideoCodec::H265,
                 })
         };
-        // Asked, and capture had no image: capture is stuck, and is retried
-        // with H.265 still on.
+        // Asked, a sample free, and capture had no image: capture is stuck,
+        // and is retried with H.265 still on.
         assert!(!h265_failed(true, false));
-        // Never asked, or no sample for the image: the encoder's, so H.265 is
-        // turned off and the viewer reconnects to H.264.
+        // Never asked, or no free sample: the encoder's, so H.265 is turned
+        // off and the viewer reconnects to H.264.
         assert!(h265_failed(false, false));
         assert!(h265_failed(true, true));
     }
@@ -1266,5 +1530,50 @@ mod tests {
         assert_eq!(pickup_bucket(us(8_000)), 6);
         assert_eq!(pickup_bucket(us(8_001)), PICKUP_BUCKETS - 1);
         assert_eq!(pickup_bucket(Duration::from_secs(5)), PICKUP_BUCKETS - 1);
+    }
+
+    /// A display DXGI scans out turned reaches the video processor as the
+    /// same clockwise turn, which stands its picture upright at the
+    /// display's size; an unspecified rotation is none, and an unknown one
+    /// fails rather than being guessed.
+    #[test]
+    fn a_rotated_display_is_turned_upright_by_the_same_clockwise_angle() {
+        use converter::processor_rotation;
+        let turn = |rotation| display_rotation(rotation).map(processor_rotation).ok();
+        assert_eq!(turn(DXGI_MODE_ROTATION_IDENTITY), Some(None));
+        assert_eq!(turn(DXGI_MODE_ROTATION_UNSPECIFIED), Some(None));
+        assert_eq!(
+            turn(DXGI_MODE_ROTATION_ROTATE90),
+            Some(Some(D3D11_VIDEO_PROCESSOR_ROTATION_90))
+        );
+        assert_eq!(
+            turn(DXGI_MODE_ROTATION_ROTATE180),
+            Some(Some(D3D11_VIDEO_PROCESSOR_ROTATION_180))
+        );
+        assert_eq!(
+            turn(DXGI_MODE_ROTATION_ROTATE270),
+            Some(Some(D3D11_VIDEO_PROCESSOR_ROTATION_270))
+        );
+        assert_eq!(turn(DXGI_MODE_ROTATION(5)), None);
+        // A portrait display, whose mode is given upright as its desktop
+        // is, is captured landscape, as scanned out, and encoded portrait.
+        for rotation in [DXGI_MODE_ROTATION_ROTATE90, DXGI_MODE_ROTATION_ROTATE270] {
+            let rotation = display_rotation(rotation).unwrap();
+            let captured = rotation.scanned_out((1080, 1920), (1080, 1920));
+            assert_eq!(captured, (1920, 1080));
+            assert_eq!(rotation.upright(captured), (1080, 1920));
+        }
+    }
+
+    /// A session asks for speed until a vendor earns quality by a device
+    /// run; `video_bench --vp-usage` forces either.
+    #[test]
+    fn a_session_asks_the_video_processor_for_speed_until_a_vendor_earns_quality() {
+        for vendor in [0x10de, 0x8086, 0x1002] {
+            assert!(!vp_quality(VpUsage::Auto, vendor, true));
+            assert!(!vp_quality(VpUsage::Auto, vendor, false));
+            assert!(vp_quality(VpUsage::Quality, vendor, false));
+            assert!(!vp_quality(VpUsage::Speed, vendor, true));
+        }
     }
 }
