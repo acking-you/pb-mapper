@@ -14,6 +14,10 @@
 //! back to DXGI, and the picture is published, dated by its present. A
 //! frame that only moved the pointer is released and waited past.
 //!
+//! A desktop that arrives in FP16 (Windows HDR on) is tone mapped first
+//! (`tonemap.rs`), each picture drawn into an SDR texture of the tone
+//! map's while DXGI holds the frame, and that texture converted.
+//!
 //! Both threads queue work on the device's one immediate context: each
 //! holds the device's own lock (`ID3D11Multithread`, which the encoder's
 //! device manager turns on) across a picture's work, so that neither's
@@ -22,8 +26,9 @@
 use super::{
     FirstAcquire, Fresh,
     converter::{Converter, Sample},
-    gpu_time::{GpuSpan, GpuTimer},
+    gpu_time::{GpuSpan, GpuTimer, Split},
     present_instant,
+    tonemap::{self, SdrWhite, ToneMap},
 };
 use crate::{Result, codec::present_waiter::PresentSource, error};
 use parking_lot::Mutex;
@@ -41,7 +46,10 @@ use windows::{
                 D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device,
                 ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
             },
-            Dxgi::{DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIResource},
+            Dxgi::{
+                Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT},
+                DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIResource,
+            },
         },
         System::{
             Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
@@ -74,6 +82,8 @@ pub(super) struct Shared {
     copy: AtomicBool,
     /// Pictures are converted straight from the duplication's surface.
     direct: AtomicBool,
+    /// The desktop arrives in FP16, and each picture is tone mapped first.
+    tone_mapped: AtomicBool,
     /// `time_gpu` asked for each picture's GPU work to be timed, in
     /// `gpu_timer`.
     timing: AtomicBool,
@@ -90,6 +100,7 @@ impl Shared {
         Ok(Self {
             copy: AtomicBool::new(false),
             direct: AtomicBool::new(true),
+            tone_mapped: AtomicBool::new(false),
             timing: AtomicBool::new(false),
             gpu_timer: Mutex::new(None),
             first_acquire: OnceLock::new(),
@@ -107,6 +118,10 @@ impl Shared {
 
     pub(super) fn direct(&self) -> bool {
         self.direct.load(Ordering::Acquire)
+    }
+
+    pub(super) fn tone_mapped(&self) -> bool {
+        self.tone_mapped.load(Ordering::Acquire)
     }
 
     pub(super) fn first_acquire(&self) -> Option<FirstAcquire> {
@@ -132,15 +147,16 @@ impl Shared {
 
     /// Do `work`, a picture's work (a `repeat` or a new one) on `device`'s
     /// immediate `context`, holding the device's lock, and time it on the
-    /// GPU where `time_gpu` asked. With `flush`, the GPU is handed the work
-    /// once it succeeded, the span's closing timestamps with it.
+    /// GPU where `time_gpu` asked, its tone map apart where it marks the
+    /// `Split`. With `flush`, the GPU is handed the work once it succeeded,
+    /// the span's closing timestamps with it.
     pub(super) fn work<R>(
         &self,
         device: &ID3D11Device,
         context: &ID3D11DeviceContext,
         repeat: bool,
         flush: bool,
-        work: impl FnOnce() -> Result<R>,
+        work: impl FnOnce(&mut Split<'_>) -> Result<R>,
     ) -> Result<R> {
         let mut timer = self
             .timing
@@ -152,9 +168,11 @@ impl Shared {
             Some(timer) => timer.begin(device, context)?,
             None => None,
         };
-        let done = work();
+        let mut split = Split::new(context, queries.as_ref());
+        let done = work(&mut split);
+        let split = split.marked();
         if let (Some(timer), Some(queries)) = (timer, queries) {
-            timer.end(context, queries, repeat);
+            timer.end(context, queries, repeat, split);
         }
         if flush && done.is_ok() {
             // SAFETY: a call on the context the caller holds, under the
@@ -209,6 +227,14 @@ pub(super) struct DxgiSource {
     /// into `copied` first.
     direct: bool,
     copied: Option<ID3D11Texture2D>,
+    /// The desktop arrives in FP16, as the first frame's texture says:
+    /// each picture is tone mapped into an SDR texture, which is converted.
+    fp16: bool,
+    /// The display's SDR white level, which thread C read as it built the
+    /// duplication of a desktop its mode says is in FP16, and the tone
+    /// map, built at a level as the first FP16 picture arrives.
+    white: Option<SdrWhite>,
+    tone_map: Option<ToneMap>,
     /// The last converted picture's `LastPresentTime`.
     last_present: i64,
     /// No picture was converted yet.
@@ -218,11 +244,13 @@ pub(super) struct DxgiSource {
 }
 impl DxgiSource {
     /// On thread C, which built `capture` and `converter` for `input`
-    /// pictures.
+    /// pictures, and read the display's SDR `white` level for a
+    /// duplication whose mode is FP16.
     pub(super) fn new(
         capture: DxgiDuplicationApi,
         converter: Converter,
         input: (u32, u32),
+        white: Option<SdrWhite>,
         shared: Arc<Shared>,
     ) -> Self {
         Self {
@@ -234,6 +262,9 @@ impl DxgiSource {
             thread_c: unsafe { GetCurrentThreadId() },
             direct: true,
             copied: None,
+            fp16: false,
+            white,
+            tone_map: None,
             last_present: 0,
             first: true,
             apartment: None,
@@ -272,6 +303,42 @@ impl DxgiSource {
                     desc.Width, desc.Height, self.input.0, self.input.1
                 )));
             }
+            // A duplication hands out the format it chose for its life:
+            // DXGI ends it (access lost) as the desktop changes format.
+            self.fp16 = match desc.Format {
+                DXGI_FORMAT_B8G8R8A8_UNORM => false,
+                DXGI_FORMAT_R16G16B16A16_FLOAT => true,
+                other => {
+                    return Err(error(format!(
+                        "the desktop image is in DXGI format {}, neither BGRA8 nor FP16",
+                        other.0
+                    )));
+                }
+            };
+            if self.fp16 {
+                self.shared.tone_mapped.store(true, Ordering::Release);
+                self.shared.direct.store(false, Ordering::Release);
+            }
+        }
+        if self.fp16 && self.tone_map.is_none() {
+            // Thread C read the level for a duplication whose mode is
+            // FP16; FP16 that the mode did not announce has it read here.
+            let white = self.white.or_else(|| {
+                // SAFETY: a plain call on the duplication's output.
+                let output = unsafe { self.capture.output().GetDesc() }.ok()?;
+                tonemap::sdr_white(&output.DeviceName)
+            });
+            let Some(white) = white else {
+                // Windows tells no level for FP16 that thread C cannot see
+                // coming: rather than the tone map guess it, the retry
+                // duplicates in BGRA8 only, which DXGI converts as before.
+                let failure = error("the desktop arrives in FP16, with no SDR white level read");
+                tonemap::refuse(&failure);
+                return Err(failure);
+            };
+            // Before the device's lock: the first build of a process
+            // compiles its shaders.
+            self.tone_map = Some(ToneMap::build(self.capture.device(), self.input, white)?);
         }
         let sample = take().ok_or_else(|| error("capture thread armed without a sample"))?;
         let Self {
@@ -280,6 +347,7 @@ impl DxgiSource {
             shared,
             direct,
             copied,
+            tone_map,
             ..
         } = self;
         if *direct && shared.copy.load(Ordering::Acquire) {
@@ -287,7 +355,16 @@ impl DxgiSource {
             converter.forget_inputs();
         }
         let (device, context) = (capture.device(), capture.device_context());
-        shared.work(device, context, false, true, || {
+        shared.work(device, context, false, true, |split| {
+            // An FP16 picture: drawn as SDR into the tone map's texture,
+            // which the video processor converts as it would a copy.
+            if let Some(tone_map) = tone_map {
+                let done = tone_map.draw(device, context, &frame).and_then(|picture| {
+                    split.tone_mapped();
+                    converter.convert(picture, &sample)
+                });
+                return tone_map.settle(device, done);
+            }
             if *direct {
                 if let Err(failure) = converter.convert(&frame, &sample) {
                     *direct = false;
