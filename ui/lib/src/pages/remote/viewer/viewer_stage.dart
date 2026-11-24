@@ -200,14 +200,18 @@ class _ViewerStageState extends State<ViewerStage> {
         // A runner that presents pictures itself (the macOS layer) shows
         // them in its own view, which Flutter composites and transforms as
         // it would the texture. It takes hits as the texture does; the
-        // pointer's events still reach Flutter through the native view.
+        // pointer's events still reach Flutter through the native view. It
+        // never takes the keyboard focus, which would hand the keys to a
+        // view that wants none.
         return viewType != null
-            ? AppKitView(
-                key: ValueKey(id),
-                viewType: viewType,
-                creationParams: <String, Object?>{'textureId': id},
-                creationParamsCodec: const StandardMessageCodec(),
-                hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+            ? ExcludeFocus(
+                child: AppKitView(
+                  key: ValueKey(id),
+                  viewType: viewType,
+                  creationParams: <String, Object?>{'textureId': id},
+                  creationParamsCodec: const StandardMessageCodec(),
+                  hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+                ),
               )
             : Texture(
                 key: ValueKey(id),

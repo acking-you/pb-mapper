@@ -400,6 +400,18 @@ void main() {
       ),
       {'textureId': 7},
     );
+    // The view never takes the keyboard focus from the viewer.
+    final viewFocus = tester
+        .widget<Focus>(
+          find.descendant(
+            of: find.byType(AppKitView),
+            matching: find.byType(Focus),
+          ),
+        )
+        .focusNode!;
+    viewFocus.requestFocus();
+    await tester.pump();
+    expect(viewFocus.hasFocus, isFalse);
     final element = tester.element(find.byType(AppKitView));
     Future<void> enter(DesktopSessionView s) async {
       session.value = s;
