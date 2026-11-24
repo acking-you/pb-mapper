@@ -392,6 +392,29 @@ void main() {
     variant: TargetPlatformVariant.only(TargetPlatform.macOS),
   );
 
+  testWidgets(
+    "what fell short of a step toward one host is not counted toward the "
+    'next, which may scroll in other steps',
+    (tester) async {
+      final h = await _surface(tester, capabilities: _hires);
+      final pad = TestPointer(2, PointerDeviceKind.trackpad);
+      // 0.75 px: 0.9 units, short of one.
+      await _pan(tester, pad, [0.75]);
+      await tester.sendEventToBinding(pad.panZoomEnd());
+      expect(_scrolls(h), isEmpty);
+      // A reconnect to an older host, in notches of 30 px.
+      h.api.viewerStatusValue = liveStatus(controlling: true, generation: 2);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(h.input.ready.value && !h.input.hiresWheel, isTrue);
+      // 3 px: a tenth of a notch, which the 0.9 units must not complete.
+      await _pan(tester, pad, [3]);
+      await tester.sendEventToBinding(pad.panZoomEnd());
+      expect(_scrolls(h), isEmpty);
+      await _close(tester, h);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+  );
+
   test('a fling is too slow to start below the fling velocity, and keeps '
       'its direction', () {
     expect(

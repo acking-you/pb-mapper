@@ -89,7 +89,7 @@ class _RemoteSurfaceState extends State<RemoteSurface>
     super.initState();
     _flingTicker = createTicker(_flingTick);
     widget.touchMode.addListener(_modeChanged);
-    widget.input.localCancels.addListener(_stopFling);
+    widget.input.localCancels.addListener(_scrollCancelled);
     WheelLines.load();
   }
 
@@ -101,10 +101,9 @@ class _RemoteSurfaceState extends State<RemoteSurface>
       widget.touchMode.addListener(_modeChanged);
     }
     if (oldWidget.input != widget.input) {
-      oldWidget.input.localCancels.removeListener(_stopFling);
-      widget.input.localCancels.addListener(_stopFling);
-      _stopFling();
-      _scroll.clear();
+      oldWidget.input.localCancels.removeListener(_scrollCancelled);
+      widget.input.localCancels.addListener(_scrollCancelled);
+      _scrollCancelled();
     }
     if (oldWidget.machine != widget.machine) _timer?.cancel();
   }
@@ -112,7 +111,7 @@ class _RemoteSurfaceState extends State<RemoteSurface>
   @override
   void dispose() {
     widget.touchMode.removeListener(_modeChanged);
-    widget.input.localCancels.removeListener(_stopFling);
+    widget.input.localCancels.removeListener(_scrollCancelled);
     _flingTicker.dispose();
     _timer?.cancel();
     super.dispose();
@@ -324,6 +323,14 @@ class _RemoteSurfaceState extends State<RemoteSurface>
   void _stopFling() {
     _fling = null;
     if (_flingTicker.isActive) _flingTicker.stop();
+  }
+
+  /// Focus or control lost, or a new picture generation, perhaps of a host
+  /// that scrolls in other steps: the fling stops, and what fell short of
+  /// a step is dropped with it.
+  void _scrollCancelled() {
+    _stopFling();
+    _scroll.clear();
   }
 
   double get _devicePixelRatio =>
