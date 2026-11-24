@@ -279,9 +279,10 @@ mod readiness_tests {
         assert!(update_required(old.protocol(), true, || true));
         assert!(update_required(old.protocol(), false, || false));
         // Protocol 3 sends input with its generation alone, protocol 4
-        // refuses the background host's `lan_first`, protocol 5 H.265, and
-        // protocol 6 display modes: all are outdated too.
-        for outdated in [3, 4, 5, 6] {
+        // refuses the background host's `lan_first`, protocol 5 H.265,
+        // protocol 6 display modes, and protocol 10 the `Adapter` request:
+        // all are outdated too.
+        for outdated in [3, 4, 5, 6, 10] {
             let previous = installation(&format!(r#""schema":2,"protocol":{outdated},"#)).unwrap();
             assert!(update_required(previous.protocol(), true, || true));
         }
