@@ -12,8 +12,9 @@ use std::{
     future::Future,
     net::SocketAddr,
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        mpsc,
     },
     time::{Duration, Instant},
 };
@@ -30,6 +31,7 @@ const ENCODER_EXPIRY: Duration = Duration::from_millis(250);
 /// A LAN or nearby direct path, one way.
 const SHORT_PATH_MS: u64 = 18;
 const FEEDBACK: &str = "pb_mapper_desktop::feedback";
+const FRAMES: &str = "pb_mapper_desktop::frames";
 
 /// One host stats interval, as `desktop_feedback_interval` traced it.
 #[derive(Clone, Copy, Debug)]
@@ -100,29 +102,95 @@ impl tracing::field::Visit for Interval {
     }
 }
 
-/// The host's feedback trace of one case.
+/// One accepted presentation, as the viewer's `desktop_frame_view` traced it,
+/// in microseconds since its sink began.
+#[derive(Clone, Copy, Debug)]
+struct View {
+    at: Instant,
+    view: bool,
+    received_us: u64,
+    handed_us: u64,
+    presented_us: u64,
+}
+impl View {
+    fn new(at: Instant) -> Self {
+        Self {
+            at,
+            view: false,
+            received_us: 0,
+            handed_us: 0,
+            presented_us: 0,
+        }
+    }
+    /// From receipt to the hand-off: the wait in the sink.
+    fn sink_wait_us(&self) -> u64 {
+        self.handed_us.saturating_sub(self.received_us)
+    }
+    /// From receipt to presentation.
+    fn presented_after_us(&self) -> u64 {
+        self.presented_us.saturating_sub(self.received_us)
+    }
+}
+impl tracing::field::Visit for View {
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        match field.name() {
+            "received_us" => self.received_us = value,
+            "handed_us" => self.handed_us = value,
+            "presented_us" => self.presented_us = value,
+            _ => {}
+        }
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.view = format!("{value:?}") == "desktop_frame_view";
+        }
+    }
+}
+
+/// The host's feedback trace of one case, and the viewer's presentations
+/// when the case asked for them.
 #[derive(Clone, Default)]
-struct Trace(Arc<Mutex<Vec<Interval>>>);
+struct Trace {
+    intervals: Arc<Mutex<Vec<Interval>>>,
+    views: Arc<Mutex<Vec<View>>>,
+}
 impl Trace {
     fn last(&self) -> Interval {
-        *self.0.lock().unwrap().last().unwrap()
+        *self.intervals.lock().unwrap().last().unwrap()
     }
     /// The intervals traced in `from..to`.
     fn between(&self, from: Instant, to: Instant) -> Vec<Interval> {
-        let intervals = self.0.lock().unwrap();
+        let intervals = self.intervals.lock().unwrap();
         intervals
             .iter()
             .filter(|interval| (from..to).contains(&interval.at))
             .copied()
             .collect()
     }
+    /// The presentations traced in `from..to`.
+    fn views(&self, from: Instant, to: Instant) -> Vec<View> {
+        let views = self.views.lock().unwrap();
+        views
+            .iter()
+            .filter(|view| (from..to).contains(&view.at))
+            .copied()
+            .collect()
+    }
 }
 impl<S: tracing::Subscriber> Layer<S> for Trace {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() == FRAMES {
+            let mut view = View::new(Instant::now());
+            event.record(&mut view);
+            if view.view {
+                self.views.lock().unwrap().push(view);
+            }
+            return;
+        }
         let mut interval = Interval::new(Instant::now());
         event.record(&mut interval);
         if interval.feedback {
-            self.0.lock().unwrap().push(interval);
+            self.intervals.lock().unwrap().push(interval);
         }
     }
 }
@@ -131,17 +199,26 @@ impl<S: tracing::Subscriber> Layer<S> for Trace {
 /// feedback into the case's `Trace`. The cases measure timing, so they never
 /// share the machine with one another.
 fn traced<F: Future<Output = ()>>(case: impl FnOnce(Trace) -> F) {
+    traced_with(false, case);
+}
+
+/// `traced`, with the viewer's presentations in the trace as well.
+fn traced_views<F: Future<Output = ()>>(case: impl FnOnce(Trace) -> F) {
+    traced_with(true, case);
+}
+
+fn traced_with<F: Future<Output = ()>>(views: bool, case: impl FnOnce(Trace) -> F) {
     static SERIAL: Mutex<()> = Mutex::new(());
     let _serial = SERIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let trace = Trace::default();
+    let mut targets = Targets::new().with_target(FEEDBACK, tracing::Level::DEBUG);
+    if views {
+        targets = targets.with_target(FRAMES, tracing::Level::TRACE);
+    }
     let dispatch = tracing::Dispatch::new(
-        tracing_subscriber::registry().with(
-            trace
-                .clone()
-                .with_filter(Targets::new().with_target(FEEDBACK, tracing::Level::DEBUG)),
-        ),
+        tracing_subscriber::registry().with(trace.clone().with_filter(targets)),
     );
     let threads = dispatch.clone();
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -271,8 +348,52 @@ impl Backend for SyntheticEncoder {
     }
 }
 
+/// A thread that traces into the case's `Trace`, as a native consumer's
+/// thread is outside the runtime.
+fn traced_thread(body: impl FnOnce() + Send + 'static) -> std::thread::JoinHandle<()> {
+    let dispatch = tracing::dispatcher::get_default(tracing::Dispatch::clone);
+    std::thread::spawn(move || tracing::dispatcher::with_default(&dispatch, body))
+}
+
+/// One stall of a `Decoder`: when it began and ended, and when the first unit
+/// received after it began was presented.
+#[derive(Clone, Copy, Debug, Default)]
+struct Stall {
+    began: Option<Instant>,
+    ended: Option<Instant>,
+    first_fresh: Option<Instant>,
+}
+
+/// How a `Decoder` takes its units; a case may change it while it runs.
+#[derive(Default)]
+struct Pace {
+    /// Each unit's decode time, in µs.
+    decode_us: AtomicU64,
+    /// A stall to take once, holding the next unit, in µs.
+    stall_us: AtomicU64,
+    stall: Mutex<Stall>,
+}
+impl Pace {
+    fn new(decode: Duration) -> Arc<Self> {
+        let pace = Arc::new(Self::default());
+        pace.set(decode);
+        pace
+    }
+    fn set(&self, decode: Duration) {
+        self.decode_us
+            .store(decode.as_micros() as u64, Ordering::Relaxed);
+    }
+    fn stall(&self, stall: Duration) {
+        self.stall_us
+            .store(stall.as_micros() as u64, Ordering::Release);
+    }
+    fn stalled(&self) -> Stall {
+        *self.stall.lock().unwrap()
+    }
+}
+
 /// A simulated decoder on its own thread, as a native consumer runs: it pulls
-/// a unit, spends `decode` on it, then presents it.
+/// a unit, spends its `Pace` on it, then presents it.
 struct Decoder {
     stop: Arc<AtomicBool>,
     sizes: Arc<Mutex<BTreeSet<(u32, u32)>>>,
@@ -280,17 +401,39 @@ struct Decoder {
 }
 impl Decoder {
     fn start(viewer: &Viewer, decode: Duration) -> Self {
+        Self::paced(viewer, Pace::new(decode))
+    }
+    fn paced(viewer: &Viewer, pace: Arc<Pace>) -> Self {
         let consumer = viewer.video_sink().attach().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let sizes = Arc::new(Mutex::new(BTreeSet::new()));
         let (done, seen) = (stop.clone(), sizes.clone());
-        let thread = std::thread::spawn(move || {
+        let thread = traced_thread(move || {
             while !done.load(Ordering::Acquire) {
                 match consumer.next(Duration::from_millis(50), wire::MAX_PAYLOAD) {
                     Pull::Unit(unit) => {
                         seen.lock().unwrap().insert((unit.width, unit.height));
-                        std::thread::sleep(decode);
-                        consumer.presented(unit.generation, unit.frame_id);
+                        let stall = pace.stall_us.swap(0, Ordering::AcqRel);
+                        if stall > 0 {
+                            let began = Instant::now();
+                            std::thread::sleep(Duration::from_micros(stall));
+                            *pace.stall.lock().unwrap() = Stall {
+                                began: Some(began),
+                                ended: Some(Instant::now()),
+                                first_fresh: None,
+                            };
+                        }
+                        std::thread::sleep(Duration::from_micros(
+                            pace.decode_us.load(Ordering::Relaxed),
+                        ));
+                        if consumer.presented(unit.generation, unit.frame_id) {
+                            let mut stall = pace.stall.lock().unwrap();
+                            if stall.first_fresh.is_none()
+                                && stall.began.is_some_and(|began| unit.received_at >= began)
+                            {
+                                stall.first_fresh = Some(Instant::now());
+                            }
+                        }
                     }
                     Pull::Closed => break,
                     _ => {}
@@ -311,6 +454,80 @@ impl Drop for Decoder {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+/// A simulated decoder that queues inside itself, as the Linux runner's
+/// GStreamer pipeline does: one thread pulls a unit only while fewer than
+/// `depth` are inside, another decodes them in order, `decode` each, and
+/// presents them.
+struct Pipelined {
+    stop: Arc<AtomicBool>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+impl Pipelined {
+    fn start(viewer: &Viewer, depth: usize, decode: Duration) -> Self {
+        let consumer = Arc::new(viewer.video_sink().attach().unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let inside = Arc::new((Mutex::new(0usize), Condvar::new()));
+        let (units, queued) = mpsc::channel::<VideoUnit>();
+        let feeder = {
+            let (consumer, stop, inside) = (consumer.clone(), stop.clone(), inside.clone());
+            traced_thread(move || {
+                let (count, room) = &*inside;
+                while !stop.load(Ordering::Acquire) {
+                    let full = {
+                        let count = count.lock().unwrap();
+                        let (count, _) = room
+                            .wait_timeout_while(count, Duration::from_millis(50), |count| {
+                                *count >= depth
+                            })
+                            .unwrap();
+                        *count >= depth
+                    };
+                    if full {
+                        continue;
+                    }
+                    match consumer.next(Duration::from_millis(50), wire::MAX_PAYLOAD) {
+                        Pull::Unit(unit) => {
+                            *count.lock().unwrap() += 1;
+                            if units.send(unit).is_err() {
+                                break;
+                            }
+                        }
+                        Pull::Closed => break,
+                        _ => {}
+                    }
+                }
+            })
+        };
+        let decoder = {
+            let stop = stop.clone();
+            traced_thread(move || {
+                let (count, room) = &*inside;
+                while !stop.load(Ordering::Acquire) {
+                    let Ok(unit) = queued.recv_timeout(Duration::from_millis(50)) else {
+                        continue;
+                    };
+                    std::thread::sleep(decode);
+                    consumer.presented(unit.generation, unit.frame_id);
+                    *count.lock().unwrap() -= 1;
+                    room.notify_one();
+                }
+            })
+        };
+        Self {
+            stop,
+            threads: vec![feeder, decoder],
+        }
+    }
+}
+impl Drop for Pipelined {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        for thread in self.threads.drain(..) {
             thread.join().unwrap();
         }
     }
@@ -453,6 +670,17 @@ impl Rig {
         sizes: Sizes,
         latency: Duration,
     ) -> Self {
+        Self::at_fps(name, shape, sizes, latency, CEILING_FPS as u32).await
+    }
+    /// A rig whose viewer asks for `fps`: its display's rate at 60, otherwise
+    /// the user's own choice, which is every preset's ceiling.
+    async fn at_fps(
+        name: &str,
+        shape: Option<Arc<Shape>>,
+        sizes: Sizes,
+        latency: Duration,
+        fps: u32,
+    ) -> Self {
         let relay = Relay::start(&format!("desktop-{name}")).await;
         let client = |addr: SocketAddr| {
             Client::from_credential(addr.to_string(), admin_credential(), true, None)
@@ -484,7 +712,7 @@ impl Rig {
             }
             None => (client(relay.addr()), None),
         };
-        let viewer = connect_viewer(&remote, &host).await;
+        let viewer = connect_viewer_at(&remote, &host, fps).await;
         Self {
             host,
             viewer,
@@ -509,6 +737,11 @@ impl Rig {
 
 /// A viewer of `host` through `client`, on the relay.
 async fn connect_viewer(client: &Client, host: &Host) -> Viewer {
+    connect_viewer_at(client, host, CEILING_FPS as u32).await
+}
+
+/// A viewer of `host` through `client`, on the relay, asking for `fps`.
+async fn connect_viewer_at(client: &Client, host: &Host, fps: u32) -> Viewer {
     Viewer::connect(
         client,
         host.invitation(),
@@ -518,8 +751,8 @@ async fn connect_viewer(client: &Client, host: &Host) -> Viewer {
         },
         ViewerConfig {
             codecs: vec![VideoCodec::H264],
-            limits: VideoLimits::for_viewer(60.0),
-            fps_override: false,
+            limits: VideoLimits::for_viewer(f64::from(fps)),
+            fps_override: u64::from(fps) != CEILING_FPS,
             quality: QualityPreset::Balanced,
             progress: None,
         },
@@ -855,34 +1088,59 @@ fn idr_slower_than_a_second_is_followed_not_replaced() {
     });
 }
 
+fn mean_pace(intervals: &[Interval]) -> f64 {
+    intervals
+        .iter()
+        .map(|interval| interval.pace_fps)
+        .sum::<u64>() as f64
+        / intervals.len().max(1) as f64
+}
+
+fn caps(intervals: &[Interval]) -> Vec<Option<u64>> {
+    intervals
+        .iter()
+        .map(|interval| interval.viewer_cap)
+        .collect()
+}
+
+/// The 95th percentile, by rank.
+fn p95(mut values: Vec<u64>) -> Option<u64> {
+    values.sort_unstable();
+    let rank = (values.len() * 95).div_ceil(100);
+    values.get(rank.checked_sub(1)?).copied()
+}
+
 /// A decoder that takes 67 ms per frame: the viewer's fps cap brings the host
 /// down to what it presents, while the host's own controller, its bits per
-/// frame and its rate model stay where the network puts them.
+/// frame and its rate model stay where the network puts them. Once the cap
+/// has found the decoder, after the first 10 s, it holds the pace at 13 to 15
+/// without a backlog episode or a keyframe request.
 #[test]
-#[ignore = "explicit ~20-second slow presenter acceptance"]
+#[ignore = "explicit ~60-second slow presenter acceptance"]
 fn slow_presenter_is_capped_by_fps_cap_not_host_backpressure() {
     traced(|trace| async move {
         let rig = Rig::start("slow-presenter", None, TYPICAL).await;
         let _decoder = Decoder::start(&rig.viewer, Duration::from_millis(67));
-        tokio::time::sleep(Duration::from_secs(20)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let settled = (Instant::now(), rig.viewer.status());
+        tokio::time::sleep(Duration::from_secs(50)).await;
         let measured = Instant::now();
         let status = rig.viewer.status();
         rig.stop().await;
-        let steady = trace.between(measured - Duration::from_secs(10), measured);
-        let mean_pace = steady.iter().map(|interval| interval.pace_fps).sum::<u64>() as f64
-            / steady.len() as f64;
+        let steady = trace.between(settled.0, measured);
+        let mean_pace = mean_pace(&steady);
         let last = *steady.last().unwrap();
+        let backlog_drops = status.stats.backlog_drops - settled.1.stats.backlog_drops;
+        let keyframes_requested =
+            status.stats.keyframes_requested - settled.1.stats.keyframes_requested;
         println!(
-            "slow_presenter decode_ms=67 mean_pace_fps={mean_pace:.1} caps={:?} fps={} encoder_bitrate={} presented_fps={:.1} backlog_drops={} keyframes_requested={} expired_encoder_outputs={} state={:?}",
-            steady
-                .iter()
-                .map(|interval| interval.viewer_cap)
-                .collect::<Vec<_>>(),
+            "slow_presenter decode_ms=67 seconds=10..60 mean_pace_fps={mean_pace:.1} caps={:?} fps={} encoder_bitrate={} presented_fps={:.1} backlog_drops={backlog_drops} keyframes_requested={keyframes_requested} first_10s_backlog_drops={} first_10s_keyframes_requested={} expired_encoder_outputs={} state={:?}",
+            caps(&steady),
             last.fps,
             last.encoder_bitrate,
             status.stats.presented_fps,
-            status.stats.backlog_drops,
-            status.stats.keyframes_requested,
+            settled.1.stats.backlog_drops,
+            settled.1.stats.keyframes_requested,
             rig.expired(),
             status.state
         );
@@ -891,7 +1149,12 @@ fn slow_presenter_is_capped_by_fps_cap_not_host_backpressure() {
             steady.iter().all(|interval| interval.viewer_cap.is_some()),
             "the fps cap must hold the host down"
         );
-        assert!((10.0..=16.0).contains(&mean_pace), "{mean_pace}");
+        assert!((13.0..=15.0).contains(&mean_pace), "{mean_pace}");
+        assert_eq!(
+            (backlog_drops, keyframes_requested),
+            (0, 0),
+            "the cap stays below the decoder after the first 10 s"
+        );
         assert_eq!(last.fps, CEILING_FPS, "the network is not congested");
         assert!(
             last.encoder_bitrate >= START_BPS && !last.timestamp_model,
@@ -900,6 +1163,268 @@ fn slow_presenter_is_capped_by_fps_cap_not_host_backpressure() {
         assert!(steady.iter().all(|interval| !interval.unresponsive));
         assert_eq!(rig.expired(), 0);
     });
+}
+
+/// The first interval in `from..` that `found` accepts, waiting up to `limit`
+/// for it; how long after `from` it was traced.
+async fn first_after(
+    trace: &Trace,
+    from: Instant,
+    limit: Duration,
+    found: impl Fn(&Interval) -> bool,
+) -> Option<Duration> {
+    loop {
+        let first = trace
+            .between(from, Instant::now())
+            .into_iter()
+            .find(|interval| found(interval));
+        if first.is_some() || from.elapsed() > limit {
+            return first.map(|interval| interval.at - from);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// A decoder that takes 67 ms per frame for 20 s, then 5 ms: the fps cap
+/// that held the host down to the slow decoder must go once it is fast.
+/// Reports how long after the speed-up the host's trace showed no cap, which
+/// must be no longer than before the cap remembered capacities.
+#[test]
+#[ignore = "explicit ~45-second decoder speed-up measurement"]
+fn slow_decoder_speeds_up() {
+    traced(|trace| async move {
+        let rig = Rig::start("speeds-up", None, TYPICAL).await;
+        let pace = Pace::new(Duration::from_millis(67));
+        let _decoder = Decoder::paced(&rig.viewer, pace.clone());
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        pace.set(Duration::from_millis(5));
+        let faster = Instant::now();
+        let removed = first_after(&trace, faster, Duration::from_secs(40), |interval| {
+            interval.viewer_cap.is_none()
+        })
+        .await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let status = rig.viewer.status();
+        rig.stop().await;
+        println!(
+            "slow_decoder_speeds_up decode_ms=67->5 at_s=20 cap_removed_after_ms={:?} caps_slow={:?} caps_fast={:?} backlog_drops={} keyframes_requested={} received_fps={:.1} state={:?}",
+            removed.map(|after| after.as_millis()),
+            caps(&trace.between(faster - Duration::from_secs(10), faster)),
+            caps(&trace.between(faster, Instant::now())),
+            status.stats.backlog_drops,
+            status.stats.keyframes_requested,
+            status.stats.received_fps,
+            status.state
+        );
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        // The slowest of three runs before the cap remembered the decoder's
+        // capacity (docs/benchmarks/2026-11-24-viewer-fps-cap).
+        assert!(
+            removed.is_some_and(|after| after <= Duration::from_secs(12)),
+            "the cap must go within 12 s of the decoder getting fast: {removed:?}"
+        );
+    });
+}
+
+/// A decoder that queues up to four units inside itself, as the Linux
+/// runner's GStreamer pipeline does, and decodes each in 67 ms: what it
+/// holds is lag the sink's queue does not see. Once the cap has found it,
+/// after the first 10 s, no backlog episode comes. Reports the pace, the caps
+/// and the 95th percentile from receipt to presentation.
+#[test]
+#[ignore = "explicit ~30-second pipelined slow consumer acceptance"]
+fn pipelined_slow_consumer() {
+    traced_views(|trace| async move {
+        let rig = Rig::start("pipelined", None, TYPICAL).await;
+        let _decoder = Pipelined::start(&rig.viewer, 4, Duration::from_millis(67));
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let settled = (Instant::now(), rig.viewer.status());
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        let measured = Instant::now();
+        let status = rig.viewer.status();
+        rig.stop().await;
+        let steady = trace.between(settled.0, measured);
+        let views = trace.views(settled.0, measured);
+        let backlog_drops = status.stats.backlog_drops - settled.1.stats.backlog_drops;
+        let keyframes_requested =
+            status.stats.keyframes_requested - settled.1.stats.keyframes_requested;
+        println!(
+            "pipelined_slow_consumer depth=4 decode_ms=67 seconds=10..30 mean_pace_fps={:.1} caps={:?} presented={} presented_after_p95_ms={:?} backlog_drops={backlog_drops} keyframes_requested={keyframes_requested} first_10s_backlog_drops={} presented_fps={:.1} state={:?}",
+            mean_pace(&steady),
+            caps(&steady),
+            views.len(),
+            p95(views.iter().map(View::presented_after_us).collect()).map(|us| us / 1000),
+            settled.1.stats.backlog_drops,
+            status.stats.presented_fps,
+            status.state
+        );
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        assert_eq!(
+            backlog_drops, 0,
+            "the cap stays below the decoder after the first 10 s"
+        );
+    });
+}
+
+/// A 120 fps session (the user's own rate, so every preset's ceiling) whose
+/// decoder takes 10 ms a unit, just short of the rate. Reports, from 10 s to
+/// 30 s, the pace and the caps, the sink's wait (receipt to hand-off) at the
+/// 95th percentile, backlog episodes and units the sink discarded.
+#[test]
+#[ignore = "explicit ~30-second 120 fps near-capacity measurement"]
+fn fast_consumer_at_120() {
+    traced_views(|trace| async move {
+        let rig = Rig::at_fps("fast-120", None, TYPICAL, ENCODE_TIME, 120).await;
+        let _decoder = Decoder::start(&rig.viewer, Duration::from_millis(10));
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let settled = (Instant::now(), Counters::read(&rig.viewer));
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        let measured = Instant::now();
+        let after = Counters::read(&rig.viewer);
+        rig.stop().await;
+        let steady = trace.between(settled.0, measured);
+        let views = trace.views(settled.0, measured);
+        let (before, status) = (&settled.1.status.stats, &after.status.stats);
+        println!(
+            "fast_consumer_at_120 decode_ms=10 seconds=10..30 mean_pace_fps={:.1} caps={:?} presented={} sink_wait_p95_ms={:?} presented_after_p95_ms={:?} backlog_drops={} keyframes_requested={} sink_discarded={} presented_fps={:.1} state={:?}",
+            mean_pace(&steady),
+            caps(&steady),
+            views.len(),
+            p95(views.iter().map(View::sink_wait_us).collect()).map(|us| us as f64 / 1000.0),
+            p95(views.iter().map(View::presented_after_us).collect()).map(|us| us as f64 / 1000.0),
+            status.backlog_drops - before.backlog_drops,
+            status.keyframes_requested - before.keyframes_requested,
+            after.drops.1 - settled.1.drops.1,
+            status.presented_fps,
+            after.status.state
+        );
+        assert_eq!(
+            after.status.state,
+            ViewerState::Streaming,
+            "{}",
+            after.status.message
+        );
+    });
+}
+
+/// A 120 fps session on a short path whose decoder, otherwise fast, takes
+/// 20 ms a unit for one second: the fps cap it brings must go again.
+/// Reports how long after that second the viewer received 115 fps or more:
+/// under 10 s, with raises scaled to the ceiling.
+#[test]
+#[ignore = "explicit ~40-second 120 fps backlog recovery measurement"]
+fn injected_backlog_at_120_recovers() {
+    traced(|trace| async move {
+        let shape = Arc::new(Shape::default());
+        shape.delay_ms.store(SHORT_PATH_MS, Ordering::Relaxed);
+        let rig = Rig::at_fps("backlog-120", Some(shape), TYPICAL, ENCODE_TIME, 120).await;
+        let pace = Pace::new(Duration::from_millis(1));
+        let _decoder = Decoder::paced(&rig.viewer, pace.clone());
+        let started = Instant::now();
+        let at_120 = first_after(&trace, started, Duration::from_secs(15), |interval| {
+            interval.pace_fps >= 120
+        })
+        .await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let before = rig.viewer.status().stats.received_fps;
+        pace.set(Duration::from_millis(20));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        pace.set(Duration::from_millis(1));
+        let ended = Instant::now();
+        let recovered = loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            if rig.viewer.status().stats.received_fps >= 115.0 {
+                break Some(ended.elapsed());
+            }
+            if ended.elapsed() > Duration::from_secs(30) {
+                break None;
+            }
+        };
+        let status = rig.viewer.status();
+        rig.stop().await;
+        println!(
+            "injected_backlog_at_120 one_way_ms={SHORT_PATH_MS} decode_ms=1,20_for_1s,1 pace_120_after_ms={:?} received_fps_before={before:.1} received_115_after_ms={:?} caps={:?} backlog_drops={} keyframes_requested={} state={:?}",
+            at_120.map(|after| after.as_millis()),
+            recovered.map(|after| after.as_millis()),
+            caps(&trace.between(ended - Duration::from_secs(1), Instant::now())),
+            status.stats.backlog_drops,
+            status.stats.keyframes_requested,
+            status.state
+        );
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        assert!(at_120.is_some(), "the pace must reach 120 first");
+        // Raised by 5 a second, it took 15 s; by 20, it must take under 10.
+        assert!(
+            recovered.is_some_and(|after| after < Duration::from_secs(10)),
+            "received fps must come back to 115 within 10 s: {recovered:?}"
+        );
+    });
+}
+
+/// A 2 ms decoder that stalls once for 400 ms, 10 s into the session, as a
+/// decoder thread can behind GPU contention. Reports the time from the
+/// stall's end to the first presentation of a unit received after it began,
+/// the longest interval between presentations, and the keyframe requests and
+/// backlog episodes the stall brought. The decoder drains what queued, so the
+/// fresh picture comes within 100 ms of the stall's end, IDR or not.
+async fn consumer_stall(trace: Trace, name: &str, link_bytes_per_second: u64) {
+    const STALL: Duration = Duration::from_millis(400);
+    let shape = Arc::new(Shape::default());
+    shape.rate.store(link_bytes_per_second, Ordering::Relaxed);
+    let rig = Rig::start(name, Some(shape), TYPICAL).await;
+    let pace = Pace::new(Duration::from_millis(2));
+    let _decoder = Decoder::paced(&rig.viewer, pace.clone());
+    let started = Instant::now();
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let before = rig.viewer.status();
+    let pace_fps = trace.last().pace_fps;
+    pace.stall(STALL);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let status = rig.viewer.status();
+    rig.stop().await;
+    let stall = pace.stalled();
+    let fresh_after = stall
+        .ended
+        .zip(stall.first_fresh)
+        .map(|(ended, fresh)| fresh.saturating_duration_since(ended));
+    let intervals = trace.between(started, Instant::now());
+    println!(
+        "consumer_stall_drains link_kib_s={} stall_ms={} pace_fps={pace_fps} fresh_presented_after_stall_ms={:?} present_interval_max_ms={} keyframes_requested={} backlog_drops={} received_fps={:.1} paces={:?} caps={:?} state={:?}",
+        link_bytes_per_second / 1024,
+        STALL.as_millis(),
+        fresh_after.map(|after| after.as_secs_f64() * 1000.0),
+        status.stats.present_interval.max_ms,
+        status.stats.keyframes_requested - before.stats.keyframes_requested,
+        status.stats.backlog_drops - before.stats.backlog_drops,
+        status.stats.received_fps,
+        intervals
+            .iter()
+            .map(|interval| interval.pace_fps)
+            .collect::<Vec<_>>(),
+        caps(&intervals),
+        status.state
+    );
+    assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+    assert!(stall.ended.is_some(), "the decoder must have stalled");
+    // The decoder drains what queued during its stall instead of waiting for
+    // the IDR the stall asked for.
+    assert!(
+        fresh_after.is_some_and(|after| after < Duration::from_millis(100)),
+        "a unit received after the stall began must be presented within 100 ms of its end: {fresh_after:?}"
+    );
+}
+
+#[test]
+#[ignore = "explicit ~15-second consumer stall measurement"]
+fn consumer_stall_drains() {
+    traced(|trace| consumer_stall(trace, "stall-drains", 0));
+}
+
+/// The same on a 1 Mbit/s link, where an IDR takes a while to cross.
+#[test]
+#[ignore = "explicit ~15-second consumer stall measurement on a 1 Mbit/s link"]
+fn consumer_stall_drains_on_a_slow_link() {
+    traced(|trace| consumer_stall(trace, "stall-drains-slow", 125_000));
 }
 
 /// Poll `condition` for up to one second.
