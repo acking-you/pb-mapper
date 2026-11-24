@@ -1,0 +1,2 @@
+display 3 asleep true active false bounds (0.0, 0.0, 2048.0, 1152.0)
+loginwindow shield on screen: true

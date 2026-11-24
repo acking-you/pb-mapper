@@ -739,14 +739,21 @@ class FakeDesktopApi implements DesktopApiClient {
 
 /// A native texture that records what the store asks of it.
 class FakeVideoTexture implements DesktopVideoTexture {
-  FakeVideoTexture(this.textureId);
+  FakeVideoTexture(this.textureId, {this.platformViewType});
 
   @override
   final int textureId;
 
+  /// Null by default: a Flutter texture, which tests show as a `Texture`.
+  @override
+  final String? platformViewType;
+
   /// Every source attached, in order: a reconnect attaches the new one.
   final attached = <int>[];
   final snapshots = <String>[];
+
+  /// Every [grey] call's `on`, in order; greying changes nothing else.
+  final greys = <bool>[];
   bool disposed = false;
 
   /// What [snapshot] answers; a future that never completes stands in for
@@ -759,6 +766,9 @@ class FakeVideoTexture implements DesktopVideoTexture {
 
   @override
   Future<void> attach(int videoSource) async => attached.add(videoSource);
+
+  @override
+  Future<void> grey(bool on) async => greys.add(on);
 
   @override
   Future<bool> snapshot(String path, {int maxWidth = 320}) {
@@ -783,11 +793,18 @@ class FakeTextures {
   /// While set, creation waits for it, as a slow platform channel would.
   Completer<void>? gate;
 
+  /// The platform view the textures made from now on present in, as the
+  /// macOS runner's layer presenter does; null for Flutter textures.
+  String? platformViewType;
+
   Future<DesktopVideoTexture> create({required int instanceToken}) async {
     final waiting = gate;
     gate = null;
     await waiting?.future;
-    final texture = FakeVideoTexture(created.length + 1);
+    final texture = FakeVideoTexture(
+      created.length + 1,
+      platformViewType: platformViewType,
+    );
     created.add(texture);
     return texture;
   }

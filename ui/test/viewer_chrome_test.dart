@@ -301,6 +301,179 @@ void main() {
     store.dispose();
   });
 
+  testWidgets('a picture the runner presents itself shows in its platform '
+      'view, which the grey still greys natively and lets go of', (
+    tester,
+  ) async {
+    _size(tester, const Size(1280, 800));
+    final views = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform_views,
+      (call) async {
+        views.add(call);
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform_views,
+        null,
+      ),
+    );
+    final store = DesktopStore(FakeDesktopApi());
+    final latch = ModifierLatch();
+    final viewport = RemoteViewport();
+    final prefs = ViewerPrefs(persist: false);
+    final touchMode = ValueNotifier(TouchMode.direct);
+    late final TouchGestureMachine machine;
+    final input = RemoteInput(
+      desktop: store,
+      latch: latch,
+      onLocalCancel: () => machine.cancel(Duration.zero),
+    );
+    machine = TouchGestureMachine(
+      sink: input,
+      viewport: viewport,
+      mode: () => touchMode.value,
+      interactive: () => input.ready.value,
+      haptic: (_) {},
+    );
+    final session = ValueNotifier(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.live,
+        hasPicture: true,
+      ),
+    );
+    final picture = ValueNotifier<DesktopPicture?>(
+      const DesktopPicture(
+        textureId: 7,
+        platformViewType: 'pb_mapper/desktop_video_view',
+        aspectRatio: 16 / 9,
+        codec: 'h264',
+      ),
+    );
+    final greys = <bool>[];
+    await tester.pumpWidget(
+      _app(
+        ViewerStage(
+          session: session,
+          geometry: ValueNotifier(null),
+          picture: picture,
+          jpegImage: ValueNotifier(null),
+          stats: ValueNotifier(DesktopStats.none),
+          viewport: viewport,
+          input: input,
+          machine: machine,
+          touchMode: touchMode,
+          title: 'Office',
+          greyPicture: (on) async => greys.add(on),
+          actions: ViewerActions(
+            desktop: store,
+            input: input,
+            prefs: prefs,
+            viewport: viewport,
+            onDisconnect: () async {},
+            onQuality: (_) {},
+            onResolution: (_) {},
+            onMaxFps: (_) {},
+            onDisplayMode: (_) {},
+            onTypeText: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // The runner's view, made with the texture's id, in place of a Texture.
+    expect(find.byType(Texture), findsNothing);
+    final view = tester.widget<AppKitView>(find.byType(AppKitView));
+    expect(view.viewType, 'pb_mapper/desktop_video_view');
+    expect(view.creationParams, {'textureId': 7});
+    expect(view.hitTestBehavior, PlatformViewHitTestBehavior.opaque);
+    final create = views.singleWhere((call) => call.method == 'create');
+    final args = create.arguments as Map<Object?, Object?>;
+    expect(args['viewType'], 'pb_mapper/desktop_video_view');
+    expect(
+      const StandardMessageCodec().decodeMessage(
+        ByteData.sublistView(args['params']! as Uint8List),
+      ),
+      {'textureId': 7},
+    );
+    // The view never takes the keyboard focus from the viewer.
+    final viewFocus = tester
+        .widget<Focus>(
+          find.descendant(
+            of: find.byType(AppKitView),
+            matching: find.byType(Focus),
+          ),
+        )
+        .focusNode!;
+    viewFocus.requestFocus();
+    await tester.pump();
+    expect(viewFocus.hasFocus, isFalse);
+    final element = tester.element(find.byType(AppKitView));
+    Future<void> enter(DesktopSessionView s) async {
+      session.value = s;
+      await tester.pump();
+      expect(tester.element(find.byType(AppKitView)), same(element));
+    }
+
+    // Live: nothing is greyed.
+    expect(greys, isEmpty);
+
+    // Lost: the runner greys its picture; no Flutter filter is laid over
+    // what it cannot reach.
+    await enter(
+      DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.reconnecting,
+        hasPicture: true,
+        reconnectAttempt: 1,
+        retryAt: DateTime.now().add(const Duration(seconds: 2)),
+      ),
+    );
+    expect(greys, [true]);
+    expect(find.byType(BackdropFilter), findsNothing);
+    await enter(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.connecting,
+        hasPicture: true,
+        reconnectAttempt: 1,
+      ),
+    );
+    expect(greys, [true]);
+
+    // Live again: the grey goes.
+    await enter(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.live,
+        hasPicture: true,
+      ),
+    );
+    expect(greys, [true, false]);
+
+    // A stage that goes while greyed takes its grey back.
+    await enter(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.reconnecting,
+        hasPicture: true,
+      ),
+    );
+    expect(greys, [true, false, true]);
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(greys, [true, false, true, false]);
+
+    input.dispose();
+    machine.dispose();
+    viewport.dispose();
+    latch.dispose();
+    store.dispose();
+  });
+
   testWidgets('the chip and the quality panel show no figures while the '
       'connection is down', (tester) async {
     _size(tester, const Size(1280, 800));

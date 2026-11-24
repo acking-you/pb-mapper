@@ -1,0 +1,11 @@
+# Flutter 3.50.1's FlutterMacOS, arm64, macOS 27.0
+## darwin-x64
+responds to didUpdateMouseCursor: true
+_lastCursor encoding @"NSCursor"
+before: nil
+after hook, reads crosshair: true
+## darwin-x64-release
+responds to didUpdateMouseCursor: true
+_lastCursor encoding @"NSCursor"
+before: nil
+after hook, reads crosshair: true
