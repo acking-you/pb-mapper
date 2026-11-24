@@ -8,24 +8,34 @@
 //! when it was the newest handed over, thread C is woken to submit it again
 //! (`codec::resubmit`).
 //!
+//! A session codes its frame's coded size (`frame.rs`): where that is the
+//! content's rounded up to 16, a keyframe's SPS goes out cropped to the
+//! content (`codec::sps::crop_sets`), read once for each format
+//! VideoToolbox writes and kept with it, so nothing more runs per unit. An
+//! SPS that will not crop spends the session as a capture failure, not the
+//! codec's, and turns padding off for the process (`pads`): thread C's retry
+//! opens one at the content's own size.
+//!
 //! Once the session is prepared, every call on it is made by the encoder's
 //! own submit thread, one at a time: thread C only hands it a picture, a
 //! bitrate or an expected frame rate (a new frame-rate limit the stream
 //! serves without a rebuild), through a one-slot mailbox and goes back to
 //! its input lane. A
-//! session whose size is a multiple of 16 encodes inside
-//! `VTCompressionSessionEncodeFrame` and calls back before it returns, so
+//! picture whose buffer covers a multiple of 16 both ways (an aligned size,
+//! a padded frame) is encoded inside
+//! `VTCompressionSessionEncodeFrame`, which calls back before it returns, so
 //! the call took as long as the encode, and input queued on thread C waited
 //! it out. The submit thread wakes thread C when it finishes a call that a
 //! submit found it busy with, and when a call fails.
 
-use super::cf;
+use super::{cf, frame::Frame};
 use crate::{
-    EncodedFrame, Result, VideoCodec, VideoFormat, Waker,
+    BackendError, EncodedFrame, FailureKind, Result, VideoCodec, VideoFormat, Waker,
     codec::{
         avcc::annex_b,
         pipeline::{LATE_OUTPUT, OUTPUT_WAIT, codec_error, late},
         resubmit::{Resubmit, Unit},
+        sps::crop_sets,
     },
     error,
 };
@@ -58,10 +68,54 @@ use std::{
     collections::VecDeque,
     ffi::{c_int, c_void},
     ptr::NonNull,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
+
+/// A padded session's SPS would not crop, in this process: later sessions
+/// code the content's own size.
+static UNPADDED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a session may code a padded frame: until one's SPS would not
+/// crop.
+pub(crate) fn pads() -> bool {
+    !UNPADDED.load(Ordering::Acquire)
+}
+
+/// What spent a session.
+#[derive(Debug)]
+enum Failure {
+    /// The codec's own, or the output callback's: `drain` returns it as the
+    /// codec's (`codec_error`).
+    Codec(String),
+    /// A padded frame's SPS would not crop to its content: the padding's,
+    /// which a session at the content's own size does without.
+    Crop,
+}
+
+/// A padded frame's parameter sets as they go out, its SPS cropped: those
+/// of `format`, which is retained, so that no other format takes its
+/// address while they are kept.
+struct Cropped {
+    format: CFRetained<CMFormatDescription>,
+    sets: Vec<Vec<u8>>,
+    /// The session's crops so far, this one included.
+    #[cfg(test)]
+    reads: CropReads,
+}
+
+/// A padded session's SPS crops so far, and the formats VideoToolbox wrote
+/// that they were for: equal while the cache holds.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct CropReads {
+    pub crops: usize,
+    pub formats: usize,
+}
 
 /// A unit submitted and not yet output.
 struct Pending {
@@ -77,8 +131,12 @@ struct Pending {
 struct State {
     pending: VecDeque<Pending>,
     ready: VecDeque<EncodedFrame>,
-    /// The first failure the callback saw; the session is spent.
-    failure: Option<String>,
+    /// The first failure the callback or the submit thread saw; the session
+    /// is spent.
+    failure: Option<Failure>,
+    /// A padded frame's parameter sets, for the last format VideoToolbox
+    /// wrote.
+    cropped: Option<Cropped>,
     /// When the last output was collected, discarded or not.
     last_output: Option<Instant>,
     /// A late unit was discarded: output resumes at the next keyframe.
@@ -215,7 +273,8 @@ struct Shared {
     signal: Condvar,
     waker: Waker,
     codec: VideoCodec,
-    size: (u32, u32),
+    /// The session codes `coded`; its units say `content`.
+    frame: Frame,
     gop: u32,
     /// DataRateLimits caps the mean bitrate: always, but in a measurement
     /// that leaves it off.
@@ -435,12 +494,11 @@ pub(crate) fn encodes(codec: VideoCodec) -> bool {
 }
 
 impl Encoder {
-    /// A session of `codec` at `width` x `height`, at nominally `fps` and
+    /// A session of `codec` coding `frame`, at nominally `fps` and
     /// `bitrate`, waking `waker` with each unit.
     pub(crate) fn new(
         codec: VideoCodec,
-        width: u32,
-        height: u32,
+        frame: Frame,
         fps: u32,
         bitrate: u32,
         waker: &Waker,
@@ -449,17 +507,8 @@ impl Encoder {
         // it, or a property under it, is made again without.
         let low_latency = matches!(codec, VideoCodec::H264 | VideoCodec::H265)
             && cf::symbol(LOW_LATENCY).is_some();
-        let build = |low_latency| {
-            Self::build(
-                codec,
-                width,
-                height,
-                fps,
-                bitrate,
-                waker,
-                Options::new(low_latency),
-            )
-        };
+        let build =
+            |low_latency| Self::build(codec, frame, fps, bitrate, waker, Options::new(low_latency));
         let built = if low_latency {
             build(true).or_else(|failure| {
                 tracing::info!(
@@ -480,30 +529,20 @@ impl Encoder {
     #[cfg(test)]
     pub(super) fn with_low_latency(
         codec: VideoCodec,
-        width: u32,
-        height: u32,
+        frame: Frame,
         fps: u32,
         bitrate: u32,
         waker: &Waker,
         low_latency: bool,
     ) -> Result<Self> {
-        Self::tuned(
-            codec,
-            width,
-            height,
-            fps,
-            bitrate,
-            waker,
-            Options::new(low_latency),
-        )
+        Self::tuned(codec, frame, fps, bitrate, waker, Options::new(low_latency))
     }
 
     /// `with_low_latency` with a measurement's knobs.
     #[cfg(test)]
     pub(super) fn tuned(
         codec: VideoCodec,
-        width: u32,
-        height: u32,
+        frame: Frame,
         fps: u32,
         bitrate: u32,
         waker: &Waker,
@@ -512,13 +551,12 @@ impl Encoder {
         if options.low_latency && cf::symbol(LOW_LATENCY).is_none() {
             return Err(error("low-latency rate control needs macOS 11.3"));
         }
-        Self::build(codec, width, height, fps, bitrate, waker, options)
+        Self::build(codec, frame, fps, bitrate, waker, options)
     }
 
     fn build(
         codec: VideoCodec,
-        width: u32,
-        height: u32,
+        frame: Frame,
         fps: u32,
         bitrate: u32,
         waker: &Waker,
@@ -532,13 +570,14 @@ impl Encoder {
             signal: Condvar::new(),
             waker: waker.clone(),
             codec,
-            size: (width, height),
+            frame,
             gop: 0,
             #[cfg(test)]
             capped: options.capped,
             #[cfg(test)]
             quality: options.quality,
         });
+        let (width, height) = frame.coded;
         let session = create(codec, width, height, low_latency, Arc::as_ptr(&shared))?;
         // Whether the session took the data-rate cap and the QP bound, for
         // the log.
@@ -666,8 +705,10 @@ impl Encoder {
             event = "macos_encoder_opened",
             codec = ?codec,
             low_latency,
-            width,
-            height,
+            width = frame.content.0,
+            height = frame.content.1,
+            coded_width = width,
+            coded_height = height,
             fps,
             hardware,
             gop,
@@ -842,8 +883,29 @@ impl Encoder {
     pub(crate) fn drain(&mut self) -> Result<Option<EncodedFrame>> {
         let now = Instant::now();
         let mut state = self.shared.state.lock();
-        if let Some(failure) = &state.failure {
-            return Err(codec_error(self.shared.codec, error(failure.clone())));
+        match &state.failure {
+            Some(Failure::Codec(failure)) => {
+                return Err(codec_error(self.shared.codec, error(failure.clone())));
+            }
+            Some(Failure::Crop) => {
+                drop(state);
+                let Frame { coded, content } = self.shared.frame;
+                tracing::warn!(
+                    target: "pb_mapper_desktop::session",
+                    event = "macos_encoder_crop_failed",
+                    codec = ?self.shared.codec,
+                    width = content.0,
+                    height = content.1,
+                    coded_width = coded.0,
+                    coded_height = coded.1,
+                );
+                return Err(BackendError::new(
+                    FailureKind::CaptureFailed,
+                    "the hardware video encoder's parameter sets would not crop its padded picture",
+                )
+                .into());
+            }
+            None => {}
         }
         if state
             .pending
@@ -921,6 +983,17 @@ impl Encoder {
         move || shared.strong_count() > 0
     }
 
+    /// Whether the session says it encodes in software, as a virtual
+    /// Mac's H.264 may. A low-latency session says neither.
+    #[cfg(test)]
+    pub(super) fn software(&self) -> bool {
+        // SAFETY: a static key.
+        get::<objc2_core_foundation::CFBoolean>(&self.session, unsafe {
+            kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder
+        })
+        .is_some_and(|hardware| !hardware.as_bool())
+    }
+
     /// The session's mean bitrate, read back while the submit thread idles.
     #[cfg(test)]
     pub(super) fn average_bitrate(&self) -> Option<i64> {
@@ -954,6 +1027,16 @@ impl Encoder {
     #[cfg(test)]
     pub(super) fn qp_refused(&self) -> bool {
         self.qp_refused
+    }
+
+    /// The crops a padded session ran, and the formats they were for.
+    #[cfg(test)]
+    pub(super) fn crop_reads(&self) -> CropReads {
+        let state = self.shared.state.lock();
+        state
+            .cropped
+            .as_ref()
+            .map_or(CropReads::default(), |cropped| cropped.reads)
     }
 
     /// Outputs VideoToolbox dropped, ever.
@@ -1106,7 +1189,9 @@ fn serve(owned: SendSession, shared: &Shared) {
             if let Some(token) = token {
                 state.forget(token);
             }
-            state.failure.get_or_insert_with(|| failure.to_string());
+            state
+                .failure
+                .get_or_insert_with(|| Failure::Codec(failure.to_string()));
             wake = true;
         }
         if wake {
@@ -1422,17 +1507,19 @@ fn receive(
         return false;
     }
     let Some(pending) = state.pending.pop_front() else {
-        state.failure = Some("unsolicited video output".into());
+        state.failure = Some(Failure::Codec("unsolicited video output".into()));
         return true;
     };
     if pending.token != token {
-        state.failure = Some("the hardware encoder reordered its output".into());
+        state.failure = Some(Failure::Codec(
+            "the hardware encoder reordered its output".into(),
+        ));
         return true;
     }
     if status != 0 {
-        state.failure = Some(format!(
+        state.failure = Some(Failure::Codec(format!(
             "hardware video encoding failed (OSStatus {status})"
-        ));
+        )));
         return true;
     }
     let previous = state.last_output.replace(now);
@@ -1456,19 +1543,7 @@ fn receive(
         // A picture after a discarded one may refer to it.
         return !std::mem::replace(&mut state.keyframe_due, true);
     }
-    let converted = (|| {
-        // SAFETY: the sample's format, retained for the borrow below.
-        let format = unsafe { sample.format_description() }
-            .ok_or_else(|| error("encoded sample has no format"))?;
-        let (sets, count, length) = format_sets(shared.codec, &format, keyframe)?;
-        let mut scratch = std::mem::take(&mut state.sample);
-        let mut out = Vec::new();
-        let result = bytes(sample, &mut scratch)
-            .and_then(|bytes| annex_b(shared.codec, bytes, length, &sets[..count], &mut out));
-        state.sample = scratch;
-        result.map(|()| out)
-    })();
-    match converted {
+    match convert(shared, &mut state, sample, keyframe) {
         Ok(bytes) => {
             state.wait_independent = false;
             let duplicate = state.resubmit.kept(pending.picture);
@@ -1482,8 +1557,8 @@ fn receive(
             state.ready.push_back(EncodedFrame {
                 format: VideoFormat {
                     codec: shared.codec,
-                    width: shared.size.0,
-                    height: shared.size.1,
+                    width: shared.frame.content.0,
+                    height: shared.frame.content.1,
                     keyframe,
                     pts_us: pending.pts_us,
                     duplicate,
@@ -1493,9 +1568,82 @@ fn receive(
                 bytes,
             });
         }
-        Err(failure) => state.failure = Some(failure.to_string()),
+        Err(failure) => {
+            if matches!(failure, Failure::Crop) {
+                UNPADDED.store(true, Ordering::Release);
+            }
+            state.failure = Some(failure);
+        }
     }
     true
+}
+
+/// `sample`, a unit VideoToolbox kept, as Annex B: a keyframe's parameter
+/// sets in front, a padded frame's SPS cropped (`cropped_sets`).
+fn convert(
+    shared: &Shared,
+    state: &mut State,
+    sample: &CMSampleBuffer,
+    keyframe: bool,
+) -> std::result::Result<Vec<u8>, Failure> {
+    let codec = |failure: std::io::Error| Failure::Codec(failure.to_string());
+    // SAFETY: the sample's format, retained for the borrow below.
+    let format = unsafe { sample.format_description() }
+        .ok_or_else(|| codec(error("encoded sample has no format")))?;
+    let (mut sets, mut count, length) =
+        format_sets(shared.codec, &format, keyframe).map_err(codec)?;
+    if keyframe && shared.frame.cropped() {
+        let cropped = cropped_sets(&mut state.cropped, shared, &format, &sets[..count])
+            .ok_or(Failure::Crop)?;
+        count = cropped.len().min(MAX_PARAMETER_SETS);
+        for (slot, set) in sets.iter_mut().zip(cropped) {
+            *slot = set.as_slice();
+        }
+    }
+    let mut out = Vec::new();
+    let bytes = bytes(sample, &mut state.sample).map_err(codec)?;
+    annex_b(shared.codec, bytes, length, &sets[..count], &mut out).map_err(codec)?;
+    Ok(out)
+}
+
+/// A padded frame's parameter sets as they go out, the SPS among `sets`
+/// cropped to its content: read when `format` is not the one they were last
+/// read for, and kept with it. `None` where the SPS will not crop.
+fn cropped_sets<'a>(
+    kept: &'a mut Option<Cropped>,
+    shared: &Shared,
+    format: &CFRetained<CMFormatDescription>,
+    sets: &[&[u8]],
+) -> Option<&'a [Vec<u8>]> {
+    let read = kept
+        .as_ref()
+        .is_some_and(|kept| std::ptr::eq::<CMFormatDescription>(&*kept.format, &**format));
+    if !read {
+        // Whether the format is new, decided apart from `read`, so that a
+        // cache that crops again for the format it kept counts more crops
+        // than formats.
+        #[cfg(test)]
+        let reads = {
+            let before = kept
+                .as_ref()
+                .map_or(CropReads::default(), |kept| kept.reads);
+            let kept_format = kept.as_ref().map(|kept| &*kept.format);
+            let new_format = !kept_format.is_some_and(|kept| std::ptr::addr_eq(kept, &**format));
+            CropReads {
+                crops: before.crops + 1,
+                formats: before.formats + usize::from(new_format),
+            }
+        };
+        *kept = None;
+        let cropped = crop_sets(shared.codec, sets, shared.frame.content)?;
+        *kept = Some(Cropped {
+            format: format.clone(),
+            sets: cropped,
+            #[cfg(test)]
+            reads,
+        });
+    }
+    kept.as_ref().map(|kept| kept.sets.as_slice())
 }
 
 #[cfg(test)]
@@ -1519,7 +1667,7 @@ mod tests {
                     signal: Condvar::new(),
                     waker: Waker(Wake::new()),
                     codec: VideoCodec::H264,
-                    size: (640, 360),
+                    frame: Frame::exact(640, 360),
                     gop: 0,
                     capped: true,
                     quality: false,
