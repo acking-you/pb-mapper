@@ -104,6 +104,13 @@ struct State {
     /// test's way to have VideoToolbox refuse an encode.
     #[cfg(test)]
     tear_down: bool,
+    /// The submit thread stays in its next call once VideoToolbox returns,
+    /// while set: a test's way to keep it busy after any output came.
+    #[cfg(test)]
+    park: bool,
+    /// The submit thread stays in its call (`park`).
+    #[cfg(test)]
+    parked: bool,
 }
 impl State {
     /// Units handed over and not yet out: in VideoToolbox, or in the
@@ -678,6 +685,20 @@ impl Encoder {
         self.shared.state.lock().tear_down = true;
     }
 
+    /// Keep the submit thread in its next call once VideoToolbox returns
+    /// (`parked` says it is there), or let it finish.
+    #[cfg(test)]
+    pub(super) fn park(&self, park: bool) {
+        self.shared.state.lock().park = park;
+        self.shared.signal.notify_all();
+    }
+
+    /// The submit thread stays in a call that VideoToolbox returned from.
+    #[cfg(test)]
+    pub(super) fn parked(&self) -> bool {
+        self.shared.state.lock().parked
+    }
+
     /// The submit thread is inside a call on the session.
     #[cfg(test)]
     pub(super) fn in_call(&self) -> bool {
@@ -801,6 +822,14 @@ fn serve(owned: SendSession, shared: &Shared) {
                 (refused, encoded)
             })
         });
+        #[cfg(test)]
+        if state.park {
+            state.parked = true;
+            while state.park && !state.stop {
+                shared.signal.wait(&mut state);
+            }
+            state.parked = false;
+        }
         state.in_call = false;
         let mut wake = std::mem::take(&mut state.c_waiting);
         let failure = match (refused, encoded) {

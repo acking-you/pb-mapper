@@ -141,14 +141,14 @@ fn wait_for(waiter: &Waiter, within: Duration, mut done: impl FnMut() -> bool) {
 }
 
 /// A picture handed over waits in the mailbox until the submit thread
-/// takes it, and counts as in flight from then: a gate of one unit spends
-/// the tick (`Full`), checked before the thread's business. Under a higher
-/// gate a submit finds the thread busy, leaves its tick armed (`Busy`) and
-/// waits; a second picture is refused rather than queued. The thread wakes
-/// thread C once it is free, and a unit out and not yet drained is no
-/// longer in flight.
+/// takes it, and counts as in flight from then: a gate of one unit is full,
+/// which thread C skips and a submit spends (`Full`), checked before the
+/// thread's business. Under a higher gate a submit finds the thread busy,
+/// leaves its tick armed (`Busy`) and waits; a second picture is refused
+/// rather than queued. A unit out and not yet drained is no longer in
+/// flight.
 #[test]
-fn a_busy_submit_thread_leaves_the_tick_armed_and_wakes_thread_c() {
+fn a_busy_submit_thread_leaves_the_tick_armed() {
     let wake = Wake::new();
     let waiter = Waiter::new(&wake).unwrap();
     let mut encoder = Encoder::new(
@@ -163,21 +163,17 @@ fn a_busy_submit_thread_leaves_the_tick_armed_and_wakes_thread_c() {
     let picture = picture(640, 360);
     encoder.hold(true);
     encoder.encode(&picture, true, false).unwrap();
+    assert!(encoder.full(1));
     assert_eq!(encoder.admit(1), Admit::Full);
     assert!(!encoder.waiting());
     const _: () = assert!(VT_IN_FLIGHT > 1, "a Mac host's gate admits a second unit");
+    assert!(!encoder.full(VT_IN_FLIGHT));
     assert_eq!(encoder.admit(VT_IN_FLIGHT), Admit::Busy);
     assert!(encoder.waiting());
     assert!(encoder.encode(&picture, false, false).is_err());
     assert_eq!(encoder.pending(), 1);
-    // Nothing but the thread's wake is due.
-    let _ = waiter.wait(Instant::now());
     encoder.hold(false);
-    assert!(
-        waiter
-            .wait(Instant::now() + Duration::from_secs(3))
-            .unwrap()
-    );
+    // The wake that ends the wait is the next test's.
     wait_for(&waiter, Duration::from_secs(3), || !encoder.waiting());
     // Out, the unit is no longer in flight; a discarded one leaves a
     // keyframe due instead (see the test above).
@@ -197,6 +193,50 @@ fn a_busy_submit_thread_leaves_the_tick_armed_and_wakes_thread_c() {
     }
     assert_eq!(encoder.pending(), 0);
     assert_eq!(encoder.admit(1), Admit::Free);
+}
+
+/// A submit that found the submit thread busy is woken by that thread once
+/// its call ends, and by nothing before. Here the call sets a bitrate,
+/// which has no output whose callback could wake thread C instead, and the
+/// thread stays in it, VideoToolbox done, until the test lets it go.
+#[test]
+fn the_submit_thread_wakes_thread_c_once_the_call_it_refused_ends() {
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    let mut encoder = Encoder::new(
+        VideoCodec::H264,
+        640,
+        360,
+        30,
+        2_000_000,
+        &Waker(wake.clone()),
+    )
+    .expect("VideoToolbox makes an H.264 session on every Mac, in software if need be");
+    encoder.park(true);
+    encoder.set_bitrate(3_000_000);
+    wait_for(&waiter, Duration::from_secs(3), || encoder.parked());
+    assert!(encoder.in_call());
+    assert!(!encoder.full(VT_IN_FLIGHT));
+    assert_eq!(encoder.admit(VT_IN_FLIGHT), Admit::Busy);
+    assert!(encoder.waiting());
+    let _ = waiter.wait(Instant::now());
+    assert!(
+        !waiter
+            .wait(Instant::now() + Duration::from_millis(50))
+            .unwrap(),
+        "a wake while the call lasts"
+    );
+    encoder.park(false);
+    assert!(
+        waiter
+            .wait(Instant::now() + Duration::from_secs(3))
+            .unwrap(),
+        "no wake once the call ended"
+    );
+    assert!(!encoder.waiting());
+    assert_eq!(encoder.admit(VT_IN_FLIGHT), Admit::Free);
+    wait_for(&waiter, Duration::from_secs(3), || encoder.idle());
+    assert_eq!(encoder.average_bitrate(), Some(3_000_000));
 }
 
 /// An encoder dropped with a picture in its mailbox, or while its submit
@@ -325,7 +365,9 @@ fn an_encode_refused_on_the_submit_thread_surfaces_from_drain() {
 /// A new bitrate never waits for VideoToolbox: thread C hands it to the
 /// submit thread, which sets it once its call returns, the latest of those
 /// asked for meanwhile. At 4K, a multiple of 16, the call is the encode
-/// itself.
+/// itself, and each set returns within 1 ms while it lasts. The caller
+/// makes no call on the session: a bitrate set while the submit thread
+/// takes nothing reaches the session only once it takes it.
 #[test]
 fn a_bitrate_set_during_an_encode_returns_at_once_and_reaches_the_session() {
     let wake = Wake::new();
@@ -354,8 +396,11 @@ fn a_bitrate_set_during_an_encode_returns_at_once_and_reaches_the_session() {
         took.push(setting.elapsed());
     }
     let still = encoder.in_call();
-    took.sort_unstable();
-    assert!(took[0] < Duration::from_millis(1), "{took:?}");
+    // Each one, the first above all, which the encode was under way for.
+    assert!(
+        took.iter().all(|took| *took < Duration::from_millis(1)),
+        "{took:?}"
+    );
     if !(inside && still) {
         // Past the harness's capture, so that the log says so.
         let _ = writeln!(
@@ -367,6 +412,12 @@ fn a_bitrate_set_during_an_encode_returns_at_once_and_reaches_the_session() {
     wait_for(&waiter, Duration::from_secs(10), || encoder.idle());
     assert_eq!(encoder.average_bitrate(), Some(16_000_000));
     while encoder.drain().unwrap().is_some() {}
+    encoder.hold(true);
+    encoder.set_bitrate(20_000_000);
+    assert_eq!(encoder.average_bitrate(), Some(16_000_000));
+    encoder.hold(false);
+    wait_for(&waiter, Duration::from_secs(3), || encoder.idle());
+    assert_eq!(encoder.average_bitrate(), Some(20_000_000));
 }
 
 /// Thread C's waits end on time where the kernel coalesces the process's
@@ -740,7 +791,9 @@ fn rate_model_sweep(codec: VideoCodec, width: u32, height: u32, low_latency: boo
 }
 
 /// Thread C's pacing of one encoder over a ring of pictures, as
-/// `video_bench` paces Media Foundation, behind `MacVideo::submit`'s gate.
+/// `video_bench` paces Media Foundation, behind a Mac host's gate: a tick
+/// that finds `VT_IN_FLIGHT` units in flight skipped, as thread C skips it
+/// (`MacVideo::full`), and one that finds the submit thread busy armed.
 struct Pacer {
     encoder: Encoder,
     waiter: Waiter,
@@ -896,7 +949,9 @@ fn text_and_ramp(row: &mut [u8], y: usize, frame: u64) {
 /// paces an encoder as thread C paces it, on `PAINTED` pictures painted
 /// before the run, so the pacing thread does nothing else: each tick taken
 /// at its start, two never closer than three quarters of a period (`Pacer`),
-/// `MacVideo::submit`'s gate (`Encoder::admit`), and, after a submit that
+/// a Mac host's gate (`Encoder::admit`: a tick that finds the units in
+/// flight skipped, as thread C skips it on `MacVideo::full`, and one that
+/// finds the submit thread busy left armed), and, after a submit that
 /// found the submit thread busy, a wait for that thread's wake rather than
 /// the tick (`MacVideo::idle_until`). A reader thread queues an input every
 /// millisecond and wakes the pacing thread, which takes the queued inputs
