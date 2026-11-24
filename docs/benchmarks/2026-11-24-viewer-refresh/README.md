@@ -82,6 +82,11 @@ that display stays at 60.
   (60 against the 59 asked before), capture and received fps, and
   `desktop_capture_pacing`. The runner's `refresh_hz` and `display_changed`
   compile only in CI.
-- Whether the Linux embedder updates the view's display when the window
-  moves to another monitor: where it does not, nothing is sent and the
-  session keeps the rate it connected at.
+- The Linux runner's `refresh_hz` and `display_changed`, which compile only
+  in CI: a window moved to another monitor under X11 and under Wayland
+  (where GTK 3 reports no move between outputs of one scale), and a
+  monitor's mode switched.
+- A consumer that fell behind before its window moved: its backlog cap,
+  held beneath the slower display, is what the host gets back on the faster
+  one. The cap's unit tests cover that rule; these runs, whose consumer
+  always kept up, have no backlog cap.

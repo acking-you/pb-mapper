@@ -839,8 +839,9 @@ The design and its rules are in `docs/ui-design.md`.
   - `display_refresh.dart`: `DisplayRefresh`, the refresh rate of the
     display the window is on, which a viewer on macOS, Windows and Linux
     sends as `display_refresh` once connected and whenever it changes:
-    Flutter's view display, and on Windows the runner's exact `refresh_hz`
-    on the `pb_mapper/desktop_video` channel, read again when the runner
+    Flutter's view display on macOS, and on Windows and Linux the runner's
+    `refresh_hz` on the `pb_mapper/desktop_video` channel, where its
+    `decoders` answer says `window_refresh`, read again when the runner
     calls `display_changed`
   - `remote_computer_vault.dart`: `RemoteComputerVault`, the `computers_*`
     ops below, and on Android the `pb_mapper/keystore` channel that unlocks
