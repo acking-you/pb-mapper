@@ -472,11 +472,14 @@ class RemoteCursorLayer extends StatefulWidget {
 }
 
 class _RemoteCursorLayerState extends State<RemoteCursorLayer> {
-  /// What is painted, told only when it changes: from nothing to nothing
-  /// it never is.
-  final _paint = ValueNotifier<RemoteCursorPaint?>(null);
+  /// What the painter last drew.
+  RemoteCursorPaint? _painted;
 
-  /// What [_paint] follows: the view, the cursor, its look and the
+  /// Ticks for the painter when what it would draw now is not what it last
+  /// drew: from nothing to nothing it never does.
+  final _stale = ValueNotifier(0);
+
+  /// What may change what is drawn: the view, the cursor, its look and the
   /// display's size the shape's scale is read against.
   late Listenable _sources;
 
@@ -501,7 +504,7 @@ class _RemoteCursorLayerState extends State<RemoteCursorLayer> {
   @override
   void dispose() {
     _sources.removeListener(_update);
-    _paint.dispose();
+    _stale.dispose();
     super.dispose();
   }
 
@@ -516,7 +519,15 @@ class _RemoteCursorLayerState extends State<RemoteCursorLayer> {
     _update();
   }
 
-  void _update() => _paint.value = _paintNow();
+  void _update() {
+    if (_paintNow() != _painted) _stale.value++;
+  }
+
+  /// What the painter draws, read as it paints: a frame that lays the stage
+  /// out anew moves the picture before the viewport tells anyone (it waits
+  /// for the frame's end), and its paint still draws the cursor where the
+  /// picture now shows it.
+  RemoteCursorPaint? _draw() => _painted = _paintNow();
 
   /// Where to draw, in the stage's coordinates, and what.
   RemoteCursorPaint? _paintNow() {
@@ -556,7 +567,7 @@ class _RemoteCursorLayerState extends State<RemoteCursorLayer> {
       child: ClipRect(
         child: CustomPaint(
           size: Size.infinite,
-          painter: RemoteCursorPainter(cursor: _paint),
+          painter: RemoteCursorPainter(cursor: _draw, repaint: _stale),
         ),
       ),
     ),
@@ -704,11 +715,12 @@ typedef RemoteCursorPaint = ({
 });
 
 /// The host's shape, or an arrow 18×27 whatever the zoom: black with a
-/// white edge, its tip at the point. It repaints when [cursor] changes.
+/// white edge, its tip at the point.
 class RemoteCursorPainter extends CustomPainter {
-  RemoteCursorPainter({required this.cursor}) : super(repaint: cursor);
+  RemoteCursorPainter({required this.cursor, required Listenable repaint})
+    : super(repaint: repaint);
 
-  final ValueListenable<RemoteCursorPaint?> cursor;
+  final RemoteCursorPaint? Function() cursor;
 
   static const size = Size(18, 27);
 
@@ -721,7 +733,7 @@ class RemoteCursorPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size _) {
-    final what = cursor.value;
+    final what = cursor();
     if (what == null) return;
     final shape = what.shape, image = shape?.image;
     if (shape != null && image != null) {
@@ -745,5 +757,5 @@ class RemoteCursorPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant RemoteCursorPainter oldDelegate) =>
-      !identical(oldDelegate.cursor, cursor);
+      oldDelegate.cursor != cursor;
 }
