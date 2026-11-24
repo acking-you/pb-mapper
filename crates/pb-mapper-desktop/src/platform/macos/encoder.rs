@@ -9,8 +9,10 @@
 //! (`codec::resubmit`).
 //!
 //! Once the session is prepared, every call on it is made by the encoder's
-//! own submit thread, one at a time: thread C only hands it a picture, or a
-//! bitrate, through a one-slot mailbox and goes back to its input lane. A
+//! own submit thread, one at a time: thread C only hands it a picture, a
+//! bitrate or an expected frame rate (a new frame-rate limit the stream
+//! serves without a rebuild), through a one-slot mailbox and goes back to
+//! its input lane. A
 //! session whose size is a multiple of 16 encodes inside
 //! `VTCompressionSessionEncodeFrame` and calls back before it returns, so
 //! the call took as long as the encode, and input queued on thread C waited
@@ -97,6 +99,9 @@ struct State {
     /// The bitrate the submit thread sets before its next encode, or at once
     /// when idle: the latest asked for.
     rate: Option<u32>,
+    /// The expected frame rate the submit thread sets as `rate`, a hint it
+    /// sets best effort.
+    fps: Option<u32>,
     /// The submit thread is inside a call on the session.
     in_call: bool,
     /// A submit found the submit thread busy: thread C waits for its wake.
@@ -280,6 +285,8 @@ pub(crate) enum Admit {
 pub(crate) struct Encoder {
     shared: Arc<Shared>,
     bitrate: u32,
+    /// The expected frame rate last asked for.
+    fps: u32,
     created: Instant,
     /// `State::dropped` at the last `macos_encoder_dropped` line, and when.
     dropped_traced: (u64, Instant),
@@ -697,6 +704,7 @@ impl Encoder {
         Ok(Self {
             shared,
             bitrate,
+            fps,
             created,
             dropped_traced: (0, created),
             pts_us: 0,
@@ -723,6 +731,18 @@ impl Encoder {
         self.shared.state.lock().rate = Some(bitrate);
         self.shared.signal.notify_all();
         self.bitrate = bitrate;
+    }
+
+    /// The frame rate the session expects (`ExpectedFrameRate`), live, as
+    /// the bitrate is: a hint to its rate control, which the submit thread
+    /// sets best effort, so a refusal changes nothing.
+    pub(crate) fn set_expected_fps(&mut self, fps: u32) {
+        if fps == self.fps {
+            return;
+        }
+        self.shared.state.lock().fps = Some(fps);
+        self.shared.signal.notify_all();
+        self.fps = fps;
     }
 
     /// Units submitted and not yet drained (the mailbox's among them), or a
@@ -886,11 +906,12 @@ impl Encoder {
         self.shared.state.lock().in_call
     }
 
-    /// The submit thread holds nothing: no picture, no bitrate, no call.
+    /// The submit thread holds nothing: no picture, no bitrate, no frame
+    /// rate, no call.
     #[cfg(test)]
     pub(super) fn idle(&self) -> bool {
         let state = self.shared.state.lock();
-        !state.busy() && state.rate.is_none()
+        !state.busy() && state.rate.is_none() && state.fps.is_none()
     }
 
     /// Whether anything still holds what the callback reads.
@@ -908,6 +929,17 @@ impl Encoder {
             kVTCompressionPropertyKey_AverageBitRate
         })
         .and_then(|bitrate| bitrate.as_i64())
+    }
+
+    /// The session's expected frame rate, read back while the submit thread
+    /// idles.
+    #[cfg(test)]
+    pub(super) fn expected_fps(&self) -> Option<f64> {
+        // SAFETY: a static key.
+        get::<CFNumber>(&self.session, unsafe {
+            kVTCompressionPropertyKey_ExpectedFrameRate
+        })
+        .and_then(|fps| fps.as_f64())
     }
 
     /// The highest QP the session's rate control may give a picture, read
@@ -998,8 +1030,8 @@ fn serve(owned: SendSession, shared: &Shared) {
             shared.signal.wait(&mut state);
             continue;
         }
-        let (rate, job) = (state.rate.take(), state.job.take());
-        if rate.is_none() && job.is_none() {
+        let (rate, fps, job) = (state.rate.take(), state.fps.take(), state.job.take());
+        if rate.is_none() && fps.is_none() && job.is_none() {
             shared.signal.wait(&mut state);
             continue;
         }
@@ -1030,6 +1062,9 @@ fn serve(owned: SendSession, shared: &Shared) {
                 let capped = shared.capped;
                 #[cfg(not(test))]
                 let capped = true;
+                if let Some(fps) = fps {
+                    expect_fps(&session, fps);
+                }
                 let refused = rate.and_then(|bitrate| apply(&session, bitrate, capped).err());
                 let encoded = job.filter(|_| refused.is_none()).map(|job| {
                     let started = Instant::now();
@@ -1113,6 +1148,25 @@ fn apply(session: &VTCompressionSession, bitrate: u32, capped: bool) -> Result<(
         }
     }
     Ok(())
+}
+
+/// Set the expected frame rate, on the submit thread: a hint, so a session
+/// that refuses it keeps the one it has, and says so in the debug log.
+fn expect_fps(session: &VTCompressionSession, fps: u32) {
+    // SAFETY: a static key.
+    let set = set(
+        session,
+        unsafe { kVTCompressionPropertyKey_ExpectedFrameRate },
+        &cf::number(i64::from(fps)),
+    );
+    if let Err(refused) = set {
+        tracing::debug!(
+            target: "pb_mapper_desktop::session",
+            event = "macos_encoder_fps_refused",
+            fps,
+            detail = %refused,
+        );
+    }
 }
 
 /// Encode `job`, on the submit thread: its status.

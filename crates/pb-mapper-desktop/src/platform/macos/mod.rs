@@ -14,10 +14,12 @@
 //!
 //! The pure parts (points and pixels, key codes, click counts, mode lists,
 //! the pointer the injector and the cursor share, how long a desktop check
-//! is reused, when a sleeping display is woken) build and are tested on
-//! every platform.
+//! is reused, when a sleeping display is woken, how often ScreenCaptureKit
+//! may deliver a picture) build and are tested on every platform.
 
 // Pure: built and tested everywhere, used by the OS parts on macOS alone.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) mod cadence;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod clicks;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
