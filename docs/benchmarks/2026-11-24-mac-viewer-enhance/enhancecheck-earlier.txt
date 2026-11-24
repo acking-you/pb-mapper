@@ -1,0 +1,110 @@
+device: Apple M6
+shaders compiled at run time in 110.1 ms
+
+GPU time a picture, ms (300 pictures after 30 to warm up, one at a time)
+1080p on a 4096x2304 display, full screen: 1920x1080 to 4096x2304
+  low: both passes median 0.941 p95 0.944 max 0.970; CPU encode to scheduled median 0.128 p95 0.190 max 0.264
+    pass 1 (upscale) median 0.635 p95 0.636 max 0.705
+    pass 2 (sharpen) median 0.313 p95 0.314 max 0.317
+  medium: both passes median 0.942 p95 0.943 max 0.950; CPU encode to scheduled median 0.058 p95 0.128 max 0.679
+    pass 1 (upscale) median 0.635 p95 0.636 max 0.639
+    pass 2 (sharpen) median 0.314 p95 0.315 max 0.318
+  high: both passes median 0.942 p95 0.943 max 0.949; CPU encode to scheduled median 0.061 p95 0.166 max 0.252
+    pass 1 (upscale) median 0.635 p95 0.636 max 0.641
+    pass 2 (sharpen) median 0.313 p95 0.314 max 0.317
+1440p on a 4096x2304 display, full screen: 2560x1440 to 4096x2304
+  low: both passes median 0.942 p95 0.943 max 0.952; CPU encode to scheduled median 0.060 p95 0.136 max 0.178
+    pass 1 (upscale) median 0.635 p95 0.636 max 0.704
+    pass 2 (sharpen) median 0.313 p95 0.314 max 0.320
+  medium: both passes median 0.942 p95 0.942 max 0.987; CPU encode to scheduled median 0.057 p95 0.074 max 0.370
+    pass 1 (upscale) median 0.635 p95 0.636 max 0.640
+    pass 2 (sharpen) median 0.313 p95 0.315 max 0.321
+  high: both passes median 0.942 p95 0.943 max 0.952; CPU encode to scheduled median 0.070 p95 0.117 max 0.392
+    pass 1 (upscale) median 0.634 p95 0.636 max 0.702
+    pass 2 (sharpen) median 0.316 p95 0.322 max 0.327
+1080p on a 3024x1964 panel, full screen: 1920x1080 to 3024x1701
+  low: both passes median 0.519 p95 0.520 max 0.533; CPU encode to scheduled median 0.059 p95 0.160 max 0.261
+    pass 1 (upscale) median 0.351 p95 0.352 max 0.355
+    pass 2 (sharpen) median 0.173 p95 0.174 max 0.177
+  medium: both passes median 0.519 p95 0.520 max 0.523; CPU encode to scheduled median 0.053 p95 0.060 max 0.092
+    pass 1 (upscale) median 0.351 p95 0.352 max 0.355
+    pass 2 (sharpen) median 0.173 p95 0.174 max 0.186
+  high: both passes median 0.519 p95 0.520 max 0.524; CPU encode to scheduled median 0.051 p95 0.057 max 0.097
+    pass 1 (upscale) median 0.350 p95 0.352 max 0.355
+    pass 2 (sharpen) median 0.174 p95 0.177 max 0.190
+1440p on a 3456x2234 panel, full screen: 2560x1440 to 3456x1944
+  low: both passes median 0.672 p95 0.674 max 0.677; CPU encode to scheduled median 0.057 p95 0.158 max 0.251
+    pass 1 (upscale) median 0.454 p95 0.454 max 0.456
+    pass 2 (sharpen) median 0.224 p95 0.225 max 0.226
+  medium: both passes median 0.672 p95 0.673 max 0.679; CPU encode to scheduled median 0.054 p95 0.065 max 0.106
+    pass 1 (upscale) median 0.454 p95 0.455 max 0.461
+    pass 2 (sharpen) median 0.224 p95 0.225 max 0.227
+  high: both passes median 0.672 p95 0.673 max 0.676; CPU encode to scheduled median 0.047 p95 0.054 max 0.063
+    pass 1 (upscale) median 0.454 p95 0.455 max 0.457
+    pass 2 (sharpen) median 0.224 p95 0.225 max 0.233
+4K on a 4096x2304 display, full screen: 3840x2160 to 4096x2304
+  low: both passes median 0.941 p95 0.942 max 0.947; CPU encode to scheduled median 0.062 p95 0.067 max 0.082
+    pass 1 (upscale) median 0.635 p95 0.635 max 0.640
+    pass 2 (sharpen) median 0.314 p95 0.317 max 0.323
+  medium: both passes median 0.941 p95 0.941 max 0.946; CPU encode to scheduled median 0.062 p95 0.065 max 0.082
+    pass 1 (upscale) median 0.634 p95 0.634 max 0.638
+    pass 2 (sharpen) median 0.314 p95 0.314 max 0.317
+  high: both passes median 0.941 p95 0.942 max 0.947; CPU encode to scheduled median 0.058 p95 0.067 max 0.098
+    pass 1 (upscale) median 0.634 p95 0.635 max 0.643
+    pass 2 (sharpen) median 0.314 p95 0.315 max 0.321
+1080p at 1:1 (sharpening only): 1920x1080 to 1920x1080
+  low: both passes median 0.077 p95 0.078 max 0.080; CPU encode to scheduled median 0.029 p95 0.043 max 0.111
+    pass 2 (sharpen) median 0.077 p95 0.078 max 0.079
+  medium: both passes median 0.077 p95 0.078 max 0.080; CPU encode to scheduled median 0.019 p95 0.029 max 0.054
+    pass 2 (sharpen) median 0.077 p95 0.078 max 0.078
+  high: both passes median 0.078 p95 0.078 max 0.080; CPU encode to scheduled median 0.022 p95 0.040 max 0.078
+    pass 2 (sharpen) median 0.077 p95 0.078 max 0.079
+
+Colour at 1:1, sharpening off (peak 0), against the plain layer, eight flat patches
+  source (224, 48, 32) plain layer (224, 48, 31) enhancement (224, 48, 31) differ by 0
+  source (48, 192, 64) plain layer (49, 192, 64) enhancement (49, 192, 64) differ by 0
+  source (32, 64, 224) plain layer (33, 64, 223) enhancement (33, 64, 223) differ by 0
+  source (128, 128, 128) plain layer (128, 128, 128) enhancement (128, 128, 128) differ by 0
+  source (240, 160, 16) plain layer (240, 160, 17) enhancement (240, 160, 17) differ by 0
+  source (144, 48, 192) plain layer (144, 48, 193) enhancement (144, 48, 193) differ by 0
+  source (240, 240, 240) plain layer (240, 240, 240) enhancement (240, 240, 240) differ by 0
+  source (32, 32, 32) plain layer (31, 31, 31) enhancement (31, 31, 31) differ by 0
+  largest difference: 0 levels
+
+A flat grey field stays flat at every level (1080p to 4096x2304 and at 1:1)
+  4096x2304 low: largest change from no sharpening 0 levels
+  4096x2304 medium: largest change from no sharpening 0 levels
+  4096x2304 high: largest change from no sharpening 0 levels
+  1920x1080 low: largest change from no sharpening 0 levels
+  1920x1080 medium: largest change from no sharpening 0 levels
+  1920x1080 high: largest change from no sharpening 0 levels
+
+A black-white edge, enlarged 1.6x: the output's luma stays within the source's
+  peak 0.00 (Catmull-Rom only): luma 16.0 to 235.0 around the edge and the 3-pixel bars; source 16 to 235
+  peak -0.06: luma 13.0 to 237.0 around the edge and the 3-pixel bars; source 16 to 235
+  peak -0.10: luma 11.0 to 239.0 around the edge and the 3-pixel bars; source 16 to 235
+  peak -0.14: luma 9.0 to 241.0 around the edge and the 3-pixel bars; source 16 to 235
+
+Sharpness: mean luma gradient over the text, the plain layer against each level
+  1080p on a 4096x2304 display, full screen: plain 65.87, catmull-rom 75.02 (+14%), low 76.30 (+16%), medium 77.38 (+17%), high 78.73 (+20%)
+  1440p on a 4096x2304 display, full screen: plain 54.03, catmull-rom 61.03 (+13%), low 62.21 (+15%), medium 63.16 (+17%), high 64.30 (+19%)
+  1080p on a 3024x1964 panel, full screen: plain 80.08, catmull-rom 90.38 (+13%), low 92.16 (+15%), medium 93.59 (+17%), high 95.30 (+19%)
+  1440p on a 3456x2234 panel, full screen: plain 59.29, catmull-rom 66.19 (+12%), low 67.44 (+14%), medium 68.44 (+15%), high 69.60 (+17%)
+  4K on a 4096x2304 display, full screen: plain 28.79, catmull-rom 31.70 (+10%), low 32.23 (+12%), medium 32.63 (+13%), high 33.09 (+15%)
+
+In a window on G24H2, backing scale 2.0, occlusion visible: false
+  display 3 asleep true
+  enhancement started: true
+  after 1 s: 1 presented (the picture on the content layer, redrawn), reveals [1], showing 3840x2160 medium
+  feeder: 600 pictures at 120 a second; hand-off ms median 0.003 p95 0.004 max 0.007
+  presenter thread: 600 presented, 0 superseded in the slot; hand-off to present ms median 2.713 p95 2.814 max 5.919
+  failures: []
+  a new size and level with the desktop still: 1 redrawn
+  back to the content layer: newest handed back is frame 603 of 603
+  the next picture: committed
+  enhancing again: reveals [1, 3]
+  released; failures: []
+
+KVO on sublayerTransform fired 1 time(s) for one change
+leaf in root: (960.0, 540.0) unscaled, (1920.0, 1080.0) under the container's 2x sublayerTransform
+and on a layer-backed view's own layer: 2 in all

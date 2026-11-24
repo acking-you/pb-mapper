@@ -17,7 +17,10 @@
 //   buffers, which the decoder thread commits to the viewer's own Core
 //   Animation layer as each is decoded, with no BGRA pass and no Flutter
 //   frame. The commit is the receipt. Flutter shows the layer through the
-//   platform view `pb_mapper/desktop_video_view`.
+//   platform view `pb_mapper/desktop_video_view`. While Dart asks a layer
+//   presenter to `enhance` a picture shown enlarged, a presenter thread
+//   upscales and sharpens each picture on the GPU into a CAMetalLayer
+//   beside that layer instead; its present is the receipt.
 // Nothing of the video crosses Dart.
 
 import CoreMedia
@@ -34,6 +37,7 @@ import os
 #elseif os(macOS)
   import AppKit
   import FlutterMacOS
+  import Metal
   import QuartzCore
 #endif
 
@@ -89,8 +93,10 @@ private func logVideo(_ message: String) {
 }
 
 /// Instruments' points of interest, by picture: `Decoded` as a picture
-/// leaves the decoder, `Commit` around a layer presenter's commit, and
-/// `Consumed` when Flutter's compositor takes a texture's picture, each with
+/// leaves the decoder, `Commit` around a layer presenter's commit (or its
+/// enhancement's present), `Enhance` around the enhancement encoding its
+/// GPU work until the GPU scheduled it, and `Consumed` when Flutter's
+/// compositor takes a texture's picture, each with
 /// the picture's generation and frame. Animation Hitches with the Points of
 /// Interest instrument added records them in one trace with the display's
 /// frames. Points of interest go to the system log whether or not a trace
@@ -666,6 +672,13 @@ private struct Picture {
   let frame: UInt64
   let revision: UInt64
   var readyNs: UInt64 = 0
+
+  /// Whether [other] is this picture: the same unit of the same revision.
+  /// Not the buffer, which VideoToolbox's pool hands out again.
+  func same(as other: Picture?) -> Bool {
+    guard let other = other else { return false }
+    return generation == other.generation && frame == other.frame && revision == other.revision
+  }
 }
 
 /// One of the stats' timings: count, mean and maximum, in constant space.
@@ -713,6 +726,678 @@ private struct UnitMeta {
   var codec: Codec { flags & flagH265 != 0 ? .h265 : .h264 }
 }
 
+/// `enhance`'s `level`: how much a layer presenter sharpens a picture it
+/// shows enlarged (the viewer's "Sharpen enlarged picture"). Off, it does
+/// nothing at all.
+private enum EnhanceLevel: String {
+  case off, low, medium, high
+
+  /// AMD FidelityFX CAS's peak, as airhand weighs it: how far a pixel moves
+  /// from its four neighbours' mean where they hardly differ. CAS's own
+  /// range, -0.125 to -0.2, is too strong for compressed video.
+  var peak: Float {
+    switch self {
+    case .off: return 0
+    case .low: return -0.06
+    case .medium: return -0.1
+    case .high: return -0.14
+    }
+  }
+}
+
+/// A size in pixels.
+private struct PixelSize: Equatable {
+  let width: Int
+  let height: Int
+}
+
+#if os(macOS)
+  /// The largest drawable the enhancement asks for, a Metal texture's
+  /// limit on every Mac GPU that runs this app.
+  private let maxDrawable = 16384
+
+  /// What the enhancement draws: the picture's size on screen, in pixels,
+  /// and the level.
+  private struct EnhanceTarget: Equatable {
+    let size: PixelSize
+    let level: EnhanceLevel
+  }
+
+  /// Where the enhancement's layer goes over [layer], the view's own layer,
+  /// which [container] fills as its sublayer: [layer]'s rect in the window's
+  /// root layer [root], each edge moved to the nearest edge between device
+  /// pixels at [scale], as a frame in [container], and that rect's size in
+  /// pixels, which the drawable takes. Flutter places the view at fractional
+  /// pixel offsets and sizes; a drawable on whole pixels at exactly its size
+  /// reaches the screen one texel a pixel, so the WindowServer does not
+  /// filter it again, which would blur what the enhancement sharpened. The
+  /// window's backing, and so its root layer's bounds, lies on whole pixels.
+  /// Nil while [container] is not [layer]'s, or for less than a pixel.
+  private func pixelPlacement(of layer: CALayer, in container: CALayer, root: CALayer, scale: CGFloat)
+    -> (size: PixelSize, frame: CGRect)?
+  {
+    guard container.superlayer === layer, scale.isFinite, scale > 0 else { return nil }
+    let rect = layer.convert(layer.bounds, to: root)
+    let origin = root.bounds.origin
+    // Rounded alike at both edges, so a whole-pixel extent stays whole.
+    func edge(_ points: CGFloat, _ from: CGFloat) -> CGFloat? {
+      let pixels = ((points - from) * scale + 0.5).rounded(.down)
+      return pixels.isFinite && abs(pixels) <= 1_000_000 ? pixels : nil
+    }
+    guard let left = edge(rect.minX, origin.x), let right = edge(rect.maxX, origin.x),
+      let low = edge(rect.minY, origin.y), let high = edge(rect.maxY, origin.y), right - left >= 1,
+      high - low >= 1
+    else { return nil }
+    let aligned = CGRect(
+      x: origin.x + left / scale, y: origin.y + low / scale, width: (right - left) / scale,
+      height: (high - low) / scale)
+    let size = PixelSize(width: Int(right - left), height: Int(high - low))
+    return (size, container.convert(aligned, from: root))
+  }
+
+  /// The shaders' constants (`Params` in [enhanceShaders]): four float4s,
+  /// laid out alike in Swift and in the Metal Shading Language.
+  private struct EnhanceParams {
+    /// xy: the picture's size; zw: picture pixels per output pixel.
+    var size: SIMD4<Float>
+    /// x: video-range luma's scale (255/219), y: its offset (16/255),
+    /// z: chroma's zero (128/255), w: the sharpening peak.
+    var range: SIMD4<Float>
+    /// Red from Cr, green from Cb, green from Cr, blue from Cb, video range.
+    var chroma: SIMD4<Float>
+    /// xy: the output's size in pixels.
+    var extent: SIMD4<Float>
+  }
+
+  /// Video-range chroma's weights for the matrix with luma coefficients
+  /// [kr] and [kb].
+  private func chromaWeights(kr: Float, kb: Float) -> SIMD4<Float> {
+    let kg = 1 - kr - kb
+    let scale: Float = 255.0 / 224.0
+    return SIMD4(2 * (1 - kr), 2 * kb * (1 - kb) / kg, 2 * kr * (1 - kr) / kg, 2 * (1 - kb)) * scale
+  }
+
+  private let bt709Weights = chromaWeights(kr: 0.2126, kb: 0.0722)
+  private let bt601Weights = chromaWeights(kr: 0.299, kb: 0.114)
+
+  /// The weights of the matrix [buffer] is tagged with: BT.601 where it says
+  /// so, BT.709 otherwise, as the layer presenter tags its pictures.
+  private func matrixWeights(_ buffer: CVPixelBuffer) -> SIMD4<Float> {
+    let matrix: CFTypeRef?
+    if #available(macOS 12.0, *) {
+      matrix = CVBufferCopyAttachment(buffer, kCVImageBufferYCbCrMatrixKey, nil)
+    } else {
+      matrix = CVBufferGetAttachment(buffer, kCVImageBufferYCbCrMatrixKey, nil)?.takeUnretainedValue()
+    }
+    if let tag = matrix, CFEqual(tag, kCVImageBufferYCbCrMatrix_ITU_R_601_4) { return bt601Weights }
+    return bt709Weights
+  }
+
+  /// The enhancement's shaders, after airhand's (client/src/lib/enhance.ts),
+  /// compiled at run time so that neither runner project carries a .metal
+  /// resource. Texture and render target coordinates alike run y down from
+  /// the picture's top left.
+  ///
+  /// Pass 1, while the picture is enlarged, reads the decoder's 420v planes
+  /// and writes the picture at its size on screen: luma by Catmull-Rom, from
+  /// nine bilinear taps, kept within its four nearest texels so that it
+  /// never rings beside text; chroma bilinear; then RGB through the stream's
+  /// matrix with no transfer conversion, which the sRGB layer shows as the
+  /// plain layer's colours. The luma goes in alpha for pass 2.
+  ///
+  /// Pass 2 sharpens luma alone, as AMD FidelityFX CAS does: a pixel moves
+  /// toward or away from its four neighbours' mean by the peak, less where
+  /// its 3x3 already has contrast, which limits overshoot beside an edge but
+  /// does not prevent it. Chroma, which 4:2:0 carries at half the
+  /// resolution, is left alone: sharpening it would only widen colour
+  /// fringes. At 1:1 it runs alone, on the planes.
+  private let enhanceShaders = """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct Params {
+      float4 size;
+      float4 range;
+      float4 chroma;
+      float4 extent;
+    };
+
+    struct Cover {
+      float4 position [[position]];
+    };
+
+    constexpr sampler bilinear(coord::normalized, address::clamp_to_edge, filter::linear);
+
+    // One triangle over the whole target.
+    vertex Cover cover(uint id [[vertex_id]]) {
+      float2 p = float2(float((id << 1) & 2), float(id & 2));
+      Cover out;
+      out.position = float4(p * 2.0 - 1.0, 0.0, 1.0);
+      return out;
+    }
+
+    static float lumaOf(float y, constant Params &p) {
+      return saturate((y - p.range.y) * p.range.x);
+    }
+
+    static float3 rgbOf(float y, float2 c, constant Params &p) {
+      float l = (y - p.range.y) * p.range.x;
+      float cb = c.x - p.range.z;
+      float cr = c.y - p.range.z;
+      return saturate(float3(l + p.chroma.x * cr, l - p.chroma.y * cb - p.chroma.z * cr,
+                             l + p.chroma.w * cb));
+    }
+
+    fragment float4 upscale(Cover in [[stage_in]], texture2d<float> luma [[texture(0)]],
+                            texture2d<float> chroma [[texture(1)]],
+                            constant Params &p [[buffer(0)]]) {
+      float2 size = p.size.xy;
+      float2 pos = in.position.xy * p.size.zw;
+      float2 t1 = floor(pos - 0.5) + 0.5;
+      float2 f = pos - t1;
+      float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+      float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+      float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+      float2 w3 = f * f * (-0.5 + 0.5 * f);
+      float2 w12 = w1 + w2;
+      float2 t0 = (t1 - 1.0) / size;
+      float2 t3 = (t1 + 2.0) / size;
+      float2 t12 = (t1 + w2 / w12) / size;
+      float y =
+          (luma.sample(bilinear, float2(t0.x, t0.y)).r * w0.x
+           + luma.sample(bilinear, float2(t12.x, t0.y)).r * w12.x
+           + luma.sample(bilinear, float2(t3.x, t0.y)).r * w3.x) * w0.y
+          + (luma.sample(bilinear, float2(t0.x, t12.y)).r * w0.x
+             + luma.sample(bilinear, float2(t12.x, t12.y)).r * w12.x
+             + luma.sample(bilinear, float2(t3.x, t12.y)).r * w3.x) * w12.y
+          + (luma.sample(bilinear, float2(t0.x, t3.y)).r * w0.x
+             + luma.sample(bilinear, float2(t12.x, t3.y)).r * w12.x
+             + luma.sample(bilinear, float2(t3.x, t3.y)).r * w3.x) * w3.y;
+      // The four texels nearest, around t1 + 0.5: no ringing.
+      float4 near = luma.gather(bilinear, (t1 + 0.5) / size);
+      y = clamp(y, min(min(near.x, near.y), min(near.z, near.w)),
+                max(max(near.x, near.y), max(near.z, near.w)));
+      float2 c = chroma.sample(bilinear, pos / size).rg;
+      return float4(rgbOf(y, c, p), lumaOf(y, p));
+    }
+
+    static float4 cas(float3 rgb, float e, float a, float b, float c, float d, float f, float g,
+                      float h, float i, float peak) {
+      float mn = min(min(min(d, e), min(f, b)), h);
+      mn += min(mn, min(min(a, c), min(g, i)));
+      float mx = max(max(max(d, e), max(f, b)), h);
+      mx += max(mx, max(max(a, c), max(g, i)));
+      float amp = sqrt(saturate(min(mn, 2.0 - mx) / max(mx, 1e-5)));
+      float w = amp * peak;
+      float l = (e + w * (b + d + f + h)) / (1.0 + 4.0 * w);
+      return float4(saturate(rgb + (l - e)), 1.0);
+    }
+
+    static float alphaAt(texture2d<float> image, int2 q, int2 m) {
+      return image.read(uint2(clamp(q, int2(0), m))).a;
+    }
+
+    fragment float4 sharpenImage(Cover in [[stage_in]], texture2d<float> image [[texture(0)]],
+                                 constant Params &p [[buffer(0)]]) {
+      int2 m = int2(p.extent.xy) - 1;
+      int2 q = int2(in.position.xy);
+      float4 center = image.read(uint2(clamp(q, int2(0), m)));
+      return cas(center.rgb, center.a, alphaAt(image, q + int2(-1, -1), m),
+                 alphaAt(image, q + int2(0, -1), m), alphaAt(image, q + int2(1, -1), m),
+                 alphaAt(image, q + int2(-1, 0), m), alphaAt(image, q + int2(1, 0), m),
+                 alphaAt(image, q + int2(-1, 1), m), alphaAt(image, q + int2(0, 1), m),
+                 alphaAt(image, q + int2(1, 1), m), p.range.w);
+    }
+
+    static float lumaAt(texture2d<float> luma, int2 q, int2 m, constant Params &p) {
+      return lumaOf(luma.read(uint2(clamp(q, int2(0), m))).r, p);
+    }
+
+    fragment float4 sharpenPlanes(Cover in [[stage_in]], texture2d<float> luma [[texture(0)]],
+                                  texture2d<float> chroma [[texture(1)]],
+                                  constant Params &p [[buffer(0)]]) {
+      int2 m = int2(p.size.xy) - 1;
+      int2 q = int2(in.position.xy);
+      float y = luma.read(uint2(clamp(q, int2(0), m))).r;
+      float2 c = chroma.sample(bilinear, in.position.xy / p.size.xy).rg;
+      return cas(rgbOf(y, c, p), lumaOf(y, p), lumaAt(luma, q + int2(-1, -1), m, p),
+                 lumaAt(luma, q + int2(0, -1), m, p), lumaAt(luma, q + int2(1, -1), m, p),
+                 lumaAt(luma, q + int2(-1, 0), m, p), lumaAt(luma, q + int2(1, 0), m, p),
+                 lumaAt(luma, q + int2(-1, 1), m, p), lumaAt(luma, q + int2(0, 1), m, p),
+                 lumaAt(luma, q + int2(1, 1), m, p), p.range.w);
+    }
+    """
+
+  /// The enhancement's GPU work, on its presenter thread only: the shaders'
+  /// pipelines, the texture cache that wraps a decoded picture's planes
+  /// without a copy, and pass 1's picture.
+  private final class EnhanceGpu {
+    enum Drawn {
+      case presented
+      case failed(String)
+    }
+
+    private let device: MTLDevice
+    private let queue: MTLCommandQueue
+    private let upscale: MTLRenderPipelineState
+    private let sharpenImage: MTLRenderPipelineState
+    private let sharpenPlanes: MTLRenderPipelineState
+    private let cache: CVMetalTextureCache
+    /// Pass 1's picture, at least the size on screen. It only grows while
+    /// the enhancement runs, so that a resize or a pinch does not allocate
+    /// at every step, and goes when it idles.
+    private var image: MTLTexture?
+
+    /// Compiles the shaders: tens of milliseconds, never on the platform
+    /// thread.
+    init(device: MTLDevice) throws {
+      self.device = device
+      guard let queue = device.makeCommandQueue() else { throw VideoError("No Metal command queue") }
+      self.queue = queue
+      let library: MTLLibrary
+      do {
+        library = try device.makeLibrary(source: enhanceShaders, options: nil)
+      } catch {
+        throw VideoError("Compile the enhancement shaders: \(error.localizedDescription)")
+      }
+      func pipeline(_ fragment: String, _ format: MTLPixelFormat) throws -> MTLRenderPipelineState {
+        guard let vertex = library.makeFunction(name: "cover"),
+          let shader = library.makeFunction(name: fragment)
+        else { throw VideoError("The enhancement shaders have no \(fragment)") }
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = vertex
+        descriptor.fragmentFunction = shader
+        descriptor.colorAttachments[0].pixelFormat = format
+        do {
+          return try device.makeRenderPipelineState(descriptor: descriptor)
+        } catch {
+          throw VideoError("Build the \(fragment) pipeline: \(error.localizedDescription)")
+        }
+      }
+      upscale = try pipeline("upscale", .rgba8Unorm)
+      sharpenImage = try pipeline("sharpenImage", .bgra8Unorm)
+      sharpenPlanes = try pipeline("sharpenPlanes", .bgra8Unorm)
+      var made: CVMetalTextureCache?
+      guard CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &made) == kCVReturnSuccess,
+        let cache = made
+      else { throw VideoError("Create the Metal texture cache") }
+      self.cache = cache
+    }
+
+    /// Nothing to draw for now: pass 1's picture goes.
+    func idle() { image = nil }
+
+    /// [layer]'s next drawable at [size], nil if none came within
+    /// nextDrawable's second. It waits while every drawable is still on
+    /// screen or queued: this thread's wait, never the decoder's, and before
+    /// the picture is chosen, so that the one drawn is the newest.
+    func drawable(_ size: PixelSize, in layer: CAMetalLayer) -> CAMetalDrawable? {
+      let pixels = CGSize(width: size.width, height: size.height)
+      if layer.drawableSize != pixels {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.drawableSize = pixels
+        CATransaction.commit()
+      }
+      return layer.nextDrawable()
+    }
+
+    /// [picture] at [target] in [drawable], one of [layer]'s at the
+    /// target's size, presented in an explicit transaction ([layer]
+    /// presents with transactions) once the GPU has scheduled the work.
+    /// [completed] hears, on Metal's thread, whether the GPU finished it.
+    /// While [timed], `Enhance` marks the GPU work's encoding and scheduling
+    /// and `Commit` the present.
+    func draw(
+      _ picture: Picture, _ target: EnhanceTarget, into drawable: CAMetalDrawable, timed: Bool,
+      completed: @escaping (Bool) -> Void
+    ) -> Drawn {
+      let buffer = picture.buffer
+      guard CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        let lumaPlane = wrap(buffer, plane: 0, .r8Unorm),
+        let chromaPlane = wrap(buffer, plane: 1, .rg8Unorm),
+        let luma = CVMetalTextureGetTexture(lumaPlane),
+        let chroma = CVMetalTextureGetTexture(chromaPlane)
+      else { return .failed("Metal cannot read the decoded picture") }
+      let width = luma.width
+      let height = luma.height
+      let out = target.size
+      let span = timed ? Signpost.begin("Enhance", picture.generation, picture.frame) : nil
+      guard let commands = queue.makeCommandBuffer() else {
+        Signpost.end("Enhance", span)
+        return .failed("No Metal command buffer")
+      }
+      var params = EnhanceParams(
+        size: SIMD4(Float(width), Float(height), Float(width) / Float(out.width), Float(height) / Float(out.height)),
+        range: SIMD4(255.0 / 219.0, 16.0 / 255.0, 128.0 / 255.0, target.level.peak),
+        chroma: matrixWeights(buffer),
+        extent: SIMD4(Float(out.width), Float(out.height), 0, 0))
+      let encoded: Bool
+      if out.width == width && out.height == height {
+        encoded = pass(commands, sharpenPlanes, into: drawable.texture, out, luma, chroma, &params)
+      } else if let image = image(for: out) {
+        encoded =
+          pass(commands, upscale, into: image, out, luma, chroma, &params)
+          && pass(commands, sharpenImage, into: drawable.texture, out, image, nil, &params)
+      } else {
+        encoded = false
+      }
+      // The planes stay wrapped until the GPU is done with them.
+      commands.addCompletedHandler { done in
+        withExtendedLifetime((lumaPlane, chromaPlane)) {}
+        completed(done.status == .completed)
+      }
+      // A pass not encoded leaves the drawable as it was: committed all
+      // the same, so that it goes back to the layer, but not presented.
+      commands.commit()
+      guard encoded else {
+        Signpost.end("Enhance", span)
+        return .failed("Encode the enhancement")
+      }
+      commands.waitUntilScheduled()
+      Signpost.end("Enhance", span)
+      let commit = timed ? Signpost.begin("Commit", picture.generation, picture.frame) : nil
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      drawable.present()
+      CATransaction.commit()
+      Signpost.end("Commit", commit)
+      CVMetalTextureCacheFlush(cache, 0)
+      return .presented
+    }
+
+    private func wrap(_ buffer: CVPixelBuffer, plane: Int, _ format: MTLPixelFormat) -> CVMetalTexture? {
+      var made: CVMetalTexture?
+      let status = CVMetalTextureCacheCreateTextureFromImage(
+        kCFAllocatorDefault, cache, buffer, nil, format, CVPixelBufferGetWidthOfPlane(buffer, plane),
+        CVPixelBufferGetHeightOfPlane(buffer, plane), plane, &made)
+      return status == kCVReturnSuccess ? made : nil
+    }
+
+    /// Pass 1's picture for [size], grown as needed, in 256-pixel steps.
+    private func image(for size: PixelSize) -> MTLTexture? {
+      if let image = image, image.width >= size.width, image.height >= size.height { return image }
+      let width = min(maxDrawable, max(image?.width ?? 0, (size.width + 255) & ~255))
+      let height = min(maxDrawable, max(image?.height ?? 0, (size.height + 255) & ~255))
+      let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+      descriptor.usage = [.renderTarget, .shaderRead]
+      descriptor.storageMode = .private
+      image = device.makeTexture(descriptor: descriptor)
+      return image
+    }
+
+    /// One full-target triangle of [pipeline] into [size] of [target].
+    private func pass(
+      _ commands: MTLCommandBuffer, _ pipeline: MTLRenderPipelineState, into target: MTLTexture,
+      _ size: PixelSize, _ first: MTLTexture, _ second: MTLTexture?, _ params: inout EnhanceParams
+    ) -> Bool {
+      let descriptor = MTLRenderPassDescriptor()
+      descriptor.colorAttachments[0].texture = target
+      descriptor.colorAttachments[0].loadAction = .dontCare
+      descriptor.colorAttachments[0].storeAction = .store
+      guard let encoder = commands.makeRenderCommandEncoder(descriptor: descriptor) else { return false }
+      encoder.setRenderPipelineState(pipeline)
+      encoder.setViewport(
+        MTLViewport(
+          originX: 0, originY: 0, width: Double(size.width), height: Double(size.height), znear: 0, zfar: 1))
+      encoder.setFragmentTexture(first, index: 0)
+      if let second = second { encoder.setFragmentTexture(second, index: 1) }
+      encoder.setFragmentBytes(&params, length: MemoryLayout<EnhanceParams>.stride, index: 0)
+      encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+      encoder.endEncoding()
+      return true
+    }
+  }
+
+  /// A layer presenter's enhancement: a CAMetalLayer beside the content
+  /// layer, and a presenter thread that draws on it. The decoder thread puts
+  /// each picture in a slot of one, the newest winning, and returns at once:
+  /// it never waits for the GPU or for a drawable. The presenter thread
+  /// draws the newest picture into the layer's next drawable and presents
+  /// it, which is the picture's receipt. It keeps that picture, so that a
+  /// new size or level redraws it while the desktop is still and sends
+  /// nothing. Made on the platform thread when a viewer first enhances, and
+  /// ended there.
+  private final class EnhancedPresenter {
+    let layer = CAMetalLayer()
+    private let device: MTLDevice
+    // Presenter thread: a picture presented in the current activation, and
+    // the first of an activation, each with this presenter, so that a word
+    // from one already replaced changes nothing; or the enhancement failing,
+    // which ends the thread.
+    private let presented: (Picture) -> Void
+    private let revealed: (EnhancedPresenter, UInt64) -> Void
+    private let failed: (EnhancedPresenter, String) -> Void
+    private let condition = NSCondition()
+    // Guarded by condition.
+    private var slot: Picture?
+    private var last: Picture?
+    private var target: EnhanceTarget?
+    private var redraw = false
+    /// Each activation's number, and the last whose first picture was
+    /// presented.
+    private var epoch: UInt64 = 0
+    private var revealedEpoch: UInt64 = 0
+    /// Pictures the GPU failed, in a row.
+    private var gpuErrors = 0
+    private var quit = false
+
+    init(
+      device: MTLDevice, presented: @escaping (Picture) -> Void,
+      revealed: @escaping (EnhancedPresenter, UInt64) -> Void,
+      failed: @escaping (EnhancedPresenter, String) -> Void
+    ) {
+      self.device = device
+      self.presented = presented
+      self.revealed = revealed
+      self.failed = failed
+      layer.delegate = StillLayers.shared
+      // The platform thread places it on whole pixels (pixelPlacement): a
+      // resize of the container must not stretch it off them.
+      layer.autoresizingMask = []
+      layer.device = device
+      layer.pixelFormat = .bgra8Unorm
+      layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
+      layer.framebufferOnly = true
+      layer.isOpaque = true
+      layer.maximumDrawableCount = 3
+      // Each present joins the transaction that carries it, so the layer
+      // shows its first picture before the platform thread reveals it.
+      layer.presentsWithTransaction = true
+      layer.isHidden = true
+    }
+
+    // MARK: Platform thread
+
+    func start() {
+      let thread = Thread { [self] in run() }
+      thread.name = "pb-desktop-enhance"
+      thread.qualityOfService = .userInteractive
+      thread.start()
+    }
+
+    /// Pictures come here from now on, starting from [picture], the one on
+    /// the content layer. A new epoch, whose first present the platform
+    /// thread hears of.
+    func activate(_ target: EnhanceTarget, from picture: Picture?) {
+      condition.lock()
+      epoch += 1
+      self.target = target
+      slot = nil
+      last = picture
+      redraw = picture != nil
+      condition.signal()
+      condition.unlock()
+    }
+
+    /// A new size or level redraws the picture shown.
+    func retarget(_ target: EnhanceTarget) {
+      condition.lock()
+      if self.target != target {
+        self.target = target
+        redraw = slot != nil || last != nil
+        condition.signal()
+      }
+      condition.unlock()
+    }
+
+    /// No more pictures come here: the newest it was given, for the content
+    /// layer.
+    func deactivate() -> Picture? {
+      condition.lock()
+      epoch += 1
+      target = nil
+      let newest = slot ?? last
+      slot = nil
+      last = nil
+      redraw = false
+      condition.signal()
+      condition.unlock()
+      return newest
+    }
+
+    /// Whether [epoch] is the current activation.
+    func isCurrent(_ epoch: UInt64) -> Bool {
+      condition.lock()
+      defer { condition.unlock() }
+      return target != nil && self.epoch == epoch
+    }
+
+    /// The thread ends once a draw in progress, if any, is done.
+    func stop() {
+      condition.lock()
+      quit = true
+      condition.signal()
+      condition.unlock()
+    }
+
+    // MARK: Decoder thread
+
+    /// True when [picture] replaced one not drawn yet.
+    func put(_ picture: Picture) -> Bool {
+      condition.lock()
+      let superseded = slot != nil
+      slot = picture
+      condition.signal()
+      condition.unlock()
+      return superseded
+    }
+
+    // MARK: Presenter thread
+
+    private func run() {
+      let gpu: EnhanceGpu
+      do {
+        gpu = try EnhanceGpu(device: device)
+      } catch {
+        fail((error as? VideoError)?.message ?? "\(error)")
+        return
+      }
+      var failures = 0
+      // Drawables that did not come, in a row, while an activation ran.
+      var starved = 0
+      while true {
+        condition.lock()
+        while !quit && gpuErrors < 3 && (target == nil || (slot == nil && !redraw)) {
+          if target == nil { gpu.idle() }
+          condition.wait()
+        }
+        if quit || gpuErrors >= 3 {
+          condition.unlock()
+          fail("The GPU failed three enhanced pictures in a row")
+          return
+        }
+        guard let size = target?.size else {
+          condition.unlock()
+          continue
+        }
+        let waiting = self.epoch
+        condition.unlock()
+        // Enclose drawable acquisition and every exit path in the iteration's
+        // autorelease pool so autoreleased CAMetalDrawable references drain
+        // promptly instead of exhausting the three-drawable pool.
+        let keepRunning: Bool = autoreleasepool {
+          // The drawable first, which may wait; the picture after, so that it
+          // is the newest the decoder thread gave.
+          guard let drawable = gpu.drawable(size, in: layer) else {
+            // A second went by without one: the picture is tried again. Two
+            // in a row for a window that counts as visible, and the content
+            // layer takes the picture back rather than hold it and its
+            // receipts any longer.
+            condition.lock()
+            let current = waiting == self.epoch && target != nil
+            condition.unlock()
+            starved = current ? starved + 1 : 0
+            if starved >= 2 {
+              fail("No drawable came for two seconds")
+              return false
+            }
+            return true
+          }
+          starved = 0
+          condition.lock()
+          if let next = slot {
+            last = next
+            slot = nil
+          }
+          redraw = false
+          let picture = last
+          let goal = target
+          let drawing = self.epoch
+          // A new size while it waited: drawn again, at that size.
+          if let goal = goal, goal.size != size, picture != nil { redraw = true }
+          condition.unlock()
+          // Ended or resized while it waited: the drawable goes back unshown.
+          guard let shown = picture, let goal = goal, goal.size == size else { return true }
+          let drawn = gpu.draw(shown, goal, into: drawable, timed: shown.readyNs != 0) {
+            [weak self] done in
+            self?.completed(done)
+          }
+          switch drawn {
+          case .presented:
+            failures = 0
+            condition.lock()
+            let current = drawing == self.epoch
+            let first = current && revealedEpoch != drawing
+            if first { revealedEpoch = drawing }
+            condition.unlock()
+            // Presented after its activation ended, into a layer hidden
+            // since, it reached no screen and earns no receipt.
+            if current { presented(shown) }
+            if first { revealed(self, drawing) }
+          case .failed(let reason):
+            failures += 1
+            if failures >= 3 {
+              fail(reason)
+              return false
+            }
+          }
+          return true
+        }
+        if !keepRunning { return }
+      }
+    }
+
+    /// The enhancement failed, unless it was stopped meanwhile, which
+    /// leaves the platform thread nothing to hear.
+    private func fail(_ reason: String) {
+      condition.lock()
+      let stopped = quit
+      condition.unlock()
+      if !stopped { failed(self, reason) }
+    }
+
+    /// Metal's thread: whether the GPU finished a picture.
+    private func completed(_ done: Bool) {
+      condition.lock()
+      gpuErrors = done ? 0 : gpuErrors + 1
+      if !done { condition.signal() }
+      condition.unlock()
+    }
+  }
+#endif
+
 #if os(macOS)
   /// The delegate of every layer here: no property change animates, on any
   /// thread or in any transaction, so a picture, a resize or the grey still
@@ -724,16 +1409,29 @@ private struct UnitMeta {
   }
 
   /// A layer presenter's layers: a container that a hosting view adds as its
-  /// sublayer, holding the picture's content layer and, above it, the grey
-  /// still's two layers. Made at create, so the decoder thread commits
-  /// pictures before Flutter makes the view, and kept through a reconnect,
-  /// so the last picture stays.
+  /// sublayer, holding the picture's content layer, while the viewer
+  /// enhances its picture the enhancement's metal layer above it, and above
+  /// both the grey still's two layers. Made at create, so the decoder thread
+  /// commits pictures before Flutter makes the view, and kept through a
+  /// reconnect, so the last picture stays.
   ///
   /// The decoder thread sets only the content layer's contents, each time in
   /// its own explicit transaction, which commits at once: that thread has no
-  /// run loop to commit an implicit one. Everything else (hosting, resizing,
-  /// the grey still) is the platform thread's.
+  /// run loop to commit an implicit one. While the enhancement runs it also
+  /// hands the enhancement each picture, and once the enhancement's layer
+  /// shows, only hands it over. Everything else (hosting, resizing, placing
+  /// the metal layer, the grey still, which layer shows) is the platform
+  /// thread's.
   private final class LayerPresenter {
+    /// How the decoder thread showed a picture.
+    enum Shown {
+      case committed
+      /// Handed to the enhancement alone, replacing one it had not drawn
+      /// yet or not.
+      case queued(superseded: Bool)
+      case noSurface
+    }
+
     let container = CALayer()
     private let content = CALayer()
     /// The grey still (GreyStill in viewer_overlays.dart): Core Animation's
@@ -743,10 +1441,33 @@ private struct UnitMeta {
     /// to twice as bright as GreyStill.
     private let desaturate = CALayer()
     private let halve = CALayer()
-    /// Decoder thread, or the platform thread once none runs: the pictures
-    /// last committed, oldest first, kept from VideoToolbox's pool while
-    /// the WindowServer may still composite them.
+    /// Held while the content layer's contents change, from either thread,
+    /// and while the decoder thread hands a picture to the enhancement, so
+    /// that the platform thread's switch back to the content layer shows
+    /// the newest picture.
+    private let routeLock = NSLock()
+    // Guarded by routeLock.
+    /// The pictures last committed, oldest first, kept from VideoToolbox's
+    /// pool while the WindowServer may still composite them.
     private var held: [CVPixelBuffer] = []
+    /// The picture last committed to the content layer.
+    private var newest: Picture?
+    /// The enhancement the decoder thread hands pictures to; nil while they
+    /// go to the content layer alone.
+    private var routed: EnhancedPresenter?
+    /// Whether they go to the enhancement alone: once its layer shows in
+    /// place of the content layer. Until then the content layer goes on
+    /// showing each picture too, while the presenter thread compiles its
+    /// shaders and draws its first.
+    private var handedOff = false
+    // Platform thread only, which is also routed's and handedOff's only
+    // writer: the enhancement, while the viewer asks for one, the target it
+    // last took while pictures go to it, whether its layer shows in place
+    // of the content layer, and that layer's frame on whole pixels.
+    private var enhanced: EnhancedPresenter?
+    private var enhancedTarget: EnhanceTarget?
+    private var revealed = false
+    private var placement: CGRect?
 
     init() {
       let fill: CAAutoresizingMask = [.layerWidthSizable, .layerHeightSizable]
@@ -768,19 +1489,153 @@ private struct UnitMeta {
 
     // MARK: Decoder thread
 
-    /// Shows [buffer] at once. False when it has no IOSurface to show.
-    func commit(_ buffer: CVPixelBuffer) -> Bool {
-      guard let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue() else { return false }
+    /// Shows [picture] at once, or, once the enhancement's layer shows,
+    /// hands it to the enhancement alone. While [timed], `Commit` marks the
+    /// content layer's commit.
+    func show(_ picture: Picture, timed: Bool) -> Shown {
+      routeLock.lock()
+      defer { routeLock.unlock() }
+      if let enhancement = routed {
+        if handedOff { return .queued(superseded: enhancement.put(picture)) }
+        // Its layer not showing yet, the content layer shows the picture
+        // too, whether or not the enhancement draws it.
+        _ = enhancement.put(picture)
+      }
+      let span = timed ? Signpost.begin("Commit", picture.generation, picture.frame) : nil
+      let committed = commitContent(picture)
+      Signpost.end("Commit", span)
+      return committed ? .committed : .noSurface
+    }
+
+    /// Holding routeLock: [picture] on the content layer, in a transaction
+    /// of its own or the one around it. False when it has no IOSurface.
+    private func commitContent(_ picture: Picture) -> Bool {
+      guard let surface = CVPixelBufferGetIOSurface(picture.buffer)?.takeUnretainedValue() else {
+        return false
+      }
       CATransaction.begin()
       CATransaction.setDisableActions(true)
       content.contents = surface
       CATransaction.commit()
       if held.count == heldPictures { held.removeFirst() }
-      held.append(buffer)
+      held.append(picture.buffer)
+      newest = picture
       return true
     }
 
     // MARK: Platform thread
+
+    /// Pictures go to the enhancement, at [target], whose layer takes
+    /// [frame] ([place]), and which [make] makes the first time; false when
+    /// it cannot. A new activation keeps the content layer on screen, and
+    /// showing each picture, until the enhancement's first present, which
+    /// [reveal] then shows in its place in one transaction: the picture
+    /// never blanks, nor stops while the shaders compile.
+    func enhance(_ target: EnhanceTarget, at frame: CGRect, make: () -> EnhancedPresenter?) -> Bool {
+      let enhancement: EnhancedPresenter
+      if let current = enhanced {
+        enhancement = current
+      } else {
+        guard let made = make() else { return false }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        container.insertSublayer(made.layer, above: content)
+        CATransaction.commit()
+        made.start()
+        enhanced = made
+        enhancement = made
+        placement = nil
+      }
+      place(frame)
+      // The platform thread is routed's only writer, so it reads it
+      // without the lock, which the decoder thread holds across commits.
+      if routed != nil {
+        enhancement.retarget(target)
+      } else {
+        routeLock.lock()
+        enhancement.activate(target, from: newest)
+        routed = enhancement
+        handedOff = false
+        routeLock.unlock()
+        revealed = false
+      }
+      enhancedTarget = target
+      return true
+    }
+
+    /// The enhancement's layer at [frame] in the container, on whole pixels
+    /// (pixelPlacement), in the transaction around this call if any: in
+    /// Flutter's, as Flutter moves or resizes the view, the layer moves with
+    /// it in the same commit.
+    func place(_ frame: CGRect) {
+      guard let enhancement = enhanced, frame != placement else { return }
+      placement = frame
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      enhancement.layer.frame = frame
+      CATransaction.commit()
+    }
+
+    /// Whether [enhancement] is the one this presenter has: a word from
+    /// one released since is for nobody.
+    func owns(_ enhancement: EnhancedPresenter) -> Bool { enhanced === enhancement }
+
+    /// [sender] presented the first picture of [epoch]: if that is still
+    /// this presenter's enhancement and the activation running, its layer
+    /// replaces the content layer, and pictures go to it alone.
+    func reveal(_ sender: EnhancedPresenter, _ epoch: UInt64) {
+      guard let enhancement = enhanced, enhancement === sender, !revealed, enhancement.isCurrent(epoch)
+      else { return }
+      revealed = true
+      routeLock.lock()
+      handedOff = true
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      content.isHidden = true
+      enhancement.layer.isHidden = false
+      CATransaction.commit()
+      routeLock.unlock()
+    }
+
+    /// Pictures go to the content layer alone again: in the transaction
+    /// that hides the enhancement's layer, it takes the newest picture the
+    /// enhancement was given, which is returned when that is a new one: it
+    /// reached the WindowServer, so it earns its receipt. [release] also
+    /// ends the enhancement and its thread.
+    func plain(release: Bool) -> Picture? {
+      guard let enhancement = enhanced else { return nil }
+      var shown: Picture?
+      if routed != nil {
+        routeLock.lock()
+        routed = nil
+        handedOff = false
+        let latest = enhancement.deactivate()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if let picture = latest, !picture.same(as: newest), commitContent(picture) {
+          shown = picture
+        }
+        enhancement.layer.isHidden = true
+        content.isHidden = false
+        CATransaction.commit()
+        routeLock.unlock()
+        revealed = false
+        enhancedTarget = nil
+      }
+      if release {
+        enhancement.stop()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        enhancement.layer.removeFromSuperlayer()
+        CATransaction.commit()
+        enhanced = nil
+        placement = nil
+      }
+      return shown
+    }
+
+    /// Where the enhancement draws now, if it is the one showing.
+    var enhancing: EnhanceTarget? { revealed ? enhancedTarget : nil }
 
     /// Moves the layers into [host], a view's own layer, from any view that
     /// hosted them before: Flutter may make a new view for the same viewer.
@@ -800,13 +1655,18 @@ private struct UnitMeta {
       CATransaction.commit()
     }
 
-    /// Once no decoder thread runs: the picture and those held go.
+    /// Once no decoder thread runs: the enhancement, the picture and those
+    /// held go.
     func clear() {
+      _ = plain(release: true)
+      routeLock.lock()
       CATransaction.begin()
       CATransaction.setDisableActions(true)
       content.contents = nil
       CATransaction.commit()
       held.removeAll()
+      newest = nil
+      routeLock.unlock()
     }
   }
 
@@ -823,6 +1683,21 @@ private struct UnitMeta {
   private final class DesktopVideoView: NSView {
     private weak var viewer: DesktopVideoViewer?
     private var screenObserver: NSObjectProtocol?
+    /// While the viewer enhances its picture, which it does only while the
+    /// picture is enlarged on screen: the frame Flutter sets on this view
+    /// each frame it composites the view in, after it placed the view's
+    /// ancestors, its zoom, which reaches this view as its container's
+    /// sublayer transform (FlutterMutatorView.mm), and the window's
+    /// occlusion, each with a new backing scale or window, tell the viewer
+    /// to measure where the picture is on screen again. Nothing watches
+    /// otherwise.
+    var watchesGeometry = false {
+      didSet {
+        if watchesGeometry != oldValue { watch() }
+      }
+    }
+    private var transformWatch: NSKeyValueObservation?
+    private var occlusionObserver: NSObjectProtocol?
 
     init(viewer: DesktopVideoViewer?) {
       self.viewer = viewer
@@ -844,6 +1719,59 @@ private struct UnitMeta {
 
     deinit {
       if let observer = screenObserver { NotificationCenter.default.removeObserver(observer) }
+      if let observer = occlusionObserver { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    private func watch() {
+      transformWatch = nil
+      if let observer = occlusionObserver { NotificationCenter.default.removeObserver(observer) }
+      occlusionObserver = nil
+      guard watchesGeometry else { return }
+      if let container = superview?.layer {
+        transformWatch = container.observe(\.sublayerTransform) { [weak self] _, _ in self?.moved() }
+      }
+      if let window = window {
+        occlusionObserver = NotificationCenter.default.addObserver(
+          forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main
+        ) { [weak self] _ in self?.moved() }
+      }
+    }
+
+    /// Flutter sets the transform as it composites, on the platform thread;
+    /// any other thread's word goes there.
+    private func moved() {
+      guard Thread.isMainThread else {
+        DispatchQueue.main.async { [weak self] in self?.moved() }
+        return
+      }
+      viewer?.geometryChanged(self)
+    }
+
+    /// Flutter sets this view's frame each frame it composites the view in,
+    /// once it placed the view's ancestors (FlutterMutatorView.mm), and
+    /// NSView's setFrame: calls this even with the same size: a picture
+    /// that moved is measured again here.
+    override func setFrameSize(_ newSize: NSSize) {
+      super.setFrameSize(newSize)
+      if watchesGeometry { moved() }
+    }
+
+    override func layout() {
+      super.layout()
+      if watchesGeometry { moved() }
+    }
+
+    override func viewDidChangeBackingProperties() {
+      super.viewDidChangeBackingProperties()
+      if watchesGeometry { moved() }
+    }
+
+    override func viewDidMoveToSuperview() {
+      super.viewDidMoveToSuperview()
+      if watchesGeometry {
+        watch()
+        moved()
+      }
     }
 
     /// The backing layer only hosts: nothing is drawn into it.
@@ -898,6 +1826,7 @@ private struct UnitMeta {
           self.viewer?.viewChanged(self)
         }
       }
+      if watchesGeometry { watch() }
       viewer?.viewChanged(self)
     }
   }
@@ -1004,6 +1933,21 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     private var attached = false
     private var streaming = false
     private var grey = false
+    // Platform thread only: the enhancement asked for, whether it failed at
+    // that level, the decoded picture's size, the picture's size on screen
+    // in pixels on whole pixels (nil while the window is not visible), the
+    // metal layer's frame there, its screen's size, and whether an update
+    // of the enhancement waits for the platform thread's next turn.
+    private var enhanceLevel = EnhanceLevel.off
+    private var enhanceFailed = false
+    private var pictureSize: PixelSize?
+    private var onScreen: PixelSize?
+    private var placement: CGRect?
+    private var screenSize: PixelSize?
+    private var updateQueued = false
+    /// Feed threads, one at a time: the size of the last picture presented,
+    /// which the platform thread hears of when it changes.
+    private var feedSize: PixelSize?
   #endif
   private var layered: Bool {
     #if os(macOS)
@@ -1128,6 +2072,8 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     #if os(macOS)
       if let presenter = presenter {
         refreshLink.stop()
+        view?.watchesGeometry = false
+        enhanceLevel = .off
         presenter.clear()
         return
       }
@@ -1164,6 +2110,13 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     lock.unlock()
     #if os(macOS)
       if timings != wasTimed { updateRefreshLink() }
+      // While the enhancement's layer shows the picture: its level and the
+      // size it draws at.
+      if let target = presenter?.enhancing {
+        values["enhanced"] = [
+          "level": target.level.rawValue, "width": target.size.width, "height": target.size.height,
+        ]
+      }
     #endif
     return values
   }
@@ -1173,15 +2126,156 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     /// layers, taken from any view that showed them before.
     func host(in view: DesktopVideoView) {
       guard let presenter = presenter, let layer = view.layer else { return }
+      self.view?.watchesGeometry = false
       self.view = view
       presenter.host(in: layer)
       updateRefreshLink()
+      view.watchesGeometry = enhanceLevel != .off
+      geometryChanged(view)
     }
 
     /// The hosting view entered or left a window, or its window another
     /// display.
     func viewChanged(_ view: DesktopVideoView) {
-      if view === self.view { updateRefreshLink() }
+      guard view === self.view else { return }
+      updateRefreshLink()
+      geometryChanged(view)
+    }
+
+    /// `enhance`: how much the picture is sharpened while it shows enlarged.
+    /// Off, which every viewer starts at, no thread, GPU state or watch of
+    /// the view exists. A new level tries again after a failure.
+    func setEnhance(_ level: EnhanceLevel) {
+      guard presenter != nil, level != enhanceLevel else { return }
+      enhanceLevel = level
+      enhanceFailed = false
+      view?.watchesGeometry = level != .off
+      measure()
+      updateEnhancement()
+    }
+
+    /// The hosting view's frame, transform, window or occlusion may have
+    /// changed: measured again while the viewer enhances, and the metal
+    /// layer placed on whole pixels at once, so that it moves in the
+    /// transaction Flutter moves the view in. What else that changes waits
+    /// for the platform thread's next turn: in a frame that zooms, Flutter
+    /// sets the view's frame before the zoom, and a measure between the two
+    /// must not reach the presenter thread.
+    func geometryChanged(_ view: DesktopVideoView) {
+      guard view === self.view, enhanceLevel != .off else { return }
+      measure()
+      if let placement = placement { presenter?.place(placement) }
+      guard !updateQueued else { return }
+      updateQueued = true
+      DispatchQueue.main.async { [weak self] in
+        guard let self = self else { return }
+        self.updateQueued = false
+        guard self.enhanceLevel != .off else { return }
+        self.measure()
+        self.updateEnhancement()
+      }
+    }
+
+    /// Where the picture is on screen: the view's layer in the window's
+    /// root layer, which takes in Flutter's transform on the view's
+    /// container, on whole pixels at the backing scale (pixelPlacement), as
+    /// a size in pixels and the metal layer's frame. Nothing while the
+    /// window is not visible (occluded, minimised, or its display asleep),
+    /// where waiting on drawables would hold receipts back, nor before
+    /// AppKit joined a view new in the window to its layer tree, which it
+    /// does in its next layout pass, where layout() measures again.
+    private func measure() {
+      onScreen = nil
+      placement = nil
+      screenSize = nil
+      guard let presenter = presenter, let view = view, let layer = view.layer, let window = view.window,
+        let screen = window.screen, window.occlusionState.contains(.visible)
+      else { return }
+      // The window's frame view, the top of its views: its layer is among
+      // the view's layer's ancestors once AppKit joined them.
+      var top: NSView = view
+      while let up = top.superview { top = up }
+      var root = layer
+      var joined = top.layer == nil
+      while let up = root.superlayer {
+        if up === top.layer { joined = true }
+        root = up
+      }
+      guard joined, root !== layer else { return }
+      let scale = window.backingScaleFactor
+      func pixels(_ points: CGFloat) -> Int? {
+        let value = (points * scale).rounded()
+        return value.isFinite && value >= 1 && value <= 1_000_000 ? Int(value) : nil
+      }
+      guard let placed = pixelPlacement(of: layer, in: presenter.container, root: root, scale: scale),
+        let screenWidth = pixels(screen.frame.width), let screenHeight = pixels(screen.frame.height)
+      else { return }
+      onScreen = placed.size
+      placement = placed.frame
+      screenSize = PixelSize(width: min(maxDrawable, screenWidth), height: min(maxDrawable, screenHeight))
+    }
+
+    /// A Feed thread's picture of a new size reached the platform thread.
+    func pictureSized(_ size: PixelSize) {
+      guard size != pictureSize else { return }
+      pictureSize = size
+      if enhanceLevel != .off { updateEnhancement() }
+    }
+
+    /// The enhancement runs while it is asked for and the picture shows at
+    /// least its own size on both axes, as airhand's renderPlan: a picture
+    /// shown smaller is left to the content layer's linear filter. Nor does
+    /// it run for a picture larger on screen than its screen, zoomed past
+    /// it, whose drawables would grow without bound: the whole picture is
+    /// drawn, not the part a zoom shows, so a picture filling the screen
+    /// goes back to the content layer as soon as it is zoomed in.
+    private func enhanceTarget() -> EnhanceTarget? {
+      guard enhanceLevel != .off, !enhanceFailed, let picture = pictureSize, let pixels = onScreen,
+        let screen = screenSize, pixels.width >= picture.width, pixels.height >= picture.height,
+        pixels.width <= screen.width, pixels.height <= screen.height
+      else { return nil }
+      return EnhanceTarget(size: pixels, level: enhanceLevel)
+    }
+
+    private func updateEnhancement() {
+      guard let presenter = presenter else { return }
+      if let target = enhanceTarget(), let frame = placement {
+        if presenter.enhance(target, at: frame, make: makeEnhancement) { return }
+        enhanceFailed = true
+        logVideo("Picture enhancement is unavailable: no Metal device")
+      }
+      if let shown = presenter.plain(release: enhanceLevel == .off || enhanceFailed) {
+        acknowledge(shown)
+      }
+    }
+
+    /// On the GPU that drives the window's display, so that a Mac with two
+    /// GPUs neither switches nor copies between them.
+    private func makeEnhancement() -> EnhancedPresenter? {
+      let number = view?.window?.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+      var device: MTLDevice?
+      if let display = (number as? NSNumber)?.uint32Value {
+        device = CGDirectDisplayCopyCurrentMetalDevice(display)
+      }
+      guard let gpu = device ?? MTLCreateSystemDefaultDevice() else { return nil }
+      return EnhancedPresenter(
+        device: gpu,
+        presented: { [weak self] picture in self?.acknowledge(picture) },
+        revealed: { [weak self] sender, epoch in
+          DispatchQueue.main.async { self?.presenter?.reveal(sender, epoch) }
+        },
+        failed: { [weak self] sender, reason in
+          DispatchQueue.main.async { self?.enhancementFailed(sender, reason) }
+        })
+    }
+
+    /// [sender] failed: if it is still the viewer's enhancement, the content
+    /// layer shows the picture again, until the level changes.
+    private func enhancementFailed(_ sender: EnhancedPresenter, _ reason: String) {
+      guard presenter?.owns(sender) == true, enhanceLevel != .off, !enhanceFailed else { return }
+      enhanceFailed = true
+      logVideo("Picture enhancement stopped: \(reason)")
+      updateEnhancement()
     }
 
     /// The Feed thread of [consumer] saw its source pause or resume; a word
@@ -1396,28 +2490,46 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
 
   #if os(macOS)
     /// Commits a picture of the current revision to the layer, outside the
-    /// lock: the commit is the presentation receipt, once per picture, as
-    /// the compositor taking it is a texture's. A picture of an older
-    /// revision is not shown. While timed, `present` runs from the end of
-    /// its decode ([Picture.readyNs]) to the end of its commit.
+    /// lock, or hands it to the enhancement, whose thread presents it. A
+    /// picture of an older revision is not shown. One the enhancement alone
+    /// had and had not drawn when this one replaced it counts as dropped.
     private func present(_ picture: Picture, _ presenter: LayerPresenter) throws {
       lock.lock()
       decoded += 1
       let current = picture.revision == revision
       lock.unlock()
       guard current else { return }
+      let size = PixelSize(
+        width: CVPixelBufferGetWidth(picture.buffer), height: CVPixelBufferGetHeight(picture.buffer))
+      if size != feedSize {
+        feedSize = size
+        DispatchQueue.main.async { [weak self] in self?.pictureSized(size) }
+      }
       // Stamped at its decode's end only while timed.
-      let timed = picture.readyNs != 0
-      let span = timed ? Signpost.begin("Commit", picture.generation, picture.frame) : nil
-      let committed = presenter.commit(picture.buffer)
-      Signpost.end("Commit", span)
-      guard committed else { throw VideoError("The decoded picture has no IOSurface") }
+      switch presenter.show(picture, timed: picture.readyNs != 0) {
+      case .committed: acknowledge(picture)
+      case .queued(let superseded): if superseded { drop() }
+      case .noSurface: throw VideoError("The decoded picture has no IOSurface")
+      }
+    }
+
+    /// [picture] reached the WindowServer: committed to the content layer
+    /// (decoder or platform thread), or presented by the enhancement
+    /// (its thread). That is the presentation receipt, once per picture of
+    /// the current revision, as the compositor taking it is a texture's.
+    /// A picture no newer than the last one acknowledged changes nothing,
+    /// as Rust's sink takes only newer frames: one the enhancement presented
+    /// after the content layer took a newer picture back is not on screen.
+    /// While timed, `present` runs from the end of its decode
+    /// ([Picture.readyNs]) to the end of its commit.
+    private func acknowledge(_ picture: Picture) {
       lock.lock()
-      shown = picture.buffer
+      let newer =
+        picture.revision > consumedRevision
+        || (picture.revision == consumedRevision && picture.frame > consumedFrame)
+      if newer { shown = picture.buffer }
       var acknowledge = false
-      if picture.revision == revision
-        && (consumedRevision != picture.revision || consumedFrame != picture.frame)
-      {
+      if newer && picture.revision == revision {
         consumedRevision = picture.revision
         consumedFrame = picture.frame
         acknowledge = true
@@ -1436,8 +2548,8 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
       }
       let consumer = self.consumer
       lock.unlock()
-      // Committed to the WindowServer: the receipt Rust validates and
-      // forwards for input authorisation. Non-blocking.
+      // The receipt Rust validates and forwards for input authorisation.
+      // Non-blocking.
       if acknowledge && consumer != 0 {
         _ = library.presented(consumer, picture.generation, picture.frame)
       }
@@ -1928,6 +3040,17 @@ final class DesktopVideoPlugin: NSObject, FlutterPlugin {
       guard let on = args["on"] as? Bool else { throw VideoError("Missing video field on") }
       #if os(macOS)
         viewer.setGrey(on)
+      #endif
+      result(nil)
+    case "enhance":
+      guard let name = args["level"] as? String, let level = EnhanceLevel(rawValue: name) else {
+        throw VideoError("Unknown enhancement level")
+      }
+      // Only a layer presenter enhances; a texture takes none.
+      #if os(macOS)
+        viewer.setEnhance(level)
+      #else
+        _ = level
       #endif
       result(nil)
     case "dispose":

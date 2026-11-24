@@ -748,7 +748,12 @@ class FakeDesktopApi implements DesktopApiClient {
 
 /// A native texture that records what the store asks of it.
 class FakeVideoTexture implements DesktopVideoTexture {
-  FakeVideoTexture(this.textureId, {this.platformViewType, this.plane = false});
+  FakeVideoTexture(
+    this.textureId, {
+    this.platformViewType,
+    this.plane = false,
+    bool? enhances,
+  }) : enhances = enhances ?? platformViewType != null;
 
   @override
   final int textureId;
@@ -770,6 +775,14 @@ class FakeVideoTexture implements DesktopVideoTexture {
 
   /// Every [place] call's placement, in order.
   final placements = <VideoPlacement>[];
+
+  /// As the channel's texture: where a platform view presents, unless a
+  /// test says otherwise.
+  @override
+  final bool enhances;
+
+  /// Every [enhance] call's level, in order.
+  final enhancements = <PictureEnhancement>[];
   bool disposed = false;
 
   /// What [snapshot] answers; a future that never completes stands in for
@@ -789,6 +802,10 @@ class FakeVideoTexture implements DesktopVideoTexture {
 
   @override
   Future<void> grey(bool on) async => greys.add(on);
+
+  @override
+  Future<void> enhance(PictureEnhancement level) async =>
+      enhancements.add(level);
 
   @override
   Future<bool> snapshot(String path, {int maxWidth = 320}) {

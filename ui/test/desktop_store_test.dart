@@ -1825,6 +1825,37 @@ void main() {
     },
   );
 
+  testWidgets('a picture the runner can sharpen says so, and only its own '
+      'texture takes a level; a Flutter texture is never asked', (
+    tester,
+  ) async {
+    for (final viewType in [null, 'pb_mapper/desktop_video_view']) {
+      final api = FakeDesktopApi()..codec = 'h264';
+      final textures = FakeTextures()..platformViewType = viewType;
+      final store = DesktopStore(api, textures: textures.create);
+      final viewer = store.demand(DesktopDemand.viewer);
+      await _live(tester, store, api);
+      final texture = textures.created.single;
+      expect(store.picture.value?.enhances, viewType != null);
+
+      await store.enhancePicture(texture.textureId, PictureEnhancement.high);
+      // A picture another texture showed changes nothing.
+      await store.enhancePicture(texture.textureId + 1, PictureEnhancement.low);
+      expect(
+        texture.enhancements,
+        viewType == null ? isEmpty : [PictureEnhancement.high],
+      );
+
+      // Gone with its texture.
+      await store.disconnect();
+      await store.enhancePicture(texture.textureId, PictureEnhancement.off);
+      expect(texture.enhancements, hasLength(viewType == null ? 0 : 1));
+
+      viewer.dispose();
+      store.dispose();
+    }
+  });
+
   testWidgets('a picture the runner draws on its plane says so, and the plane '
       'is placed by its texture\'s id and greyed; a texture takes neither', (
     tester,

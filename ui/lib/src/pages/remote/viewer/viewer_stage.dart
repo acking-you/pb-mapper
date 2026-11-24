@@ -53,6 +53,7 @@ class ViewerStage extends StatefulWidget {
     this.localPointer = false,
     this.greyPicture,
     this.placePicture,
+    this.enhancePicture,
   });
 
   /// The stage over [desktop]'s own slices.
@@ -90,6 +91,7 @@ class ViewerStage extends StatefulWidget {
     localPointer: localPointer,
     greyPicture: desktop.greyPicture,
     placePicture: desktop.placePicture,
+    enhancePicture: desktop.enhancePicture,
   );
 
   final ValueListenable<DesktopSessionView> session;
@@ -133,6 +135,11 @@ class ViewerStage extends StatefulWidget {
   /// texture's id (see [NativeVideoHole]).
   final Future<void> Function(int textureId, VideoPlacement placement)?
   placePicture;
+
+  /// Sets how much the runner sharpens a texture's enlarged picture, by the
+  /// texture's id (see [DesktopPicture.enhances]).
+  final Future<void> Function(int textureId, PictureEnhancement level)?
+  enhancePicture;
 
   @override
   State<ViewerStage> createState() => _ViewerStageState();
@@ -250,6 +257,11 @@ class _ViewerStageState extends State<ViewerStage> {
           geometry: geometry,
           prefs: actions.prefs,
           viewport: viewport,
+        ),
+        _EnhanceSync(
+          picture: picture,
+          prefs: actions.prefs,
+          enhancePicture: widget.enhancePicture,
         ),
         ValueListenableBuilder(
           valueListenable: touchMode,
@@ -410,6 +422,79 @@ class _ViewportSyncState extends State<_ViewportSync> {
     );
     final mode = widget.prefs.scaleMode;
     if (mode != viewport.mode) viewport.setMode(mode);
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
+}
+
+/// Keeps how much the runner sharpens an enlarged picture in step with the
+/// device's preference ([ViewerPrefs.enhance]), for a picture whose runner
+/// can ([DesktopPicture.enhances]). A texture starts at
+/// [PictureEnhancement.off], so nothing is sent until the preference
+/// differs from what the texture has.
+class _EnhanceSync extends StatefulWidget {
+  const _EnhanceSync({
+    required this.picture,
+    required this.prefs,
+    required this.enhancePicture,
+  });
+
+  final ValueListenable<DesktopPicture?> picture;
+  final ViewerPrefs prefs;
+  final Future<void> Function(int textureId, PictureEnhancement level)?
+  enhancePicture;
+
+  @override
+  State<_EnhanceSync> createState() => _EnhanceSyncState();
+}
+
+class _EnhanceSyncState extends State<_EnhanceSync> {
+  /// The texture last told, and what it was told.
+  int? _texture;
+  PictureEnhancement _level = PictureEnhancement.off;
+
+  late Listenable _listening;
+
+  Listenable get _sources => Listenable.merge([widget.picture, widget.prefs]);
+
+  @override
+  void initState() {
+    super.initState();
+    _listening = _sources..addListener(_apply);
+    _apply();
+  }
+
+  @override
+  void didUpdateWidget(covariant _EnhanceSync oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.picture, widget.picture) ||
+        !identical(oldWidget.prefs, widget.prefs)) {
+      _listening.removeListener(_apply);
+      _listening = _sources..addListener(_apply);
+    }
+    _apply();
+  }
+
+  @override
+  void dispose() {
+    _listening.removeListener(_apply);
+    super.dispose();
+  }
+
+  void _apply() {
+    final enhance = widget.enhancePicture;
+    final picture = widget.picture.value;
+    final id = picture != null && picture.enhances ? picture.textureId : null;
+    if (enhance == null || id == null) return;
+    if (id != _texture) {
+      _texture = id;
+      _level = PictureEnhancement.off;
+    }
+    final level = widget.prefs.enhance;
+    if (level == _level) return;
+    _level = level;
+    unawaited(enhance(id, level));
   }
 
   @override
