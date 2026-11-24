@@ -4395,6 +4395,20 @@ first a dwell of 25 ms or less at the median and in all but 5 of the 40
 seconds at 75 FPS or more received, and 75 FPS or more for the second.
 [Encoder throughput cap measurements](benchmarks/2026-11-24-encoder-throughput-cap/README.md)
 has three runs before and after the cap.
+`direct_quic_on_lossy_links` carries the session over one QUIC connection
+with the direct transport instead of the shaped TCP link: the testkit's
+`lossy_quic_pair` through its `lossy_udp` hop, the host's end dialing the
+host's listener for the stream the viewer opens, as a direct provider does,
+and sending under Cubic and then BBR. It runs on 60 and 120 ms round trips
+with 0.1% and 1% random loss each way, and on 60 ms behind a 5 Mbit/s
+policer; after 6 s on a link the viewer asks for an IDR every 2 s for 20 s.
+Each run reports P-frame and IDR latency from capture to the unit received
+whole, the wait from each request to its IDR, the received rate, the host's
+mean sent bitrate and pace and its rate cuts, and quinn's packets sent and
+lost, congestion events and window on the host's end; it asserts only that
+each session stayed up.
+[Host direct congestion control](benchmarks/2026-11-24-host-direct-bbr/README.md)
+has three runs of it.
 
 `video_bench 10 60 --animate --max-width 1920 --max-height 1080` still reaches
 59.9 unique capture and encode FPS at a mean 1.9 ms encode with one unit in
