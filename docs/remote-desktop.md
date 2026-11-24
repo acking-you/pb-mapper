@@ -1435,7 +1435,10 @@ encoder measures each
 unit's dwell, from submit to output (the `encode_us` it returns with the
 unit), and thread C reports the median of the last second as
 `encoder_dwell_ms`. A static screen is resubmitted about every 250 ms as a
-duplicate, which unique-frame rates exclude. The hand-off queue holds at most
+duplicate, which unique-frame rates exclude. A Mac host does not leave a
+last picture its encoder dropped to that repeat: it sends it again at the
+next tick, as a new picture
+([VideoToolbox rate control on a Mac host](#videotoolbox-rate-control-on-a-mac-host)). The hand-off queue holds at most
 six units and 8 MiB, which both bounds together never reach. When the queue's oldest unit
 has waited more than a second, the queue is dropped and replaced by an IDR.
 The wait counts from when the unit was ready or from the last IDR
@@ -1527,8 +1530,11 @@ callbacks read. The session
 runs in real time with no frame reordering, an unbounded GOP (`gop` reports the
 read-back), IDRs as a per-frame `ForceKeyFrame` option and the bitrate set
 live. Both codecs request low-latency rate control when available and retry
-with standard rate control if VideoToolbox rejects the configuration. H.265
-needs the hardware encoder. H.264 prefers it and takes VideoToolbox's
+with standard rate control if VideoToolbox rejects the configuration. Low
+latency may give a picture a QP up to 51, and a newest picture VideoToolbox
+dropped is sent again at the next tick
+([VideoToolbox rate control on a Mac host](#videotoolbox-rate-control-on-a-mac-host)).
+H.265 needs the hardware encoder. H.264 prefers it and takes VideoToolbox's
 software encoder where there is none, as on a virtual Mac. The output
 callback converts the length-prefixed sample to Annex B, with the parameter
 sets in front of a keyframe, queues the unit and wakes thread C, so nothing
@@ -1693,6 +1699,97 @@ front, behind other windows or hidden, is not measured.
 A Mac viewer that is not the frontmost app may see the same lateness in its
 presentation throttle, its Dart input timers and its decoder thread's waits;
 that is not measured either.
+
+### VideoToolbox rate control on a Mac host
+
+A Mac host encodes with VideoToolbox's low-latency rate control, which
+drops a picture it cannot fit into its budget at its highest QP.
+
+**The QP bound.** A low-latency session sets
+`kVTCompressionPropertyKey_MaxAllowedFrameQP` to 51, the top of the 8-bit
+H.264 and H.265 range; left to its own bound, low latency drops pictures
+that this bound lets it code. The key is of macOS 12.0 and is looked up
+at run time; an encoder that refuses it keeps its own bound. The fallback,
+standard rate control, does not set it. `macos_encoder_opened` logs whether
+the session took it (`max_qp`).
+
+In a test loop on an M6, fresh full-screen noise at 1920x1080, 4 Mbit/s and
+60 FPS dropped 90 of 180 pictures with the bound. Without it, H.264 dropped
+169 and H.265 135. At 2560x1440 the counts were 90 against 158 to 162. At
+120 FPS the bound likewise kept about every other picture, against 22 to 90
+of about 360 without it. Scrolling text, and the busy pattern (text with
+image blocks under fresh grain), dropped none either way in steady state.
+In the 1.5 s after an IDR they dropped about as many either way, 15 to 37
+pictures a window, while noise dropped half its pictures with the bound
+against about three quarters without it.
+
+The host counts the pictures VideoToolbox drops. Thread C traces them as
+`macos_encoder_dropped`, at most once a second, from its drain.
+
+**Sending a dropped picture again.** While low latency pays an IDR back on a
+slow link, it drops about every other picture. A later picture replaces a
+dropped one. When the dropped one was the last change (a typed character,
+the end of a scroll), nothing replaces it, and the viewer would keep the
+picture before until the 250 ms liveness repeat.
+
+So when VideoToolbox drops the newest unit handed over, the encoder wakes
+thread C, and the next tick sends the last picture again. The rules
+(`codec/resubmit.rs`):
+
+- Only the newest unit counts. A drop with a later unit in flight, the
+  mailbox's included, is left to that unit, and so is one reported just
+  before thread C hands the next unit over.
+- A picture the encoder kept before is never sent again.
+- A picture is sent again at most twice; a new picture starts the count
+  again. After that the liveness repeat carries it.
+- A newer picture that arrived meanwhile goes instead.
+
+Which unit is a duplicate is decided as the encoder keeps it: only one whose
+picture a unit before it carried out. A resubmit, or a repeat of a picture
+whose every unit was dropped, is the viewer's first sight of that picture,
+and counts toward its `received_fps` and the host's unique frames.
+
+In the test loop: an IDR of a still 1920x1080 screen of text, at 60 FPS,
+then 1 to 12 new pictures. At 1 Mbit/s the last new picture took 250 ms or
+more, or never came within 600 ms, in 5 of 12 trials instead of 10, for
+each codec. In 5 trials a resubmit brought it within 23 to 40 ms. At 2
+Mbit/s, 1 trial of 12 took that long before and after, and at 4 Mbit/s
+none did.
+
+**What was measured and left as it was.** Three further changes were
+measured on the same Mac and not made:
+
+- *Starting a session at `timestamp`.* Low-latency H.264 budgets per second.
+  Low-latency H.265, set to bits per frame × the pace, spent 0.02 to 0.04 of
+  its budget at 5 FPS at 1440p and at 10 and 5 FPS at 4K, and so stopped
+  changing the picture. Under `timestamp` an IDR at 10 FPS also dropped 16
+  to 18 of the 20 pictures after it. Mac sessions still start at `nominal`;
+  see [Encoder rate model per GPU](#encoder-rate-model-per-gpu).
+- *Standard rate control above low latency's knee.* At a nominal 120 FPS,
+  low latency held 119 to 120 pictures a second at 2560x1440, 106 to 113
+  at 2560x1664, 91 to 93 at 3024x1964 and 60 to 63 at 3840x2160. Without
+  the data-rate cap, standard rate control held 118 to 120 at every size
+  but on the busy pattern at 4K (103 to 104). But, set to the target, it
+  coded scrolling text 11 to 15 dB below low latency while spending 3.8 to
+  7.1 times its bits a second, and it overspent the busy pattern by a
+  third at 3024x1964 whatever mean it was set to. With the cap it fell to
+  71 to 78 a second after 3 s at 3024x1964 and 3840x2160. The planned
+  switch's conditions also held at 2560x1664, where low latency kept 106
+  to 113. H.265 stays on low latency at every size.
+- *Holding the old cap for a second after a bitrate cut.* A cut from 8 to 2
+  Mbit/s dropped no picture, and the first unit after it was within 1.2
+  times its new budget. So a new bitrate still sets its cap at once.
+
+The tests are ignored tests in `platform/macos/vt_measure.rs` and
+`platform/macos/tests.rs`: `video_toolbox_drops`, `video_toolbox_resubmit`,
+`video_toolbox_rate_model_follow_h264` and `_h265`, `video_toolbox_120` and
+`video_toolbox_rate_step`. They pace a real session on IOSurface pictures
+and need no Screen Recording grant. Those in `vt_measure.rs` paint each new
+picture into a pool of eight surfaces as it is handed over, as
+ScreenCaptureKit fills its own; the follow-pace sweeps paint each picture
+onto one of three surfaces in turn
+([measurements](benchmarks/2026-11-24-macos-rate-model/README.md)). A live
+session's effect is still to be seen on a Mac host, behind a shaped link.
 
 ### H.265 and H.264
 
@@ -1968,9 +2065,55 @@ the fitted model (the same ±25% classifier, `codec/rate_fit.rs`); the largest
 unit after a 1 s pause; each encoder's `macos_encoder_opened` line; and a
 summary line a case. A case that fits neither model is reported, not failed.
 Run them in release mode on a quiet Mac, one at a time:
-`cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture --test-threads=1 video_toolbox_rate_model`.
+`cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture --test-threads=1 video_toolbox_rate_model_h26`.
 Their pacing follows a Mac host's submit gate (two units in flight, a busy
 submit thread leaving the tick armed).
+
+#### Apple M6
+
+`video_toolbox_rate_model_follow_h264` and `_h265` ask what a session would
+spend under each model. Each codec runs at 1080p, 1440p and 4K, with low
+latency and without, at a nominal 60 FPS. Bits per frame are Balanced's
+start scaled by the size (`bpf`). After a step at 60, two sweeps run at 30,
+15, 10 and 5 FPS:
+
+- `nominal` keeps the bitrate at bpf × 60, as a session starting there does;
+- `timestamp` sets bpf × the pace, live.
+
+They run as the tests above do, with the filter
+`video_toolbox_rate_model_follow`, about 5.5 minutes each.
+
+Each step's spend a second, over bpf × the pace (what QoS means to spend),
+with low latency, at 30 / 15 / 10 / 5 FPS
+([measurements](benchmarks/2026-11-24-macos-rate-model/README.md#rate-model)):
+
+| Codec | Size | `nominal` | `timestamp` |
+| --- | --- | --- | --- |
+| H.264 | 1920x1080 | 2.00 / 3.95 / 5.95 / 11.80 | 1.01 / 0.99 / 0.98 / 0.77 |
+| H.264 | 2560x1440 | 1.98 / 4.02 / 5.98 / 11.94 | 0.98 / 1.01 / 0.86 / 1.05 |
+| H.264 | 3840x2160 | 1.99 / 3.93 / 5.90 / 11.64 | 1.00 / 0.99 / 1.04 / 1.04 |
+| H.265 | 1920x1080 | 2.00 / 3.83 / 5.73 / 11.75 | 0.81 / 0.80 / 1.19 / 2.38 |
+| H.265 | 2560x1440 | 1.83 / 3.61 / 5.33 / 10.74 | 0.92 / 0.92 / 1.36 / 0.02 |
+| H.265 | 3840x2160 | 1.83 / 3.34 / 4.99 / 12.20 | 0.58 / 1.13 / 0.04 / 0.02 |
+
+Low-latency H.264 budgets per second: started at `timestamp`, it would spend
+what QoS means at every pace. Low-latency H.265 does not:
+
+- At its lowest paces it put out units that changed next to nothing, so the
+  picture stood still.
+- At 1080p and 5 FPS it spent 2.4 times its budget.
+
+An IDR is also costly at a low pace under `timestamp`. After an IDR at
+10 FPS, 16 to 18 of the next 20 pictures were dropped, and at 5 FPS 9 of 10,
+for both codecs at every size; under `nominal`, 0 to 3 and 0 to 1. A
+per-second budget of bpf × the pace spreads the IDR's payback over seconds.
+
+Without low latency, `timestamp` stayed between 0.56 and 1.03 of the budget
+for H.264, and between 0.19 and 1.08 for H.265.
+
+So a Mac host still starts at `nominal`. A session whose encoder overspends
+at a reduced pace is moved by the latch. Another chip, or a later macOS,
+needs these tests run again before a Mac host's start changes.
 
 Two more ignored tests time the hand-over itself. `video_toolbox_submit_blocking`
 paces a session as thread C does, on eight pictures painted before the run so
@@ -2265,6 +2408,7 @@ shape is painted as before.
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
 | Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder (2 in flight in a Mac host's VideoToolbox) |
+| Mac encoder | low latency with QP up to 51; a dropped newest picture sent again at the next tick, at most twice a picture; dropped pictures traced at most once a second |
 | Armed tick | a tick with no new picture stays armed; ScreenCaptureKit wakes thread C; DXGI, in process or through the helper, is asked again every 2 ms for 250 ms after an injected input or a new picture (an input brings a pending poll in to 2 ms), and once a period otherwise |
 | Capture pacing | after a dated picture, the next tick a period after its present, up to ¼ period early and, for a picture of a single present, at most 1/64 period earlier than a period after the last tick (long-run rate ≤ 64/63 × pace); a picture of several presents that waited keeps the tick a period after the last; ¾ period floor after a stall; a present over a period old counts as undated, and DXGI dates no picture presented over 1 s ago |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
@@ -2395,10 +2539,14 @@ moves stopped taking effect, and it places the pointer instead while that
 window stays in front
 ([Pointer moves on Windows](#pointer-moves-on-windows)). A Mac host logs each
 encoder it opens as `macos_encoder_opened` (codec, `low_latency`, width,
-height, fps, hardware, gop, and `data_rate_limits`: whether VideoToolbox took
-the cap of 1.5 × the mean over 1 s), after
+height, fps, hardware, gop, `data_rate_limits`: whether VideoToolbox took
+the cap of 1.5 × the mean over 1 s, and `max_qp`: whether a low-latency
+session took the QP bound of 51), after
 `macos_encoder_low_latency_refused` when it retried without low-latency rate
-control, and warns `macos_encoder_left_running` (`waited_ms`) when an
+control. It traces the pictures VideoToolbox dropped as
+`macos_encoder_dropped` (debug): `dropped` since the last line, over
+`seconds`, and the encoder's `total`, at most once a second and only when
+there were any. It warns `macos_encoder_left_running` (`waited_ms`) when an
 encoder's submit thread was still inside a VideoToolbox call 250 ms after
 the encoder was dropped, and was left to finish on its own. The app also warns
 `desktop_connect_failed` with the typed failure, and a native decoder's
@@ -2959,7 +3107,13 @@ What each platform's new code has been through:
   at 60 frames a second ([Timers on a Mac host](#timers-on-a-mac-host)). Its
   pure parts are also tested on Windows and Linux. On an M3 Pro the native
   host captured both a Retina panel and an external display, and streamed
-  the external display to the Mac viewer over a loopback relay.
+  the external display to the Mac viewer over a loopback relay. Its
+  VideoToolbox rate control (the QP bound, the resubmit of a dropped
+  picture) ran on an M6 against synthetic pictures
+  ([the 2026-11-24 record](benchmarks/2026-11-24-macos-rate-model/README.md)).
+  Not run: a Mac host behind a shaped 4 Mbit/s link playing video (the
+  viewer's `received_fps` against `macos_encoder_dropped`), and one behind
+  2 Mbit/s taking control and typing at once (the echo's delay).
 - **macOS and iOS viewers.** CI builds the macOS app and the unsigned iOS
   app with the Swift decoder. The iOS app links the FFI static library and
   exports its entry points. The M3 Pro viewer decoded H.264 and H.265 in
