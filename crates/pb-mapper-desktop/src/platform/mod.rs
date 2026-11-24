@@ -320,7 +320,10 @@ pub(crate) trait CursorSource: Sized {
     ///
     /// - When: on thread C, only in a session whose viewer reads shapes,
     ///   right after a `read` that found the pointer showing on the shared
-    ///   display, every 16 ms while capturing, inside the desktop's scope.
+    ///   display, every 16 ms while capturing (once a period at a faster
+    ///   pace, down to 8 ms), and 2 ms and 8 ms after the last move from a
+    ///   controller that reads shapes (sooner for a look an earlier move
+    ///   left), inside the desktop's scope.
     ///   `PlatformBackend` checked the desktop around that `read`. Never
     ///   while the pointer is hidden or on another display: nothing of it
     ///   reaches the viewer then, which keeps the last shape.

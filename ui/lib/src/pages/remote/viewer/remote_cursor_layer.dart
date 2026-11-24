@@ -451,8 +451,11 @@ class RemotePointerRegion extends StatelessWidget {
 /// says; without one, the generic arrow.
 ///
 /// Its own layer: the arrow moves with every stroke, hover and report, and
-/// repaints nothing around it.
-class RemoteCursorLayer extends StatelessWidget {
+/// repaints nothing around it. It repaints only when what it paints
+/// changes, so a hover while it paints nothing (in control, the local
+/// pointer shows the host's shape) asks for no frame: over a still
+/// picture, moving the mouse draws nothing.
+class RemoteCursorLayer extends StatefulWidget {
   const RemoteCursorLayer({
     super.key,
     required this.viewport,
@@ -464,12 +467,74 @@ class RemoteCursorLayer extends StatelessWidget {
   final RemoteInput input;
   final RemotePointer? pointer;
 
+  @override
+  State<RemoteCursorLayer> createState() => _RemoteCursorLayerState();
+}
+
+class _RemoteCursorLayerState extends State<RemoteCursorLayer> {
+  /// What the painter last drew.
+  RemoteCursorPaint? _painted;
+
+  /// Ticks for the painter when what it would draw now is not what it last
+  /// drew: from nothing to nothing it never does.
+  final _stale = ValueNotifier(0);
+
+  /// What may change what is drawn: the view, the cursor, its look and the
+  /// display's size the shape's scale is read against.
+  late Listenable _sources;
+
+  @override
+  void initState() {
+    super.initState();
+    _listen();
+  }
+
+  @override
+  void didUpdateWidget(covariant RemoteCursorLayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (identical(oldWidget.viewport, widget.viewport) &&
+        identical(oldWidget.input, widget.input) &&
+        identical(oldWidget.pointer, widget.pointer)) {
+      return;
+    }
+    _sources.removeListener(_update);
+    _listen();
+  }
+
+  @override
+  void dispose() {
+    _sources.removeListener(_update);
+    _stale.dispose();
+    super.dispose();
+  }
+
+  void _listen() {
+    final RemoteCursorLayer(:viewport, :input, :pointer) = widget;
+    _sources = Listenable.merge([
+      viewport,
+      input.cursorChanges,
+      ?pointer,
+      ?pointer?.geometry,
+    ])..addListener(_update);
+    _update();
+  }
+
+  void _update() {
+    if (_paintNow() != _painted) _stale.value++;
+  }
+
+  /// What the painter draws, read as it paints: a frame that lays the stage
+  /// out anew moves the picture before the viewport tells anyone (it waits
+  /// for the frame's end), and its paint still draws the cursor where the
+  /// picture now shows it.
+  RemoteCursorPaint? _draw() => _painted = _paintNow();
+
   /// Where to draw, in the stage's coordinates, and what.
-  RemoteCursorPaint? _paint() {
+  RemoteCursorPaint? _paintNow() {
+    final RemoteCursorLayer(:viewport, :input, :pointer) = widget;
     final n = input.shownCursor;
     if (n == null) return null;
     final at = viewport.toLocal(n);
-    final pointer = this.pointer;
     if (pointer == null) return (at: at, shape: null, scale: 1);
     final shape = pointer.cursor.shape;
     final image = shape?.image;
@@ -486,6 +551,7 @@ class RemoteCursorLayer extends StatelessWidget {
   /// The host's pixels as the picture shows them now, zoom included, but
   /// never so small that the shape is under [kMinPointerSide].
   double _scale(RemotePointer pointer, DesktopPointerShape shape) {
+    final viewport = widget.viewport;
     final display = pointer.geometry.value?.displayWidth ?? 0;
     final shown =
         viewport.toLocal(const Offset(1, 0)).dx -
@@ -501,14 +567,7 @@ class RemoteCursorLayer extends StatelessWidget {
       child: ClipRect(
         child: CustomPaint(
           size: Size.infinite,
-          painter: RemoteCursorPainter(
-            cursor: _paint,
-            repaint: Listenable.merge([
-              viewport,
-              input.cursorChanges,
-              ?pointer,
-            ]),
-          ),
+          painter: RemoteCursorPainter(cursor: _draw, repaint: _stale),
         ),
       ),
     ),
