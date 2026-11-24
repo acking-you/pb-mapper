@@ -244,7 +244,14 @@ async fn receive(
     let [mut up, mut down] = directions;
     let mut client = None;
     let mut buffer = vec![0u8; 65536];
-    while let Ok((len, from)) = socket.recv_from(&mut buffer).await {
+    loop {
+        let (len, from) = match socket.recv_from(&mut buffer).await {
+            Ok(received) => received,
+            // Windows reports a datagram an end no longer took (ICMP port
+            // unreachable) on the next receive; the hop goes on.
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => continue,
+            Err(_) => return,
+        };
         let now = Instant::now();
         let datagram = &buffer[..len];
         if from == target {
