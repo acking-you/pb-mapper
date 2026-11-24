@@ -692,6 +692,15 @@ class FakeDesktopApi implements DesktopApiClient {
     viewerStatusValue = viewerStatusValue?.copyWith(quality: quality);
   }
 
+  /// Refuses what Rust refuses: a rate that is not a positive number.
+  @override
+  void setDisplayRefresh(double hz) {
+    _log('display_refresh', {'hz': hz});
+    if (!hz.isFinite || hz <= 0) {
+      throw const DesktopCallException('INVALID_ARGUMENT');
+    }
+  }
+
   @override
   void pause() {
     _log('pause');

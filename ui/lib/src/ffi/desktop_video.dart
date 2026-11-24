@@ -95,6 +95,7 @@ DesktopDecoders decodersFromProbe(
     h264: DesktopDecoderLimit.p1080,
     h265: probed.h265,
     displayMaxHz: probed.displayMaxHz,
+    windowRefresh: probed.windowRefresh,
   );
 }
 

@@ -191,6 +191,7 @@ fn hot_ops_never_wait_for_a_slow_disconnect() {
         json!({"op": "control", "enabled": true}),
         json!({"op": "keyframe"}),
         json!({"op": "quality", "preset": "smooth"}),
+        json!({"op": "display_refresh", "hz": 59.94}),
         json!({"op": "pause"}),
         json!({"op": "resume"}),
         json!({"op": "release"}),
@@ -265,6 +266,10 @@ fn hot_ops_never_wait_for_a_slow_disconnect() {
                     json!({"op": "quality", "preset": "quality"}),
                     json!({"success": true, "data": {}}),
                 ),
+                (
+                    json!({"op": "display_refresh", "hz": 120}),
+                    json!({"success": true, "data": {}}),
+                ),
                 (json!({"op": "pause"}), json!({"success": true, "data": {}})),
                 (
                     json!({"op": "resume"}),
@@ -290,6 +295,55 @@ fn hot_ops_never_wait_for_a_slow_disconnect() {
         );
         assert_eq!(disconnecting.join().unwrap()["success"], true);
     });
+}
+
+/// `display_refresh` hands the viewer its window's display rate exactly: a
+/// 50 Hz display caps a 60 fps session at 50, and 59.94 Hz then sends the
+/// session's 60, which clears the cap, where a whole hertz read as 59 would
+/// hold the host below its display; a 30 Hz display caps it at 30. A rate
+/// that is no positive number is refused.
+#[test]
+fn display_refresh_caps_the_host_at_the_window_display() {
+    let root = TempRoot::new("desktop-display-refresh");
+    let handle = new_handle(&root);
+    let handle = &handle;
+    let mut host = handle.runtime.block_on(async {
+        let (viewer, host) = scripted_viewer().await;
+        handle
+            .desktop
+            .connect_viewer(|_| async { Ok((viewer, connected())) })
+            .await
+            .unwrap();
+        host
+    });
+    for hz in [json!(0), json!(-60.0), json!("60"), Value::Null] {
+        let refused = hot(handle, json!({"op": "display_refresh", "hz": hz}));
+        assert_eq!(refused["code"], "INVALID_ARGUMENT", "{hz}");
+    }
+    // Each rate is told once the host has the one before.
+    let mut caps = Vec::new();
+    for hz in [50.0, 59.94, 30.0] {
+        let told = hot(handle, json!({"op": "display_refresh", "hz": hz}));
+        assert_eq!(told, json!({"success": true, "data": {}}));
+        caps.push(handle.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let length = host.read_u32().await.unwrap();
+                    let mut record = vec![0; length as usize];
+                    host.read_exact(&mut record).await.unwrap();
+                    let message: Value = serde_json::from_slice(&record).unwrap();
+                    if message["op"] == "fps_cap" {
+                        return message["fps"].clone();
+                    }
+                }
+            })
+            .await
+            .unwrap()
+        }));
+    }
+    assert_eq!(caps, [50, 60, 30]);
+    drop(host);
+    call_json(handle, json!({"op": "disconnect"}));
 }
 
 /// The view names the pointer's shape by a number, which the hot op

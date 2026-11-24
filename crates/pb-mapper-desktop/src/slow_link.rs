@@ -949,6 +949,20 @@ impl Rig {
         latency: Duration,
         fps: u32,
     ) -> Self {
+        Self::build_with(name, link, sizes, latency, viewer_config(fps)).await
+    }
+    /// A rig on the relay's unshaped link whose viewer connects with
+    /// `config`.
+    async fn with_config(name: &str, config: ViewerConfig) -> Self {
+        Self::build_with(name, None, TYPICAL, ENCODE_TIME, config).await
+    }
+    async fn build_with(
+        name: &str,
+        link: Option<(Arc<Shape>, Arc<Shape>)>,
+        sizes: Sizes,
+        latency: Duration,
+        config: ViewerConfig,
+    ) -> Self {
         let relay = Relay::start(&format!("desktop-{name}")).await;
         let client = |addr: SocketAddr| {
             Client::from_credential(addr.to_string(), admin_credential(), true, None)
@@ -982,7 +996,7 @@ impl Rig {
             None => (client(relay.addr()), None),
         };
         let connecting = Instant::now();
-        let viewer = connect_viewer_at(&remote, &host, fps).await;
+        let viewer = connect_viewer_with(&remote, &host, config).await;
         Self {
             host,
             viewer,
@@ -1013,6 +1027,23 @@ async fn connect_viewer(client: &Client, host: &Host) -> Viewer {
 
 /// A viewer of `host` through `client`, on the relay, asking for `fps`.
 async fn connect_viewer_at(client: &Client, host: &Host, fps: u32) -> Viewer {
+    connect_viewer_with(client, host, viewer_config(fps)).await
+}
+
+/// A Balanced viewer asking for `fps`: its display's rate at 60, otherwise
+/// the user's own choice.
+fn viewer_config(fps: u32) -> ViewerConfig {
+    ViewerConfig {
+        codecs: vec![VideoCodec::H264],
+        limits: VideoLimits::for_viewer(f64::from(fps)),
+        fps_override: u64::from(fps) != CEILING_FPS,
+        quality: QualityPreset::Balanced,
+        progress: None,
+    }
+}
+
+/// A viewer of `host` through `client`, on the relay.
+async fn connect_viewer_with(client: &Client, host: &Host, config: ViewerConfig) -> Viewer {
     Viewer::connect(
         client,
         host.invitation(),
@@ -1020,13 +1051,7 @@ async fn connect_viewer_at(client: &Client, host: &Host, fps: u32) -> Viewer {
             path: PathPolicy::RelayOnly,
             ..Default::default()
         },
-        ViewerConfig {
-            codecs: vec![VideoCodec::H264],
-            limits: VideoLimits::for_viewer(f64::from(fps)),
-            fps_override: u64::from(fps) != CEILING_FPS,
-            quality: QualityPreset::Balanced,
-            progress: None,
-        },
+        config,
     )
     .await
     .unwrap()
@@ -2397,6 +2422,131 @@ fn fast_consumer_at_120() {
             "{}",
             after.status.message
         );
+    });
+}
+
+/// What a window moved between displays did to the host's pace.
+struct DisplayMove {
+    /// From `set_display_refresh` to the first capture paced at the new
+    /// rate; `None` where the pace did not change.
+    paced_after: Option<Duration>,
+    /// The phase's mean host pace, its viewer caps, the viewer's mean
+    /// received fps, and the host's mean bits per frame and sent bitrate.
+    pace: f64,
+    caps: Vec<Option<u64>>,
+    received: f32,
+    bpf: u64,
+    sent_bitrate: u64,
+}
+impl DisplayMove {
+    fn print(&self, case: &str, phase: &str) {
+        println!(
+            "{case} phase={phase} paced_after_ms={:?} mean_pace_fps={:.1} caps={:?} received_fps={:.1} bpf={} sent_bitrate={} sent_bytes_per_received_frame={:.0}",
+            self.paced_after.map(|after| after.as_secs_f64() * 1000.0),
+            self.pace,
+            self.caps,
+            self.received,
+            self.bpf,
+            self.sent_bitrate,
+            self.sent_bitrate as f64 / 8.0 / f64::from(self.received.max(1.0))
+        );
+    }
+}
+
+/// A 1080p session on loopback, its viewer asking for 120 fps as its
+/// fastest display's rate, with a decoder taking 1 ms a unit: 10 s to
+/// settle, 10 s on that display, 10 s after its window moved to a 60 Hz
+/// display (`Viewer::set_display_refresh(60.0)`), 10 s after it moved back
+/// to a 144 Hz one. Reports, per phase, how soon a capture was paced at the
+/// new rate, the host's pace and caps, the viewer's received fps, and the
+/// bits per frame and bitrate sent.
+async fn window_display_moves(trace: &Trace, case: &str, quality: QualityPreset) {
+    let config = ViewerConfig {
+        quality,
+        fps_override: false,
+        ..viewer_config(120)
+    };
+    let rig = Rig::with_config(case, config).await;
+    let _decoder = Decoder::start(&rig.viewer, Duration::from_millis(1));
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let paced = |from: Instant, at: u32| {
+        rig.probe
+            .paces
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(when, pace)| *when >= from && *pace == at)
+            .map(|(when, _)| when.saturating_duration_since(from))
+    };
+    let phase = |from: Instant, to: Instant, received: &[f32], paced_after| {
+        let intervals = trace.between(from + session::STATS_INTERVAL, to);
+        let mean_of = |value: fn(&Interval) -> u64| {
+            intervals
+                .iter()
+                .map(value)
+                .sum::<u64>()
+                .checked_div(intervals.len() as u64)
+                .unwrap_or(0)
+        };
+        DisplayMove {
+            paced_after,
+            pace: mean_pace(&intervals),
+            caps: caps(&intervals),
+            received: mean(received),
+            bpf: mean_of(|interval| interval.bpf),
+            sent_bitrate: mean_of(|interval| interval.sent_bitrate),
+        }
+    };
+    let ceiling = qos::ceiling_fps(quality);
+    let on_fast = Instant::now();
+    let received = received_fps(&rig.viewer, 10).await;
+    phase(on_fast, Instant::now(), &received, None).print(case, "120hz");
+    let moved = Instant::now();
+    rig.viewer.set_display_refresh(60.0);
+    let received = received_fps(&rig.viewer, 10).await;
+    let slow = phase(
+        moved,
+        Instant::now(),
+        &received,
+        paced(moved, 60.min(ceiling)),
+    );
+    slow.print(case, "60hz");
+    let back = Instant::now();
+    rig.viewer.set_display_refresh(144.0);
+    let received = received_fps(&rig.viewer, 10).await;
+    let fast = phase(back, Instant::now(), &received, paced(back, ceiling));
+    fast.print(case, "144hz");
+    let status = rig.viewer.status();
+    rig.stop().await;
+    assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+    // The host's cap: the display's 60 while the window was on it, then gone.
+    assert!(
+        slow.caps.iter().all(|cap| *cap == Some(60)),
+        "{:?}",
+        slow.caps
+    );
+    assert!(fast.caps.iter().all(Option::is_none), "{:?}", fast.caps);
+}
+
+/// A Smooth session falls from 120 to 60 fps when its window moves to a
+/// 60 Hz display and returns to 120 when it moves back, each without a
+/// reconnect.
+#[test]
+#[ignore = "explicit ~40-second window display measurement at 120 fps"]
+fn window_display_moves_at_120() {
+    traced(|trace| async move {
+        window_display_moves(&trace, "window_display_smooth", QualityPreset::Smooth).await;
+    });
+}
+
+/// Balanced, whose ceiling is 60, sends as before: the display's 60 caps
+/// nothing it would send, but the host holds the limit for a switch to
+/// Smooth.
+#[test]
+#[ignore = "explicit ~40-second window display measurement at Balanced"]
+fn window_display_moves_at_balanced() {
+    traced(|trace| async move {
+        window_display_moves(&trace, "window_display_balanced", QualityPreset::Balanced).await;
     });
 }
 

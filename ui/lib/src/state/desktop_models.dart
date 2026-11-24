@@ -257,7 +257,12 @@ class DesktopDecoderLimit {
 /// store keeps it out for the rest of the run ([withoutH265]).
 @immutable
 class DesktopDecoders {
-  const DesktopDecoders({this.h264, this.h265, this.displayMaxHz});
+  const DesktopDecoders({
+    this.h264,
+    this.h265,
+    this.displayMaxHz,
+    this.windowRefresh = false,
+  });
 
   factory DesktopDecoders.fromJson(Map<String, Object?> json) {
     DesktopDecoderLimit? limit(Object? value) => switch (value) {
@@ -271,6 +276,7 @@ class DesktopDecoders {
       h264: limit(json['h264']),
       h265: limit(json['h265']),
       displayMaxHz: hz is num && hz.isFinite && hz > 0 ? hz.toDouble() : null,
+      windowRefresh: json['window_refresh'] == true,
     );
   }
 
@@ -285,8 +291,17 @@ class DesktopDecoders {
   /// The display's highest refresh rate; null when not reported.
   final double? displayMaxHz;
 
-  DesktopDecoders withoutH265() =>
-      DesktopDecoders(h264: h264, displayMaxHz: displayMaxHz);
+  /// The runner answers the rate of the display the window is on
+  /// (`refresh_hz`) and says when that may have changed
+  /// (`display_changed`), as the Windows and Linux runners do
+  /// (`DisplayRefresh`).
+  final bool windowRefresh;
+
+  DesktopDecoders withoutH265() => DesktopDecoders(
+    h264: h264,
+    displayMaxHz: displayMaxHz,
+    windowRefresh: windowRefresh,
+  );
 
   /// D6: H.265 is offered when the preference is Auto and there is an
   /// H.265 decoder: Rust fits the session's limits inside its largest
@@ -335,9 +350,10 @@ class DesktopDecoders {
       other is DesktopDecoders &&
       other.h264 == h264 &&
       other.h265 == h265 &&
-      other.displayMaxHz == displayMaxHz;
+      other.displayMaxHz == displayMaxHz &&
+      other.windowRefresh == windowRefresh;
   @override
-  int get hashCode => Object.hash(h264, h265, displayMaxHz);
+  int get hashCode => Object.hash(h264, h265, displayMaxHz, windowRefresh);
 }
 
 enum DesktopPhase {
