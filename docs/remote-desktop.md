@@ -159,10 +159,20 @@ runs, and resumes with the app when **Share this computer** was left on.
   lock screen and the login window cannot be shared, and **Lock remote
   computer** is not offered for a Mac.
 - While a viewer watches, the app holds off App Nap and keeps the display
-  awake; a viewer that only watches could not wake it. The thread that paces
-  capture waits on timers the kernel does not coalesce: on a CI runner whose
-  ordinary timers ran up to 134 ms late, that kept a 60 fps session at 60
-  frames a second ([Timers on a Mac host](#timers-on-a-mac-host)).
+  awake. A display that has gone to sleep is lit when a viewer connects or
+  resumes, or when capture gets no picture, and one turned off while a
+  viewer watches once it has stayed off for a second, as a touch at the Mac
+  would light it: ScreenCaptureKit captures nothing of a sleeping display,
+  and a viewer gets input only for a picture it was shown, so it could not
+  wake the Mac itself
+  ([Waking a sleeping Mac display](#waking-a-sleeping-mac-display)).
+  A locked Mac stays dark: when macOS asks for the password as soon as the
+  display turns off, a display that slept also locked the Mac, and the
+  viewer sees the secure desktop state. With a MacBook's lid closed, only an
+  external display is lit. The thread that paces capture waits on timers
+  the kernel does not coalesce: on a CI runner whose ordinary timers ran up
+  to 134 ms late, that kept a 60 fps session at 60 frames a second
+  ([Timers on a Mac host](#timers-on-a-mac-host)).
 
 The M3 Pro hardware run covered screen capture and view-only streaming. CI also tests it
 on a macOS runner: the VideoToolbox encoder (keyframes only when asked, each
@@ -1156,8 +1166,8 @@ Android 60 FPS rule, the public `windows` module, the `privileged` facade's
 Windows operations, the macOS Keychain sealer in `trust`, and lint
 allowances for neutral code (`codec`, `oop`, the cursor scaler) that not
 every platform uses. The pure parts of `platform/macos/` (points and pixels,
-key codes, click counts, mode lists, un-premultiplying) build and are tested
-on every platform.
+key codes, click counts, mode lists, un-premultiplying, when a sleeping
+display is lit) build and are tested on every platform.
 
 ```
 crates/pb-mapper-desktop/src/
@@ -1170,7 +1180,8 @@ crates/pb-mapper-desktop/src/
   platform/windows/video/                        capture, scale and encode, fused
   platform/windows/helper/                       service, install, worker, pipes
   platform/macos/{mod,cf,capture,encoder,video,desktop,geometry,input,clicks,
-    keys,pixels,pointer,cursor,modes,mode_list,still,timer,waiter,keychain}.rs
+    keys,pixels,pointer,cursor,modes,mode_list,still,timer,waiter,power,wake,
+    keychain}.rs
   privileged/                                    public helper facade
 ```
 
@@ -1477,7 +1488,10 @@ polls. The late-output, stall, liveness and H.265-failure rules are the
 Windows encoder's (`codec/pipeline.rs`). No picture for 3 s is a capture
 failure. While a session captures, the process holds off App Nap and keeps
 the display awake, and thread C waits on timers the kernel does not coalesce
-([Timers on a Mac host](#timers-on-a-mac-host)).
+([Timers on a Mac host](#timers-on-a-mac-host)); a display that sleeps when
+capture starts or resumes is lit first, and one that turns off under the
+stream is lit again
+([Waking a sleeping Mac display](#waking-a-sleeping-mac-display)).
 
 The GOP is infinite. Before its media types are set, the encoder tries GOP
 lengths `u32::MAX`, `0x7FFF_FFFF`, 65 535 and 3 600 and keeps the first one it
@@ -1534,6 +1548,62 @@ injected clock. `powercfg /requests` lists the request under DISPLAY and
 SYSTEM while it is held. A sleep the owner chooses, the power button or a lid
 set to sleep still end it. The helper protocol is unchanged: its worker runs
 the same capture.
+
+### Waking a sleeping Mac display
+
+The activity a capturing session holds keeps the display from sleeping; it
+does not light one that already sleeps, as when the owner let it sleep, put
+it to sleep, or a pause released the activity. A sleeping display gives
+ScreenCaptureKit no picture, and a viewer gets input only for a picture it
+was shown, so such a session would show nothing, and rebuild its capture,
+until someone touched the Mac; a display put to sleep under a running
+stream would leave its viewer on the last picture, repeated. A sleeping
+display is not among the active displays (`CGGetActiveDisplayList`), but it
+is still online and keeps its bounds and its mode. The host lights it by
+declaring the local user active (`IOPMAssertionDeclareUserActivity` with
+`kIOPMUserActiveLocal`, as `caffeinate -u` does), which turns the displays
+on and holds off their sleep for the owner's display-sleep time
+(`platform/macos/power.rs`):
+
+- when a session's parts open, if any online display sleeps; it then waits
+  up to 2 s, looking every 100 ms, for the shared display to be active and
+  awake, so that capture starts with a picture. The wait stays under the 3 s
+  a new session has to describe itself;
+- when capture opens, a recovery's included, and at the first capture after
+  a resume: a sleeping display fails the capture as `CaptureFailed` ("the
+  display is asleep; waking it"), and thread C's retry, every 200 ms, opens
+  ScreenCaptureKit once the display draws;
+- when an open capture got no picture for 3 s, or ScreenCaptureKit did not
+  list the display, while it sleeps: the same failure and retry;
+- when an open stream had no new picture for 500 ms: at a repeat of its last
+  picture, at most every 500 ms, it looks whether the display sleeps (one
+  Core Graphics read while it is awake), and lights it with the same
+  failure and retry;
+- before each JPEG still, for a viewer with no decoder: a sleeping display
+  fails the still the same way.
+
+Each of these runs only after the session check passed: a locked Mac, or
+one whose screen another login has, stays dark, as its picture is the
+secure desktop. A display that turns off under a running capture (found
+asleep within 1 s of being found awake by a new picture, a look or a
+still) may be turning off as the Mac locks, when macOS asks for the
+password as soon as the display turns off. It is lit only once it has been
+found asleep for 1 s, each look after a session check, which gives a lock
+that follows the display turning off a second to be reported first; how
+soon macOS reports it is still to be tried on a device. Until then the
+stream repeats its last picture, and a still fails. The rules are pure
+(`platform/macos/wake.rs`) and tested on every platform: a declaration goes
+out at most once every 2 s, however often capture retries, and none is made
+for the built-in panel while the lid is closed (`AppleClamshellState` of
+`IOPMrootDomain`), which macOS would light for a few seconds and turn off
+again, over and over; an external display is still lit. The power
+manager's assertion id is kept and passed back with each declaration, as
+its header asks, and released with the session's activity once the
+declaration is 2 s old; one younger, whose display may still be lighting,
+is left to end at the power manager's own timeout. Each declaration is
+logged as `desktop_display_wake` (debug, target
+`pb_mapper_desktop::session`), and one the power manager refuses as
+`desktop_display_wake_failed`, with its `IOReturn`, as a warning.
 
 ### Timers on a Mac host
 
@@ -3049,6 +3119,7 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | Elevated windows / secure-desktop UAC | Helper implemented; default-policy administrator and standard-user prompt acceptance outstanding |
 | Remembered app-owned host policy | Current-user DPAPI; requires signed-in user and running app |
 | Windows service-owned background host | Final build 922 passed upgrade restart, live direct/relay delivery with its UI exited, and persistent Stop/Enable with the same invitation; OS boot, standalone SCM restart and sleep/resume acceptance pending |
+| Mac display lit when it sleeps | The wake limiter, the closed-lid rule and the 1 s left to a display that turns off under capture are unit-tested on every platform, and the online display list, the lid read and finding the shared display run in the macOS CI job; a session that starts on a sleeping display, a resume after the display slept, a display put to sleep during a session (H.264 and JPEG), `pmset -g assertions`, a locked Mac staying dark (whether the lock is reported within 1 s of the display turning off) and a MacBook with its lid closed, outstanding on a device |
 | Windows display and system kept awake while capturing | The keeper's timing and the watchdog's loop are unit-tested on every platform and its power request is created in the Windows CI job; a viewer past the display-off timeout, `powercfg /requests` during capture, a network stall and a pause, and waking a dark display, in the app and through the service, outstanding on a device |
 | Same owner's locked login / password entry | Session identity and desktop transition handling implemented; actual password-entry acceptance pending |
 | Pre-login boot, SAS, control across user switching | Unsupported; service waits for its approved owner's login |

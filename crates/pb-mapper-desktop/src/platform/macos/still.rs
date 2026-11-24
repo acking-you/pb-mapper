@@ -1,8 +1,10 @@
 //! Stills for a viewer with no decoder: ScreenCaptureKit's screenshot
 //! (macOS 14) fitted inside 1600x1000, as a quality-65 JPEG from ImageIO,
-//! as Windows sends. Below macOS 14 there is none.
+//! as Windows sends. Below macOS 14 there is none. A display that sleeps
+//! fails the still and is lit (`power.rs`), at once at a session's start or
+//! a resume, a moment later when it turned off between two stills.
 
-use super::{capture, cf};
+use super::{capture, cf, power, wake::SleepWatch};
 use crate::{
     BackendError, Display, FailureKind, Result, error, platform::StillCapture, qos::scaled_size,
 };
@@ -13,15 +15,17 @@ use objc2_core_graphics::CGImage;
 use objc2_foundation::NSError;
 use objc2_image_io::{CGImageDestination, kCGImageDestinationLossyCompressionQuality};
 use objc2_screen_capture_kit::{SCContentFilter, SCScreenshotManager};
-use std::sync::mpsc;
+use std::{sync::mpsc, time::Instant};
 
 const MAX_SIZE: (u32, u32) = (1600, 1000);
 const QUALITY: f64 = 0.65;
 
-/// The filter of the display last captured, kept between stills.
+/// The filter of the display last captured, kept between stills, and
+/// what the stills found of the display's sleep.
 #[derive(Default)]
 pub(crate) struct SckStill {
     filter: Option<(u32, Retained<SCContentFilter>)>,
+    watch: SleepWatch,
 }
 
 impl SckStill {
@@ -53,6 +57,17 @@ impl SckStill {
             )
             .into());
         }
+        // `PlatformBackend::still` checked the session just before: this
+        // login owns the screen, unlocked. A sleeping display would give
+        // ScreenCaptureKit nothing to show.
+        let now = Instant::now();
+        if power::sleeping(display.id) {
+            if self.watch.asleep(now) {
+                power::light();
+            }
+            return Err(power::waking());
+        }
+        self.watch.awake(now);
         let filter = self.filter(display.id)?;
         let (width, height) = scaled_size(display.width, display.height, MAX_SIZE.0, MAX_SIZE.1);
         let prepared = capture::configuration(width, height, false);

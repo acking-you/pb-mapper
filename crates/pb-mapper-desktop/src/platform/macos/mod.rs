@@ -3,9 +3,9 @@
 //! shape, Core Graphics display
 //! modes changed for this app only, ScreenCaptureKit stills; Screen
 //! Recording and Accessibility (event posting) as the permissions the owner
-//! grants; App Nap held off while a session captures, and thread C's waits
-//! on timers the kernel does not coalesce; a Keychain key for the
-//! remembered grant.
+//! grants; App Nap held off while a session captures, a sleeping display
+//! lit for a viewer, and thread C's waits on timers the kernel does not
+//! coalesce; a Keychain key for the remembered grant.
 //!
 //! ScreenCaptureKit arrived in macOS 12.3 while the app runs from 10.15: the
 //! FFI library links it weakly, and below 12.3 `support` answers
@@ -14,7 +14,8 @@
 //!
 //! The pure parts (points and pixels, key codes, click counts, mode lists,
 //! the pointer the injector and the cursor share, how long a desktop check
-//! is reused) build and are tested on every platform.
+//! is reused, when a sleeping display is woken) build and are tested on
+//! every platform.
 
 // Pure: built and tested everywhere, used by the OS parts on macOS alone.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -31,6 +32,8 @@ pub(crate) mod pixels;
 pub(crate) mod pointer;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod reuse;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) mod wake;
 
 #[cfg(target_os = "macos")]
 mod capture;
@@ -51,6 +54,8 @@ mod layout;
 #[cfg(target_os = "macos")]
 mod modes;
 #[cfg(target_os = "macos")]
+pub(crate) mod power;
+#[cfg(target_os = "macos")]
 mod still;
 #[cfg(test)]
 mod tests;
@@ -66,7 +71,7 @@ pub(crate) use platform::Macos;
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::{capture, cursor, desktop, input, modes, still, video};
+    use super::{capture, cursor, desktop, input, modes, power, still, video};
     use crate::{
         BackendError, Display, DisplaySelection, HostOs, Permission, Result,
         platform::{HostPermissions, HostSupport, Parts, Platform, UnsupportedReason},
@@ -153,7 +158,11 @@ mod platform {
                 Err(screen_capture_missing().into())
             })
         }
+        /// A display that sleeps is lit first, when this login owns the
+        /// screen, unlocked: asleep, it gives capture nothing and may not
+        /// be listed.
         fn open(_: &ScreenAccess, display: &Display) -> Result<Parts<Self>> {
+            power::wake_for_session(display);
             let desktop = desktop::MacDesktop::open(display)?;
             let geometry = desktop.shared();
             let pointer = super::pointer::Shared::default();

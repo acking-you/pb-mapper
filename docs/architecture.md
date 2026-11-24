@@ -324,8 +324,9 @@ Nothing in the SDK crates knows it exists.
   - `timer.rs`: Fine process timers, held while a session captures; on
     Windows `platform/windows/timer.rs` (the power-throttling opt-out and
     `timeBeginPeriod`), on macOS `platform/macos/timer.rs` (App Nap held
-    off; the kernel still coalesces the process's timers, which thread C's
-    own waiter avoids)
+    off, and the declaration that lit a sleeping display given back; the
+    kernel still coalesces the process's timers, which thread C's own
+    waiter avoids)
   - `credit.rs`, `qos.rs`, `idr.rs`, `outgoing.rs`: Receipt credit, delay-based
     QoS (`qos/receipt_rate.rs`, a receipt-rate estimator that is only traced),
     on-demand IDRs, and the hand-off from thread C to B-send
@@ -409,7 +410,11 @@ Nothing in the SDK crates knows it exists.
     cursor seed moves), `pointer.rs` (the move `input.rs` and `cursor.rs`
     share), `pixels.rs`, `modes.rs` and `mode_list.rs`
     (app-only Core Graphics modes), `still.rs` (`SCScreenshotManager`),
-    `timer.rs` (App Nap held off), `waiter.rs` (thread C's wait: a kqueue
+    `timer.rs` (App Nap held off), `power.rs` (a sleeping display lit by a
+    declaration of local user activity, not the built-in panel behind a
+    closed lid) and `wake.rs` (its pure rules: at most once every 2 s, and
+    a display that turns off under capture only after 1 s),
+    `waiter.rs` (thread C's wait: a kqueue
     timer marked `NOTE_CRITICAL`, which the kernel does not coalesce, and a
     user event for the wake), `keychain.rs`, `cf.rs` (Core Foundation
     glue, symbols looked up at run time). Its pure modules build and are
