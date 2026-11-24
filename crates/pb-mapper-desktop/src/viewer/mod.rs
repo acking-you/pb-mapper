@@ -984,5 +984,5 @@ mod tests;
 #[cfg(test)]
 pub(crate) use standby::{
     Hooks as StandbyHooks,
-    tests::{Counting, Pair as StandbyPair, render as render_noting},
+    tests::{Counting, Keyframes, Pair as StandbyPair, render as render_noting},
 };

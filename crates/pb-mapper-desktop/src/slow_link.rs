@@ -3359,7 +3359,8 @@ fn takes_input(viewer: &Viewer) -> bool {
 fn standby_takes_a_dead_paths_place() {
     const CASE: &str = "standby";
     traced(|_| async move {
-        let (mut pictures, mut inputs, mut keyframes) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut pictures, mut inputs) = (Vec::new(), Vec::new());
+        let (mut outage_keyframes, mut switch_keyframes) = (Vec::new(), Vec::new());
         for run in 0..STANDBY_RUNS {
             let pair = crate::viewer::StandbyPair::start(&format!("standby-dead-{run}")).await;
             let connecting = Instant::now();
@@ -3371,7 +3372,6 @@ fn standby_takes_a_dead_paths_place() {
             first(|| takes_input(&viewer).then_some(())).await.unwrap();
             first(|| (pair.relayed() == 2).then_some(())).await.unwrap();
             tokio::time::sleep_until((connecting + STANDBY_BLOCK_AT).into()).await;
-            let before = pair.keyframes.load(Ordering::SeqCst);
             let generation = viewer.status().generation;
             let blocked = Instant::now();
             pair.live.blocked.store(true, Ordering::Relaxed);
@@ -3389,10 +3389,16 @@ fn standby_takes_a_dead_paths_place() {
             .await
             .unwrap();
             tokio::time::sleep_until((picture + Duration::from_secs(1)).into()).await;
-            let idrs = pair.keyframes.load(Ordering::SeqCst) - before;
+            // The dead session's own queue asks for one while it stalls; the
+            // promotion's resume, one just before the picture.
+            let switched = picture - Duration::from_millis(100);
+            let outage = pair.keyframes.between(blocked, switched);
+            let switch = pair
+                .keyframes
+                .between(switched, picture + Duration::from_secs(1));
             let status = viewer.status();
             println!(
-                "{CASE} run={run} picture_after_block_ms={:.0} input_after_block_ms={:.0} keyframes={idrs} state={:?} host_viewers={}",
+                "{CASE} run={run} picture_after_block_ms={:.0} input_after_block_ms={:.0} keyframes_in_outage={outage} keyframes_at_switch={switch} state={:?} host_viewers={}",
                 picture.duration_since(blocked).as_secs_f64() * 1000.0,
                 input.duration_since(blocked).as_secs_f64() * 1000.0,
                 status.state,
@@ -3401,7 +3407,8 @@ fn standby_takes_a_dead_paths_place() {
             assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
             pictures.push(picture.duration_since(blocked).as_secs_f64() * 1000.0);
             inputs.push(input.duration_since(blocked).as_secs_f64() * 1000.0);
-            keyframes.push(idrs);
+            outage_keyframes.push(outage);
+            switch_keyframes.push(switch);
             viewer.stop().await.unwrap();
             stop.store(true, Ordering::Release);
             renderer.join().unwrap();
@@ -3410,9 +3417,11 @@ fn standby_takes_a_dead_paths_place() {
         let (picture_p50, picture_p90, picture_max) = spread(&mut pictures);
         let (input_p50, input_p90, input_max) = spread(&mut inputs);
         println!(
-            "{CASE} summary runs={STANDBY_RUNS} picture_after_block_ms p50={picture_p50:.0} p90={picture_p90:.0} max={picture_max:.0} input_after_block_ms p50={input_p50:.0} p90={input_p90:.0} max={input_max:.0} keyframes min={} max={}",
-            keyframes.iter().min().unwrap(),
-            keyframes.iter().max().unwrap(),
+            "{CASE} summary runs={STANDBY_RUNS} picture_after_block_ms p50={picture_p50:.0} p90={picture_p90:.0} max={picture_max:.0} input_after_block_ms p50={input_p50:.0} p90={input_p90:.0} max={input_max:.0} keyframes_in_outage min={} max={} keyframes_at_switch min={} max={}",
+            outage_keyframes.iter().min().unwrap(),
+            outage_keyframes.iter().max().unwrap(),
+            switch_keyframes.iter().min().unwrap(),
+            switch_keyframes.iter().max().unwrap(),
         );
     });
 }
@@ -3512,7 +3521,7 @@ fn standby_upgrades_a_relayed_session() {
             .await;
             let client =
                 Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
-            let counted = Arc::new(AtomicU32::new(0));
+            let counted = Arc::new(crate::viewer::Keyframes::default());
             let backend = counted.clone();
             let mut options = HostOptions::new(format!("desktop:standby-upgrade-{run}"));
             options.allow_control = true;
@@ -3541,12 +3550,12 @@ fn standby_upgrades_a_relayed_session() {
             let fresh = first(|| viewer.status().fresh.then(Instant::now))
                 .await
                 .unwrap();
-            let before = counted.load(Ordering::SeqCst);
+            let before = counted.count();
             let direct = first(|| (viewer.status().stats.path == "direct").then(Instant::now))
                 .await
                 .unwrap();
             tokio::time::sleep_until((direct + Duration::from_secs(1)).into()).await;
-            let idrs = counted.load(Ordering::SeqCst) - before;
+            let idrs = counted.count() - before;
             let shown_at: Vec<Instant> = shown
                 .units
                 .lock()

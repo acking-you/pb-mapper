@@ -844,12 +844,26 @@ pub(crate) mod tests {
     use pb_mapper_testkit::{Relay, Shape, ShapedLink, admin_credential, shaped_link};
     use std::sync::{
         Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, Ordering},
     };
 
-    /// A 1080p H.264 desktop whose units are a byte each: how many IDRs it
-    /// was asked for.
-    pub(crate) struct Counting(pub(crate) Arc<AtomicU32>);
+    /// When a backend encoded each IDR.
+    #[derive(Default)]
+    pub(crate) struct Keyframes(StdMutex<Vec<Instant>>);
+    impl Keyframes {
+        pub(crate) fn count(&self) -> usize {
+            self.0.lock().unwrap().len()
+        }
+        /// Those encoded from `from` up to `to`.
+        pub(crate) fn between(&self, from: Instant, to: Instant) -> usize {
+            let at = self.0.lock().unwrap();
+            at.iter().filter(|at| **at >= from && **at < to).count()
+        }
+    }
+
+    /// A 1080p H.264 desktop whose units are 64 bytes each, noting when it
+    /// encoded each IDR.
+    pub(crate) struct Counting(pub(crate) Arc<Keyframes>);
     impl Backend for Counting {
         fn display(&mut self) -> crate::Result<Display> {
             Ok(Display {
@@ -872,7 +886,7 @@ pub(crate) mod tests {
             _: VideoRate,
         ) -> crate::Result<Option<EncodedFrame>> {
             if keyframe {
-                self.0.fetch_add(1, Ordering::SeqCst);
+                self.0.0.lock().unwrap().push(Instant::now());
             }
             Ok(Some(EncodedFrame {
                 format: VideoFormat {
@@ -937,7 +951,7 @@ pub(crate) mod tests {
     /// links to the relay: the live session's, and its standby's.
     pub(crate) struct Pair {
         pub(crate) host: Host,
-        pub(crate) keyframes: Arc<AtomicU32>,
+        pub(crate) keyframes: Arc<Keyframes>,
         pub(crate) live: Arc<Shape>,
         pub(crate) clients: [Client; 2],
         _links: [ShapedLink; 2],
@@ -949,7 +963,7 @@ pub(crate) mod tests {
             let client = |addr: std::net::SocketAddr| {
                 Client::from_credential(addr.to_string(), admin_credential(), true, None)
             };
-            let keyframes = Arc::new(AtomicU32::new(0));
+            let keyframes = Arc::new(Keyframes::default());
             let counted = keyframes.clone();
             let mut options = HostOptions::new(format!("desktop:{name}"));
             options.allow_control = true;
@@ -1060,7 +1074,7 @@ pub(crate) mod tests {
         .await;
         let client =
             Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
-        let keyframes = Arc::new(AtomicU32::new(0));
+        let keyframes = Arc::new(Keyframes::default());
         let counted = keyframes.clone();
         let mut options = HostOptions::new("desktop:standby-upgrade");
         options.allow_control = true;
