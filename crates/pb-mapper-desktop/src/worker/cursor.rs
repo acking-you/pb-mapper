@@ -29,43 +29,45 @@ const _: () = assert!(
     "each look comes before the sample that would see the shape anyway",
 );
 
-/// A look at the pointer's shape that thread C owes the controller's move,
-/// ahead of the next sample. At most one is pending.
+/// The looks at the pointer's shape that thread C owes the controller's
+/// moves, ahead of the next sample: `SHAPE_LOOK` after the newest move, and
+/// `SHAPE_LATE` after it. A look still pending for an earlier move keeps
+/// its time where that is sooner, so moves closer together than
+/// `SHAPE_LOOK` never put a look off, and running it leaves the newest
+/// move's own looks. At most one is pending.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ShapeLook {
-    /// `SHAPE_LOOK` after a move, then one more at `late`.
-    First { due: Instant, late: Instant },
-    /// `SHAPE_LATE` after the last move.
-    Late(Instant),
+pub(super) struct ShapeLook {
+    /// When the pending look runs.
+    due: Instant,
+    /// The newest move.
+    moved: Instant,
 }
 impl ShapeLook {
     pub(super) fn due(self) -> Instant {
-        match self {
-            Self::First { due, .. } | Self::Late(due) => due,
-        }
+        self.due
     }
 
-    /// The look after a move at `now`. A first look still pending stays,
-    /// since it is sooner, so moves closer together than `SHAPE_LOOK` never
-    /// put it off; the late look follows the newest move. A pending late
-    /// look gives way to a first look.
+    /// The looks after a move at `now`. A pending one already due stays
+    /// due: it runs in this iteration, for the move before.
     pub(super) fn after_move(look: Option<Self>, now: Instant) -> Self {
-        let late = now + SHAPE_LATE;
-        match look {
-            Some(Self::First { due, .. }) => Self::First { due, late },
-            Some(Self::Late(_)) | None => Self::First {
-                due: now + SHAPE_LOOK,
-                late,
-            },
+        let first = now + SHAPE_LOOK;
+        Self {
+            due: look.map_or(first, |look| look.due.min(first)),
+            moved: now,
         }
     }
 
-    /// What is left once this look ran at `now`.
+    /// What is left once the pending look ran at `now`: the newest move's
+    /// looks still ahead.
     fn next(self, now: Instant) -> Option<Self> {
-        match self {
-            Self::First { late, .. } if late > now => Some(Self::Late(late)),
-            Self::First { .. } | Self::Late(_) => None,
-        }
+        [SHAPE_LOOK, SHAPE_LATE]
+            .into_iter()
+            .map(|after| self.moved + after)
+            .find(|due| *due > now)
+            .map(|due| Self {
+                due,
+                moved: self.moved,
+            })
     }
 }
 
@@ -90,7 +92,8 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     /// when a viewer that reads shapes gets a new one does it go on as a
     /// sample and start the clock again; otherwise it reports nothing, so a
     /// viewer gets a position sooner than the clock only with a new shape.
-    /// A reading that finds a new shape drops the look still pending.
+    /// A reading that finds a new shape keeps the looks still owed: that
+    /// shape may answer an earlier move, and the newest move's come later.
     pub(super) fn sample_cursor(&mut self, now: Instant) {
         if self.paused || self.unavailable.is_some() {
             return;
@@ -138,8 +141,6 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                     }
                 }
                 if reshaped {
-                    // The app answered the move: no look is owed it.
-                    self.shape_due = None;
                     tracing::debug!(
                         target: "pb_mapper_desktop::session",
                         event = "desktop_cursor_shape",

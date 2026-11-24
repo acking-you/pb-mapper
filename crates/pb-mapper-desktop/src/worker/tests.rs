@@ -354,6 +354,10 @@ impl Harness {
         }
     }
     fn join_watcher(&self, max_fps: u32) -> Arc<SessionShared> {
+        self.join_viewer(max_fps, false)
+    }
+    /// A second viewer in slot 1, reading shapes as `cursor_shapes` says.
+    fn join_viewer(&self, max_fps: u32, cursor_shapes: bool) -> Arc<SessionShared> {
         let room = &self.engine.room;
         let slot = PeerSlot::new(1).unwrap();
         let shared = Arc::new(SessionShared::new_in_room(
@@ -371,7 +375,7 @@ impl Harness {
                 shared: shared.clone(),
                 color: PeerColor::new(slot.index()).unwrap(),
                 limits: VideoLimits { max_fps, ..LIMITS },
-                cursor_shapes: false,
+                cursor_shapes,
                 peer_cursors: true,
             },
         );
@@ -482,6 +486,22 @@ impl Harness {
             *self.now.lock() = deadline.max(now);
         }
         panic!("thread C never sampled the pointer");
+    }
+    /// Iterate at each deadline, B-send taking every unit, until thread C
+    /// reports the pointer anew; when it did.
+    fn reported(&mut self) -> Instant {
+        let serial = |h: &Self| h.shared.cursor.borrow().as_ref().map(|r| r.serial);
+        let before = serial(self);
+        for _ in 0..1000 {
+            let deadline = self.step();
+            self.sent();
+            if serial(self) != before {
+                return self.now();
+            }
+            let now = self.now();
+            *self.now.lock() = deadline.max(now);
+        }
+        panic!("thread C never reported the pointer");
     }
     fn captures(&self) -> Vec<(Instant, bool, VideoRate)> {
         let log = self.fake.log.lock();
@@ -1064,10 +1084,11 @@ fn no_shape_is_read_while_the_pointer_is_away() {
     assert_eq!(back.shape.as_ref(), Some(&ibeam));
 }
 
-/// A controlling viewer that reads shapes, its picture presented, and the
+/// A controlling viewer, reading shapes as `shapes` says, beside a watcher
+/// that reads them when `watcher` is set; its picture presented, and the
 /// pointer sampled at the instant returned, so that the next sample is a
 /// whole interval away.
-fn shape_session(shapes: bool, control: bool) -> (Harness, Instant) {
+fn shape_session(shapes: bool, watcher: bool) -> (Harness, Instant) {
     let mut h = Harness::with(
         true,
         WorkerConfig {
@@ -1075,13 +1096,23 @@ fn shape_session(shapes: bool, control: bool) -> (Harness, Instant) {
             ..config(None)
         },
     );
-    if control {
-        h.send(LaneCommand::Control { enabled: true });
+    if watcher {
+        h.join_viewer(60, true);
     }
+    h.send(LaneCommand::Control { enabled: true });
     h.step();
     h.present();
     let sampled = h.sampled();
     (h, sampled)
+}
+
+/// The shapes the tests give the pointer.
+fn hand_and_ibeam() -> (crate::CursorShape, crate::CursorShape) {
+    let shape = |kind, fill| crate::CursorShape::new(kind, 1, 2, (0, 1), vec![fill; 8]).unwrap();
+    (
+        shape(crate::CursorKind::Hand, 2),
+        shape(crate::CursorKind::Ibeam, 1),
+    )
 }
 
 /// The shape an app gives the pointer for the controller's move (a hand
@@ -1092,11 +1123,9 @@ fn shape_session(shapes: bool, control: bool) -> (Harness, Instant) {
 #[test]
 fn a_shape_the_controllers_move_brings_is_reported_2_ms_after_it() {
     let ms = Duration::from_millis;
-    let hand = crate::CursorShape::new(crate::CursorKind::Hand, 1, 2, (0, 1), vec![2; 8]).unwrap();
-    let ibeam =
-        crate::CursorShape::new(crate::CursorKind::Ibeam, 1, 2, (0, 1), vec![1; 8]).unwrap();
+    let (hand, ibeam) = hand_and_ibeam();
     for (app, shape, seen) in [(ms(1), &hand, ms(2)), (ms(5), &ibeam, ms(8))] {
-        let (mut h, moved) = shape_session(true, true);
+        let (mut h, moved) = shape_session(true, false);
         let report = |h: &Harness| h.shared.cursor.borrow().clone().unwrap();
         h.input(Input::Move { x: 4, y: 3 });
         h.step();
@@ -1104,37 +1133,31 @@ fn a_shape_the_controllers_move_brings_is_reported_2_ms_after_it() {
         h.run(app, true);
         assert_eq!(h.now(), moved + app);
         *h.fake.shape.lock() = Some(shape.clone());
-        let reported = loop {
-            let deadline = h.step();
-            if report(&h).serial != before {
-                break h.now();
-            }
-            let now = h.now();
-            assert!(now < moved + ms(16), "no report before the next sample");
-            *h.now.lock() = deadline.max(now);
-        };
+        let reported = h.reported();
         assert_eq!(reported, moved + seen);
         let after = report(&h);
         assert_eq!(after.serial, before + 1);
         assert_eq!(after.shape.as_ref(), Some(shape));
         assert_eq!((after.cursor.x, after.cursor.y), (4, 3));
-        // The next sample is an interval after the look, not after the one
+        // The late look still runs, and finds nothing new; the next sample
+        // is an interval after the look that reported, not after the one
         // before it.
-        h.run(ms(15), true);
-        assert!(h.cursor_reads_after(reported).is_empty());
-        h.run(ms(2), true);
-        assert_eq!(h.cursor_reads_after(reported), [reported + ms(16)]);
+        h.run(ms(17), true);
+        let late = Some(moved + ms(8)).filter(|late| *late > reported);
+        let reads: Vec<_> = late.into_iter().chain([reported + ms(16)]).collect();
+        assert_eq!(h.cursor_reads_after(reported), reads);
+        assert_eq!(report(&h).serial, after.serial);
     }
 }
 
-/// A look that finds the shape unchanged reports nothing; it reads the
-/// pointer and its shape 2 ms and 8 ms after the move, and nothing more
-/// until the next sample. Moves closer together than 2 ms never put the
-/// first look off.
+/// A look that finds the shape unchanged reports nothing. Moves closer
+/// together than 2 ms never put a look off: the first comes 2 ms after the
+/// first move, the newest move's own 2 ms and 8 ms after it, and nothing
+/// more until the next sample.
 #[test]
 fn an_unchanged_shape_after_a_move_reports_nothing() {
     let ms = Duration::from_millis;
-    let (mut h, moved) = shape_session(true, true);
+    let (mut h, moved) = shape_session(true, false);
     let serial = h.shared.cursor.borrow().as_ref().unwrap().serial;
     let shapes = h.fake.shape_reads.load(Ordering::SeqCst);
     for x in 4..8 {
@@ -1144,24 +1167,94 @@ fn an_unchanged_shape_after_a_move_reports_nothing() {
     }
     h.run(ms(13), true);
     let last = moved + Duration::from_micros(1500);
-    assert_eq!(h.cursor_reads_after(moved), [moved + ms(2), last + ms(8)]);
-    assert_eq!(h.fake.shape_reads.load(Ordering::SeqCst), shapes + 2);
+    assert_eq!(
+        h.cursor_reads_after(moved),
+        [moved + ms(2), last + ms(2), last + ms(8)]
+    );
+    assert_eq!(h.fake.shape_reads.load(Ordering::SeqCst), shapes + 3);
     assert_eq!(h.shared.cursor.borrow().as_ref().unwrap().serial, serial);
 }
 
-/// Only a controller that reads shapes earns a look: a session whose
-/// viewer reads none, and a viewer that only watches, have the pointer read
-/// at the sample alone.
+/// A shape that answers an earlier move, whether a look or a sample finds
+/// it, leaves the newest move its own looks: the shape the app gives the
+/// pointer for that move still comes 2 ms or 8 ms after it, not at the next
+/// sample.
+#[test]
+fn a_shape_for_an_earlier_move_keeps_the_newest_moves_looks() {
+    let ms = Duration::from_millis;
+    let (hand, ibeam) = hand_and_ibeam();
+    let shown = |h: &Harness| h.shared.cursor.borrow().as_ref().unwrap().shape.clone();
+
+    // The app answers each of two moves 4 ms apart a millisecond after the
+    // second: the first move's answer at the second's first look, the
+    // second's at its late look.
+    let (mut h, start) = shape_session(true, false);
+    h.input(Input::Move { x: 4, y: 3 });
+    h.step();
+    h.run(ms(4), true);
+    h.input(Input::Move { x: 5, y: 3 });
+    h.step();
+    h.run(ms(1), true);
+    *h.fake.shape.lock() = Some(ibeam.clone());
+    assert_eq!(h.reported(), start + ms(6));
+    assert_eq!(shown(&h), Some(ibeam.clone()));
+    h.run(ms(3), true);
+    *h.fake.shape.lock() = Some(hand.clone());
+    assert_eq!(h.reported(), start + ms(12));
+    assert_eq!(shown(&h), Some(hand.clone()));
+
+    // The sample finds the answer to a move whose look found nothing, just
+    // after a newer move; the newer move's answer comes at its first look.
+    let (mut h, start) = shape_session(true, false);
+    h.run(ms(10), true);
+    h.input(Input::Move { x: 4, y: 3 });
+    h.step();
+    h.run(ms(5), true);
+    h.input(Input::Move { x: 5, y: 3 });
+    h.step();
+    h.run(Duration::from_micros(500), true);
+    *h.fake.shape.lock() = Some(hand.clone());
+    assert_eq!(h.reported(), start + ms(16));
+    h.run(Duration::from_micros(500), true);
+    *h.fake.shape.lock() = Some(ibeam.clone());
+    assert_eq!(h.reported(), start + ms(17));
+    assert_eq!(shown(&h), Some(ibeam));
+}
+
+/// A move taken after the look owed an earlier one fell due (thread C was
+/// busy past it) still gets its own look 2 ms after it: the overdue look
+/// runs at once, for the earlier move, and does not stand in for the newer
+/// move's.
+#[test]
+fn a_move_after_an_overdue_look_gets_its_own() {
+    let ms = Duration::from_millis;
+    let (_, ibeam) = hand_and_ibeam();
+    let (mut h, start) = shape_session(true, false);
+    h.input(Input::Move { x: 4, y: 3 });
+    h.step();
+    *h.now.lock() = start + ms(3);
+    h.input(Input::Move { x: 5, y: 3 });
+    h.step();
+    assert_eq!(h.cursor_reads_after(start), [start + ms(3)]);
+    h.run(ms(1), true);
+    *h.fake.shape.lock() = Some(ibeam);
+    assert_eq!(h.reported(), start + ms(5));
+}
+
+/// Only a controller that reads shapes earns a look: in a session whose
+/// viewers read none, and beside a watcher that reads them, the
+/// controller's move has the pointer read at the sample alone.
 #[test]
 fn no_look_without_a_controller_that_reads_shapes() {
-    for (shapes, control) in [(false, true), (true, false)] {
-        let (mut h, moved) = shape_session(shapes, control);
+    for watcher in [false, true] {
+        let (mut h, moved) = shape_session(false, watcher);
+        assert_eq!(h.engine.cursor_shapes, watcher);
         let shape_reads = h.fake.shape_reads.load(Ordering::SeqCst);
         h.input(Input::Move { x: 4, y: 3 });
         h.step();
-        assert_eq!(h.inputs(), usize::from(control));
+        assert_eq!(h.inputs(), 1);
         h.run(Duration::from_millis(15), true);
-        assert!(h.cursor_reads_after(moved).is_empty(), "{shapes} {control}");
+        assert!(h.cursor_reads_after(moved).is_empty(), "watcher {watcher}");
         assert_eq!(h.fake.shape_reads.load(Ordering::SeqCst), shape_reads);
     }
 }

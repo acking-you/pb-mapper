@@ -174,12 +174,13 @@ pub trait Backend: 'static {
     /// Thread C asks only in a session whose viewer reads shapes, right
     /// after `cursor` reported a visible pointer for `expected`: every 16 ms
     /// while it captures (once a period at a faster pace, down to 8 ms), and
-    /// 2 ms and 8 ms after it applied a move from a controller that reads
-    /// shapes; never while it is hidden or on another display,
-    /// when the viewer keeps the last shape. `Some` when the shape may have
-    /// changed since the last `Some` this backend returned (the first call:
-    /// the shape now); `None` when it is unchanged or unknown, which keeps
-    /// the last one. Tell a change by the cheapest identity the OS offers, a
+    /// 2 ms and 8 ms after the last move it applied from a controller that
+    /// reads shapes, or sooner for a look an earlier move left; never while
+    /// it is hidden or on another display, when the viewer keeps the last
+    /// shape. `Some` when the shape may have changed since the last `Some`
+    /// this backend returned (the first call: the shape now); `None` when it
+    /// is unchanged or unknown, which keeps the last one. Tell a change by
+    /// the cheapest identity the OS offers, a
     /// cursor handle, never by reading pixels each time: thread C compares
     /// the content itself. A failure keeps the last shape and does not end
     /// capture, except a lost link (`NotConnected`).
