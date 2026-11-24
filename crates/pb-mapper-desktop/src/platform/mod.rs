@@ -155,6 +155,11 @@ pub(crate) trait Desktop: Sized {
     fn display_matches_recent(&mut self, expected: &Display) -> Result<bool> {
         self.display_matches(expected)
     }
+    /// Nothing `prepare_recent` and `display_matches_recent` reuse answers
+    /// any more: the next of each checks now. After this backend's own
+    /// display mode change or restore, whose new geometry a check a moment
+    /// before would not see. By default nothing is reused, so nothing.
+    fn forget_recent(&mut self) {}
     fn generation(&self) -> u64 {
         0
     }

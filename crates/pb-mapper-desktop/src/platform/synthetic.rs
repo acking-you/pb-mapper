@@ -70,13 +70,15 @@ struct State {
 }
 
 /// How often each desktop check ran: a fresh one, and one that may answer
-/// from a check a moment ago (`Desktop::prepare_recent`).
+/// from a check a moment ago (`Desktop::prepare_recent`); and how often the
+/// backend said to reuse none (`Desktop::forget_recent`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Checks {
     pub prepare: u32,
     pub prepare_recent: u32,
     pub matches: u32,
     pub matches_recent: u32,
+    pub forgets: u32,
 }
 
 /// The test's clock.
@@ -332,6 +334,9 @@ impl Desktop for SynDesktop {
     fn display_matches_recent(&mut self, expected: &Display) -> Result<bool> {
         self.0.0.lock().checks.matches_recent += 1;
         Ok(&self.display()? == expected)
+    }
+    fn forget_recent(&mut self) {
+        self.0.0.lock().checks.forgets += 1;
     }
 }
 

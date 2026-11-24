@@ -4,7 +4,13 @@
 //! has; the manual checklist covers them.
 #![cfg(target_os = "macos")]
 
-use super::{desktop, encoder::Encoder, layout, modes::MacModes, reuse::Reuse};
+use super::{
+    desktop,
+    encoder::Encoder,
+    layout,
+    modes::MacModes,
+    reuse::{REUSE, Reuse},
+};
 use crate::{
     Key, VideoCodec, Waker,
     codec::{
@@ -22,6 +28,7 @@ use objc2_core_video::{
     kCVPixelBufferIOSurfacePropertiesKey, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
 };
 use std::{
+    cell::Cell,
     io::Write,
     ptr::NonNull,
     time::{Duration, Instant},
@@ -588,6 +595,114 @@ fn text_and_ramp(row: &mut [u8], y: usize, frame: u64) {
     for (x, pixel) in ramp.iter_mut().enumerate() {
         *pixel = (16 + (half + x + y) / 8 % 224) as u8;
     }
+}
+
+/// `MacDesktop` reads WindowServer for every check the injection boundary,
+/// a display mode change and the context check make (`prepare`, `display`,
+/// `display_matches`), and lets the checks around a capture or a pointer
+/// read (`prepare_recent`, `display_matches_recent`) take one that passed
+/// within `REUSE`; after a forget, as its own mode change makes, they read.
+/// Needs no grant. A runner without a display skips; where the session
+/// check fails (a locked screen), only its failure is checked, which is
+/// read every time and never reused.
+#[test]
+fn only_capture_and_the_pointer_reuse_a_mac_desktop_check() {
+    use crate::{DisplaySelection, platform::Desktop};
+
+    let Ok(display) = desktop::resolve(&DisplaySelection::Primary) else {
+        // Past the harness's capture, so that the log says so.
+        let _ = writeln!(
+            std::io::stderr(),
+            "skipped {}: this Mac has no active display",
+            module_path!()
+        );
+        return;
+    };
+    let mut mac = desktop::MacDesktop::open(&display).unwrap();
+    let expected = mac.display().unwrap();
+    let matches = |mac: &mut desktop::MacDesktop, recent: bool| {
+        let matched = if recent {
+            mac.display_matches_recent(&expected)
+        } else {
+            mac.display_matches(&expected)
+        };
+        assert!(matched.unwrap(), "the display changed during the test");
+    };
+
+    // The geometry: a fresh check reads every time, and renews what the
+    // recent ones take.
+    let fresh = reads_in(&mut mac, |mac| {
+        matches(mac, false);
+        matches(mac, false);
+        mac.display().unwrap();
+    });
+    assert_eq!(fresh, (0, 3));
+    let recent = reads_in(&mut mac, |mac| {
+        mac.forget_recent();
+        mac.display().unwrap();
+        matches(mac, true);
+        matches(mac, true);
+    });
+    assert_eq!(recent, (0, 1));
+    let forgot = reads_in(&mut mac, |mac| {
+        matches(mac, false);
+        mac.forget_recent();
+        matches(mac, true);
+        matches(mac, true);
+    });
+    assert_eq!(forgot, (0, 2));
+
+    // The session: the same, while it passes.
+    if let Err(failure) = mac.prepare(|| {}) {
+        let failing = reads_in(&mut mac, |mac| {
+            for _ in 0..2 {
+                let switched = Cell::new(false);
+                assert!(mac.prepare_recent(|| switched.set(true)).is_err());
+                assert!(switched.get(), "a failed check releases what is held");
+            }
+        });
+        assert_eq!(failing, (2, 0));
+        let _ = writeln!(
+            std::io::stderr(),
+            "{}: the session check fails here ({failure}): only its failure was checked",
+            module_path!()
+        );
+        return;
+    }
+    let fresh = reads_in(&mut mac, |mac| {
+        mac.prepare(|| {}).unwrap();
+        mac.prepare(|| {}).unwrap();
+    });
+    assert_eq!(fresh, (2, 0));
+    let recent = reads_in(&mut mac, |mac| {
+        mac.forget_recent();
+        mac.prepare(|| {}).unwrap();
+        mac.prepare_recent(|| {}).unwrap();
+        mac.prepare_recent(|| {}).unwrap();
+    });
+    assert_eq!(recent, (1, 0));
+    let forgot = reads_in(&mut mac, |mac| {
+        mac.prepare(|| {}).unwrap();
+        mac.forget_recent();
+        mac.prepare_recent(|| {}).unwrap();
+        mac.prepare_recent(|| {}).unwrap();
+    });
+    assert_eq!(forgot, (2, 0));
+}
+
+/// The WindowServer reads, of the session and of the geometry, that `round`
+/// makes of `mac` in a run that takes under `REUSE`: a run a stalled runner
+/// stretches past it proves nothing, and runs again.
+fn reads_in(mac: &mut desktop::MacDesktop, round: impl Fn(&mut desktop::MacDesktop)) -> (u32, u32) {
+    for _ in 0..5 {
+        let (before, started) = (mac.reads(), Instant::now());
+        round(mac);
+        let after = mac.reads();
+        if started.elapsed() < REUSE {
+            return (after.0 - before.0, after.1 - before.1);
+        }
+    }
+    panic!("five runs each took {REUSE:?} or more");
 }
 
 /// What the desktop check around each capture and pointer read costs thread

@@ -4,7 +4,8 @@
 //! session check: a locked screen, or a login switched away from the
 //! console, is the secure desktop, which an ordinary process cannot reach.
 //! Capture and the pointer reuse a check that passed within 16 ms
-//! ([`Reuse`]); input never does.
+//! ([`Reuse`]), until the session's own display mode change or restore;
+//! input never does.
 
 use super::{cf, geometry::Geometry, reuse::Reuse};
 use crate::{BackendError, Display, DisplaySelection, FailureKind, Result, platform::Desktop};
@@ -160,6 +161,28 @@ pub(crate) struct MacDesktop {
     /// The last passing session check, and the last geometry read with the
     /// id it was read under, which capture and the pointer reuse.
     reuse: Reuse<(CGDirectDisplayID, Geometry)>,
+    reads: Reads,
+}
+
+/// How many times a desktop read WindowServer, of the session and of the
+/// geometry: counted in tests, and nothing in other builds.
+#[derive(Default)]
+struct Reads {
+    #[cfg(test)]
+    session: Cell<u32>,
+    #[cfg(test)]
+    geometry: Cell<u32>,
+}
+
+impl Reads {
+    fn count_session(&self) {
+        #[cfg(test)]
+        self.session.set(self.session.get() + 1);
+    }
+    fn count_geometry(&self) {
+        #[cfg(test)]
+        self.geometry.set(self.geometry.get() + 1);
+    }
 }
 
 impl MacDesktop {
@@ -181,6 +204,7 @@ impl MacDesktop {
             name: uuid(id).unwrap_or_else(|| display.name.clone()),
             geometry: Rc::new(Cell::new(geometry)),
             reuse: Reuse::default(),
+            reads: Reads::default(),
         })
     }
 
@@ -188,10 +212,21 @@ impl MacDesktop {
         self.geometry.clone()
     }
 
+    /// The WindowServer reads this desktop made so far: of the session, and
+    /// of the geometry.
+    #[cfg(test)]
+    pub(super) fn reads(&self) -> (u32, u32) {
+        (self.reads.session.get(), self.reads.geometry.get())
+    }
+
     /// The session check, reused within 16 ms of a pass when `recent`.
     fn session(&mut self, recent: bool, on_switch: impl FnOnce()) -> Result<()> {
+        let reads = &self.reads;
         self.reuse
-            .session(Instant::now(), recent, available)
+            .session(Instant::now(), recent, || {
+                reads.count_session();
+                available()
+            })
             .inspect_err(|_| on_switch())
     }
 
@@ -203,11 +238,15 @@ impl MacDesktop {
             name,
             geometry,
             reuse,
+            reads,
         } = self;
         reuse.matches(
             Instant::now(),
             recent,
-            || read_geometry(id, name, geometry),
+            || {
+                reads.count_geometry();
+                read_geometry(id, name, geometry)
+            },
             |(read_as, read)| read.matches(*read_as, name, expected),
         )
     }
@@ -250,8 +289,12 @@ impl Desktop for MacDesktop {
             name,
             geometry,
             reuse,
+            reads,
         } = self;
-        let (id, read) = reuse.geometry(Instant::now(), || read_geometry(id, name, geometry))?;
+        let (id, read) = reuse.geometry(Instant::now(), || {
+            reads.count_geometry();
+            read_geometry(id, name, geometry)
+        })?;
         Ok(read.display(id, name.clone()))
     }
     fn display_matches(&mut self, expected: &Display) -> Result<bool> {
@@ -259,5 +302,8 @@ impl Desktop for MacDesktop {
     }
     fn display_matches_recent(&mut self, expected: &Display) -> Result<bool> {
         self.matches(expected, true)
+    }
+    fn forget_recent(&mut self) {
+        self.reuse.forget();
     }
 }

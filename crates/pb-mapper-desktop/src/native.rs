@@ -416,8 +416,13 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         // Capture loses its device across the change; the source is built
         // again at the new size.
         self.video = None;
-        self.modes
-            .set(&mut self.parts.modes, &expected.display.name, mode)
+        let set = self
+            .modes
+            .set(&mut self.parts.modes, &expected.display.name, mode);
+        // A check from before the change, made or failed, no longer answers
+        // capture and the pointer.
+        self.parts.desktop.forget_recent();
+        set
     }
     fn restore_display_mode(&mut self) -> Result<bool> {
         if !<P::Modes as DisplayModes>::SUPPORTED {
@@ -425,7 +430,10 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         }
         let _scope = self.parts.desktop.scope();
         let video = &mut self.video;
-        self.modes.restore(&mut self.parts.modes, || *video = None)
+        let restored = self.modes.restore(&mut self.parts.modes, || *video = None);
+        // As after a change: the display may be another size now.
+        self.parts.desktop.forget_recent();
+        restored
     }
 }
 impl<P: Platform> Drop for PlatformBackend<P> {
@@ -581,7 +589,8 @@ mod tests {
 
     /// Capture and the pointer let the platform answer from a desktop check
     /// that passed a moment ago; the injection boundary, a display mode
-    /// change and the context check always check the desktop now.
+    /// change and the context check always check the desktop now, and a
+    /// mode change or restore leaves nothing to reuse.
     #[test]
     fn only_capture_and_the_pointer_may_reuse_a_desktop_check() {
         let probe = Probe::default();
@@ -624,12 +633,20 @@ mod tests {
             .input_in_context(&context, &Input::Move { x: 3, y: 4 })
             .unwrap();
         assert_eq!(probe.checks(), fresh(1));
-        // With no journal it changes nothing, after its check.
+        // With no journal it changes nothing, after its check; a change,
+        // made or failed, and a restore leave capture and the pointer
+        // nothing to reuse.
         let mode = Mode {
             width: 32,
             height: 24,
         };
         assert!(backend.set_display_mode(&context, mode).is_err());
-        assert_eq!(probe.checks(), fresh(1));
+        let forgot = |checks| Checks {
+            forgets: 1,
+            ..checks
+        };
+        assert_eq!(probe.checks(), forgot(fresh(1)));
+        assert!(!backend.restore_display_mode().unwrap());
+        assert_eq!(probe.checks(), forgot(Checks::default()));
     }
 }

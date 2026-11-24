@@ -5,9 +5,10 @@
 //! trip, the session dictionary the costly one. A check that passed within
 //! [`REUSE`] answers those instead, so a 60 FPS session reads WindowServer
 //! about once a frame rather than four times. A failure is never reused,
-//! and forgets what passed: the next check reads again. Every check that
-//! reads (the injection boundary's, for each input, and the context check's)
-//! renews what the others reuse.
+//! and forgets what passed: the next check reads again, as after the
+//! backend's own display mode change or restore. Every check that reads (the
+//! injection boundary's, for each input, and the context check's) renews
+//! what the others reuse.
 //!
 //! Pure, with the time passed in: built and tested on every platform.
 
@@ -87,7 +88,7 @@ impl<G: Copy> Reuse<G> {
     }
 
     /// Nothing is reused until a check passes again.
-    fn forget(&mut self) {
+    pub(crate) fn forget(&mut self) {
         self.session = None;
         self.geometry = None;
     }
@@ -231,6 +232,22 @@ mod tests {
         let back = at + Duration::from_millis(6);
         assert!(verify(&mut reuse, &calls, back, true, Some(7)).unwrap());
         assert_eq!(calls.counts(), (7, 4));
+    }
+
+    /// After a forget, as the backend's own display mode change makes one,
+    /// the next check of each kind reads, even within 16 ms of a pass.
+    #[test]
+    fn a_forget_leaves_nothing_to_reuse() {
+        let at = Instant::now();
+        let (mut reuse, calls) = (Reuse::default(), Calls::default());
+        assert!(verify(&mut reuse, &calls, at, false, Some(7)).unwrap());
+        reuse.forget();
+        let soon = at + Duration::from_millis(1);
+        assert!(verify(&mut reuse, &calls, soon, true, Some(7)).unwrap());
+        assert_eq!(calls.counts(), (2, 2));
+        let later = at + Duration::from_millis(2);
+        assert!(verify(&mut reuse, &calls, later, true, Some(7)).unwrap());
+        assert_eq!(calls.counts(), (2, 2));
     }
 
     /// Only a fit is reused: a display that no longer fits the context is
