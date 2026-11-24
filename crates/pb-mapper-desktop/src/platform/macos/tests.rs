@@ -422,6 +422,48 @@ fn a_bitrate_set_during_an_encode_returns_at_once_and_reaches_the_session() {
     assert_eq!(encoder.average_bitrate(), Some(20_000_000));
 }
 
+/// A low-latency session lets rate control give a picture a QP up to 51,
+/// so that it codes a picture it would otherwise drop. Without the bound a
+/// low-latency session reads back none (VideoToolbox keeps its own, lower);
+/// standard rate control's own already reads back 51. A Mac that refuses
+/// low latency, or reads back no bound, is reported.
+#[test]
+fn a_low_latency_session_lets_rate_control_reach_qp_51() {
+    let wake = Wake::new();
+    let waker = Waker(wake.clone());
+    let low_latency = |max_qp| {
+        let options = Options {
+            low_latency: true,
+            capped: true,
+            quality: false,
+            max_qp,
+        };
+        Encoder::tuned(VideoCodec::H264, 640, 360, 30, 2_000_000, &waker, options)
+    };
+    let (bound, unbound) = match (low_latency(true), low_latency(false)) {
+        (Ok(bound), Ok(unbound)) => (bound, unbound),
+        (Err(failure), _) | (_, Err(failure)) => {
+            // Past the harness's capture, so that the log says so.
+            let _ = writeln!(
+                std::io::stderr(),
+                "{}: this Mac refuses low latency: {failure}",
+                module_path!()
+            );
+            return;
+        }
+    };
+    let Some(qp) = bound.max_qp() else {
+        let _ = writeln!(
+            std::io::stderr(),
+            "{}: this Mac's encoder reads back no QP bound",
+            module_path!()
+        );
+        return;
+    };
+    assert_eq!(qp, 51);
+    assert_ne!(unbound.max_qp(), Some(51));
+}
+
 /// Thread C's waits end on time where the kernel coalesces the process's
 /// timers: on a CI runner a 2 ms condition-variable wait ended 8 ms late,
 /// while this waiter's critical timer ends within about 1 ms.

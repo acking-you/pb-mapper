@@ -882,6 +882,14 @@ impl Encoder {
         .and_then(|bitrate| bitrate.as_i64())
     }
 
+    /// The highest QP the session's rate control may give a picture, read
+    /// back while the submit thread idles; `None` where it has no bound of
+    /// ours.
+    #[cfg(test)]
+    pub(super) fn max_qp(&self) -> Option<i64> {
+        get::<CFNumber>(&self.session, cf::symbol(MAX_QP)?).and_then(|qp| qp.as_i64())
+    }
+
     /// Outputs VideoToolbox dropped, ever.
     #[cfg(test)]
     pub(super) fn dropped(&self) -> u64 {
