@@ -346,7 +346,9 @@ Nothing in the SDK crates knows it exists.
   - `viewer/`: The viewer — `mod.rs` connects, `session.rs` runs its network
     session, `config.rs` is what it offers, `outbound.rs` what it sends in
     priority order, `recovery.rs` and `fps_cap.rs` its keyframe recovery and
-    frame-rate cap, `stats.rs` and `status.rs` what it reports — and in
+    frame-rate cap, which the window's display bounds
+    (`Viewer::set_display_refresh`), `stats.rs` and `status.rs` what it
+    reports — and in
     `sink.rs` its one hand-off to a native consumer, which is also where a
     presentation is validated. A direct path's `ViewerLink` carries its
     `transport`; over TCP its round trips are only the handshake's
@@ -834,6 +836,13 @@ The design and its rules are in `docs/ui-design.md`.
     decodes and its fastest refresh; the store offers H.265 and the
     frame-rate choices from it. A probe that fails or does not answer is no
     decoder (JPEG) except on Android (`unprobedDesktopDecoders`)
+  - `display_refresh.dart`: `DisplayRefresh`, the refresh rate of the
+    display the window is on, which a viewer on macOS, Windows and Linux
+    sends as `display_refresh` once connected and whenever it changes:
+    Flutter's view display on macOS, and on Windows and Linux the runner's
+    `refresh_hz` on the `pb_mapper/desktop_video` channel, where its
+    `decoders` answer says `window_refresh`, read again when the runner
+    calls `display_changed`
   - `remote_computer_vault.dart`: `RemoteComputerVault`, the `computers_*`
     ops below, and on Android the `pb_mapper/keystore` channel that unlocks
     them; records cross without their invitations
@@ -862,9 +871,10 @@ The design and its rules are in `docs/ui-design.md`.
     `inspect_invitation`, `connect`, `disconnect`) under `block_on`, so only
     a background isolate calls it. `pb_mapper_desktop_viewer_call_json`
     takes the viewer's closed set of hot ops (`viewer_status`, `control`,
-    `release`, `input`, `keyframe`, `quality`, `pause`, `resume`,
-    `display_mode`, `cursor_shape`, which returns a shape's kind, hotspot,
-    size and base64 RGBA when the number changes): it never enters the
+    `release`, `input`, `keyframe`, `quality`, `display_refresh`, which
+    takes the hertz of the display the viewer window is on, `pause`,
+    `resume`, `display_mode`, `cursor_shape`, which returns a shape's kind,
+    hotspot, size and base64 RGBA when the number changes): it never enters the
     runtime, awaits or takes a tokio lock, so the UI isolate calls it, as it calls
     the view leaf. Errors are typed `ErrorCode`s (`error.rs`), never text to
     match; a physical key toward a host that does not take them is

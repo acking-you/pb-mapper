@@ -9,6 +9,7 @@ import 'package:flutter/widgets.dart';
 
 import '../ffi/desktop_api.dart';
 import '../ffi/desktop_video.dart';
+import '../ffi/display_refresh.dart';
 import 'desktop_input.dart';
 
 export '../ffi/desktop_api.dart'
@@ -267,21 +268,25 @@ final class DesktopPointerShape {
 class DesktopStore {
   /// [now] dates the scheduled retry ([DesktopSessionView.retryAt]);
   /// [onRestartReady] is called once the helper's hand-off is ready and the
-  /// app must restart into it.
+  /// app must restart into it. [displayRefresh] reads the window's display
+  /// rate, this platform's by default.
   DesktopStore(
     this._api, {
     DesktopTextureFactory? textures,
     DateTime Function()? now,
     void Function()? onRestartReady,
+    DisplayRefresh? displayRefresh,
   }) : _textures = textures ?? createDesktopVideoTexture,
        _now = now ?? DateTime.now,
-       _onRestartReady = onRestartReady {
+       _onRestartReady = onRestartReady,
+       _displayRefresh = displayRefresh ?? DisplayRefresh.platform() {
     _geometry.addListener(_publishCursor);
     _hostChanges = _api.hostChanges.listen((_) => _onHostChanged());
   }
 
   final DesktopApiClient _api;
   final DesktopTextureFactory _textures;
+  final DisplayRefresh _displayRefresh;
   final DateTime Function() _now;
   final void Function()? _onRestartReady;
 
@@ -1329,6 +1334,15 @@ class DesktopStore {
       await _disconnectNative();
       if (_disposed || serial != _serial) return;
       final decoders = _decoders.value ?? await _probeDecoders();
+      // The window's display is the runner's to read where it said so.
+      // Watched from before the read on, so that a change during it or the
+      // connect is seen; only the runner's rate is waited for.
+      final runner = _displayRefresh.follows && decoders.windowRefresh;
+      _watchRefresh(runner: runner);
+      _refreshMissed = false;
+      final windowHz = runner
+          ? await _displayRefresh.read(runner: true)
+          : _refreshHz();
       // Read after the waits: a change meanwhile applies to this attempt.
       final target = _target;
       if (_disposed || target == null || serial != _serial) return;
@@ -1336,12 +1350,18 @@ class DesktopStore {
       // Rust fits the limits inside the decoder offered first: never a
       // size it cannot take.
       final offer = h265 ? decoders : decoders.withoutH265();
+      // A viewer that follows its window's display connects at the fastest
+      // display's rate, so that moving to it raises the frame rate without
+      // a reconnect; the window's own rate follows the connect.
+      final connectHz = _displayRefresh.follows
+          ? math.max(windowHz, decoders.displayMaxHz ?? windowHz)
+          : windowHz;
       final session = await _api.connect(
         target.invitation,
         computerId: target.computerId,
         relayOnly: target.relayOnly,
         quality: _quality.value,
-        refreshHz: _refreshHz(),
+        refreshHz: connectHz,
         decoders: offer,
         resolution: target.resolution,
         maxFps: target.maxFps,
@@ -1359,6 +1379,17 @@ class DesktopStore {
       }
       _attemptSerial = null;
       _media = session;
+      // The connect told Rust its rate; the window's display, as it is now,
+      // goes if it differs: Flutter's read again, or the runner's read
+      // before the connect, and read again if the display may have changed
+      // while the connect ran.
+      _sentRefreshHz = connectHz;
+      if (runner) {
+        _offerRefresh(windowHz);
+        if (_refreshMissed) unawaited(_followRefresh());
+      } else if (_displayRefresh.follows) {
+        _offerRefresh(_refreshHz());
+      }
       _stopHandled = false;
       _nativePaused = false;
       _controlSuppressed = false;
@@ -2417,13 +2448,76 @@ class DesktopStore {
     }
   }
 
-  double _refreshHz() {
+  double _refreshHz() => DisplayRefresh.flutterHz();
+
+  // ------------------------------------------------- the window's display
+
+  /// Stops following the window's display; null until the first connect.
+  VoidCallback? _unwatchRefresh;
+
+  /// The display rate the current Rust viewer was told last, the connect's
+  /// included.
+  double? _sentRefreshHz;
+  bool _refreshReading = false, _refreshAgain = false;
+
+  /// The window's display may have changed while no session could be told,
+  /// during a connect: the connect reads it again once one can.
+  bool _refreshMissed = false;
+
+  /// The runner reads the window's display ([DesktopDecoders.windowRefresh]).
+  bool _refreshFromRunner = false;
+
+  /// From the first connect on, where the viewer follows its window's
+  /// display: whenever that may have changed, it is read again, from the
+  /// runner once a probe said it reads it.
+  void _watchRefresh({required bool runner}) {
+    if (!_displayRefresh.follows) return;
+    if (_unwatchRefresh != null && runner == _refreshFromRunner) return;
+    _unwatchRefresh?.call();
+    _refreshFromRunner = runner;
+    _unwatchRefresh = _displayRefresh.watch(
+      () => unawaited(_followRefresh()),
+      runner: runner,
+    );
+  }
+
+  /// Reads the window's display rate, one read at a time, and offers it to
+  /// the session; a change during a read reads again after it.
+  Future<void> _followRefresh() async {
+    if (_refreshReading) {
+      _refreshAgain = true;
+      return;
+    }
+    _refreshReading = true;
     try {
-      final views = ui.PlatformDispatcher.instance.views;
-      final hz = views.isEmpty ? 60.0 : views.first.display.refreshRate;
-      return hz.isFinite && hz > 0 ? hz : 60;
+      do {
+        _refreshAgain = false;
+        if (_disposed) return;
+        if (_media == null) {
+          _refreshMissed = true;
+          return;
+        }
+        _offerRefresh(await _displayRefresh.read(runner: _refreshFromRunner));
+      } while (_refreshAgain);
+    } finally {
+      _refreshReading = false;
+    }
+  }
+
+  /// Tells the session's viewer [hz] when that is not what it was told
+  /// last (`display_refresh`).
+  void _offerRefresh(double hz) {
+    if (_disposed) return;
+    if (_media == null) {
+      _refreshMissed = true;
+      return;
+    }
+    if (hz == _sentRefreshHz) return;
+    try {
+      _api.setDisplayRefresh(hz);
+      _sentRefreshHz = hz;
     } catch (_) {
-      return 60;
+      // A stopped viewer needs no rate; the next connect reads it again.
     }
   }
 
@@ -2756,6 +2850,8 @@ class DesktopStore {
     _moveGate?.cancel();
     _framed.remove(this);
     _lifecycle?.dispose();
+    _unwatchRefresh?.call();
+    _unwatchRefresh = null;
     unawaited(_jpeg?.cancel());
     _jpeg = null;
     final texture = _texture;

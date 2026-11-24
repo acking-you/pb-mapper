@@ -817,6 +817,25 @@ impl Viewer {
         self.shared.outbound.quality(preset);
     }
 
+    /// The refresh rate of the display the viewer's window is on, whenever
+    /// it changes: the window moved to another display, or the display's
+    /// mode changed. From the next viewer tick the host is asked for no more
+    /// frames a second than that display shows, within `limits.max_fps`,
+    /// with the existing `FpsCap`; a frame rate the user chose
+    /// (`fps_override`) ignores it. Rounded and clamped as
+    /// [`VideoLimits::choose`](crate::VideoLimits::choose) takes the rate at
+    /// connect, so 59.94 Hz asks 60; a rate that is not finite and positive
+    /// is ignored, and so is every rate on Android, where `choose` asks 60
+    /// whatever the display reports.
+    pub fn set_display_refresh(&self, hz: f64) {
+        if cfg!(target_os = "android") {
+            return;
+        }
+        if let Some(fps) = crate::video::refresh_fps(hz) {
+            self.sink.set_display_fps(fps);
+        }
+    }
+
     /// Change the host display's real mode, live: never a reconnect. The
     /// picture comes back at the new size in a new generation, from an IDR.
     /// `FitLocal` takes the mode that best fits this viewer's display

@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cwchar>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -254,13 +255,10 @@ Value HevcLimit(IDXGIAdapter* adapter) {
   return Value();
 }
 
-// The fastest refresh among the displays as they are set now: the viewer
-// presents at its display's rate, and the window may move to the fastest.
-// The active display paths give the exact rate, 59.94 Hz as Android reports
-// it; a process outside the console session (a remote session) cannot query
-// them and falls back to the display modes, which round down to whole hertz.
-double DisplayMaxHz() {
-  double fastest = 0;
+// The active display paths, which give each display's exact refresh (59.94
+// Hz as 60000/1001); empty where they cannot be queried, as from a process
+// outside the console session (a remote session).
+std::vector<DISPLAYCONFIG_PATH_INFO> ActiveDisplayPaths() {
   std::vector<DISPLAYCONFIG_PATH_INFO> paths;
   std::vector<DISPLAYCONFIG_MODE_INFO> modes;
   LONG status = ERROR_INSUFFICIENT_BUFFER;
@@ -274,29 +272,72 @@ double DisplayMaxHz() {
     status = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(), &mode_count, modes.data(), nullptr);
     paths.resize(path_count);
   }
-  if (status == ERROR_SUCCESS) {
-    for (const auto& path : paths) {
-      const auto& rate = path.targetInfo.refreshRate;
-      if (rate.Denominator) fastest = std::max(fastest, static_cast<double>(rate.Numerator) / rate.Denominator);
-    }
-  }
+  if (status != ERROR_SUCCESS) paths.clear();
+  return paths;
+}
+
+// A path's target refresh in hertz; 0 when it gives none.
+double PathRefreshHz(const DISPLAYCONFIG_PATH_INFO& path) {
+  const auto& rate = path.targetInfo.refreshRate;
+  return rate.Denominator ? static_cast<double>(rate.Numerator) / rate.Denominator : 0;
+}
+
+// The refresh of the display `device` names (a monitor's szDevice) by its
+// mode, which rounds down to whole hertz (59 for 59.94); 0 when it says
+// nothing: 0 and 1 mean the hardware's default rate.
+double ModeRefreshHz(const wchar_t* device) {
+  DEVMODEW mode{};
+  mode.dmSize = sizeof(mode);
+  if (!EnumDisplaySettingsW(device, ENUM_CURRENT_SETTINGS, &mode) || mode.dmDisplayFrequency <= 1) return 0;
+  return static_cast<double>(mode.dmDisplayFrequency);
+}
+
+// The fastest refresh among the displays as they are set now: the viewer
+// presents at its display's rate, and the window may move to the fastest.
+// The active display paths give the exact rate, 59.94 Hz as Android reports
+// it; a process outside the console session (a remote session) cannot query
+// them and falls back to the display modes, which round down to whole hertz.
+double DisplayMaxHz() {
+  double fastest = 0;
+  for (const auto& path : ActiveDisplayPaths()) fastest = std::max(fastest, PathRefreshHz(path));
   if (fastest > 1) return fastest;
   // No path gave a rate: read the modes.
   fastest = 0;
   EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
     MONITORINFOEXW info{};
     info.cbSize = sizeof(info);
-    DEVMODEW mode{};
-    mode.dmSize = sizeof(mode);
-    // 0 and 1 mean the hardware's default rate, which says nothing.
-    if (GetMonitorInfoW(monitor, &info) && EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode) &&
-        mode.dmDisplayFrequency > 1) {
+    if (GetMonitorInfoW(monitor, &info)) {
       auto& rate = *reinterpret_cast<double*>(data);
-      rate = std::max(rate, static_cast<double>(mode.dmDisplayFrequency));
+      rate = std::max(rate, ModeRefreshHz(info.szDevice));
     }
     return TRUE;
   }, reinterpret_cast<LPARAM>(&fastest));
   return fastest > 0 ? fastest : 60.0;
+}
+
+// The refresh of the display `window` is on (the nearest, for a window
+// across two), exactly: the active path whose source is that monitor's GDI
+// device, 59.94 or 119.88 Hz where Flutter's display, read from the mode,
+// says 59 or 119; the fastest such path for a display cloned to several.
+// Without the paths, the mode's whole hertz; 0 when nothing says.
+double WindowRefreshHz(HWND window) {
+  const HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+  MONITORINFOEXW info{};
+  info.cbSize = sizeof(info);
+  if (!monitor || !GetMonitorInfoW(monitor, &info)) return 0;
+  double exact = 0;
+  for (const auto& path : ActiveDisplayPaths()) {
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+    source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+    source.header.size = sizeof(source);
+    source.header.adapterId = path.sourceInfo.adapterId;
+    source.header.id = path.sourceInfo.id;
+    if (DisplayConfigGetDeviceInfo(&source.header) == ERROR_SUCCESS &&
+        wcsncmp(source.viewGdiDeviceName, info.szDevice, CCHDEVICENAME) == 0) {
+      exact = std::max(exact, PathRefreshHz(path));
+    }
+  }
+  return exact > 1 ? exact : ModeRefreshHz(info.szDevice);
 }
 
 // The `decoders` reply: which codecs this computer decodes natively, each up
@@ -315,7 +356,12 @@ Map ProbeDecoders(IDXGIAdapter* adapter) {
     }
     if (SUCCEEDED(com)) CoUninitialize();
   }
-  return {{Value("h264"), h264}, {Value("h265"), h265}, {Value("display_max_hz"), Value(DisplayMaxHz())}};
+  // `window_refresh`: this runner answers `refresh_hz` and calls
+  // `display_changed`, so Dart follows the window's display through it.
+  return {{Value("h264"), h264},
+          {Value("h265"), h265},
+          {Value("display_max_hz"), Value(DisplayMaxHz())},
+          {Value("window_refresh"), Value(true)}};
 }
 
 struct SnapshotRequest {
@@ -1149,6 +1195,14 @@ class Viewer : public std::enable_shared_from_this<Viewer> {
 
 struct DesktopVideo::Impl {
   flutter::FlutterEngine* engine;
+  // Flutter's view, whose display the viewer presents on.
+  HWND view;
+  // The monitor `view` was on when last looked at, once Dart follows it.
+  // Platform thread only.
+  HMONITOR monitor = nullptr;
+  // Dart asked `refresh_hz`, so it listens for `display_changed`. Platform
+  // thread only.
+  bool following = false;
   flutter::PluginRegistrarWindows* registrar;
   std::unique_ptr<flutter::MethodChannel<Value>> channel;
   // Resolved by the first create: Dart has loaded the DLL by then.
@@ -1161,13 +1215,25 @@ struct DesktopVideo::Impl {
   bool probing = false;
   // Platform thread only.
   std::thread probe;
-  Impl(flutter::FlutterEngine* value, HWND window) : engine(value), replies(std::make_shared<Replies>(window)) {
+  Impl(flutter::FlutterEngine* value, HWND window, HWND view_window)
+      : engine(value), view(view_window), replies(std::make_shared<Replies>(window)) {
     registrar = flutter::PluginRegistrarManager::GetInstance()->GetRegistrar<flutter::PluginRegistrarWindows>(engine->GetRegistrarForPlugin("PbMapperDesktopVideo"));
     channel = std::make_unique<flutter::MethodChannel<Value>>(engine->messenger(), "pb_mapper/desktop_video", &flutter::StandardMethodCodec::GetInstance());
     channel->SetMethodCallHandler([this](const auto& call, auto result) {
       try {
         if (call.method_name() == "decoders") {
           Decoders(std::move(result));
+          return;
+        }
+        // The exact refresh of the display the view is on, which Dart sends
+        // the viewer; null when nothing says. No arguments. Dart follows the
+        // display from the first call, so `display_changed` goes from then
+        // on, for a monitor other than this one.
+        if (call.method_name() == "refresh_hz") {
+          following = true;
+          monitor = MonitorFromWindow(view, MONITOR_DEFAULTTONEAREST);
+          const double hz = WindowRefreshHz(view);
+          result->Success(hz > 1 ? Value(hz) : Value());
           return;
         }
         const auto* args = call.arguments() ? std::get_if<Map>(call.arguments()) : nullptr;
@@ -1199,11 +1265,12 @@ struct DesktopVideo::Impl {
         else if (call.method_name() == "dispose") { viewers.erase(found); viewer->Close(); result->Success(); }
         else if (call.method_name() == "stats") {
           // `timings` is optional and true when absent, as on macOS, which
-          // also adds the refresh here.
+          // also adds the refresh here: the view's display's, as there.
           const auto timings = args->find(Value("timings"));
           const auto* wanted = timings == args->end() ? nullptr : std::get_if<bool>(&timings->second);
           auto stats = viewer->Stats(!wanted || *wanted);
-          stats[Value("refreshHz")] = Value(DisplayMaxHz());
+          const double hz = WindowRefreshHz(view);
+          stats[Value("refreshHz")] = Value(hz > 1 ? hz : DisplayMaxHz());
           result->Success(Value(std::move(stats)));
         }
         else result->NotImplemented();
@@ -1241,6 +1308,17 @@ struct DesktopVideo::Impl {
       for (auto& reply : waiting) replies->Send(std::move(reply), answer);
     });
   }
+  // The window moved, or a display changed: once Dart follows the display,
+  // when the view is on another monitor than before, or any display's mode
+  // changed, Dart is told (`display_changed`, no arguments) and reads
+  // `refresh_hz` again.
+  void DisplayMaybeChanged(bool moved) {
+    if (!following) return;
+    const HMONITOR now = MonitorFromWindow(view, MONITOR_DEFAULTTONEAREST);
+    if (moved && now == monitor) return;
+    monitor = now;
+    channel->InvokeMethod("display_changed", std::make_unique<Value>());
+  }
   // D9: Dart and this runner must reach one library instance, or the decoder
   // would pull from a registry Dart never filled. Fails closed.
   void CheckInstance(uint64_t dart) {
@@ -1254,10 +1332,22 @@ struct DesktopVideo::Impl {
   }
 };
 
-DesktopVideo::DesktopVideo(flutter::FlutterEngine* engine, HWND window) : impl_(std::make_unique<Impl>(engine, window)) {}
+DesktopVideo::DesktopVideo(flutter::FlutterEngine* engine, HWND window, HWND view)
+    : impl_(std::make_unique<Impl>(engine, window, view)) {}
 DesktopVideo::~DesktopVideo() = default;
 bool DesktopVideo::HandleMessage(UINT message) {
-  if (message != kWake) return false;
-  impl_->replies->Drain();
-  return true;
+  switch (message) {
+    case kWake:
+      impl_->replies->Drain();
+      return true;
+    // Seen, not handled: the window goes on with them.
+    case WM_MOVE:
+      impl_->DisplayMaybeChanged(true);
+      return false;
+    case WM_DISPLAYCHANGE:
+      impl_->DisplayMaybeChanged(false);
+      return false;
+    default:
+      return false;
+  }
 }

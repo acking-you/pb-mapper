@@ -638,6 +638,14 @@ abstract interface class DesktopApiClient {
   bool requestKeyframe();
   void setQuality(DesktopQuality quality);
 
+  /// The refresh rate of the display the viewer window is on, in hertz,
+  /// exact where the runner reads it (59.94): the computer is asked for no
+  /// more frames a second than that display shows, unless the user chose
+  /// the frame rate. Sent once after connect and whenever it changes;
+  /// nothing without a viewer. Throws [DesktopCallException]
+  /// `INVALID_ARGUMENT` for a rate that is not a positive number.
+  void setDisplayRefresh(double hz);
+
   /// Changes the remote display's mode, live, never a reconnect (R8); returns
   /// the mode asked for. Throws [DesktopCallException]
   /// `DISPLAY_MODE_NOT_OFFERED`, `NOT_CONTROLLING`, `DISPLAY_MODE_NO_FIT`,
@@ -966,6 +974,9 @@ class DesktopApi implements DesktopApiClient {
   @override
   void setQuality(DesktopQuality quality) =>
       _hot('quality', {'preset': quality.name});
+
+  @override
+  void setDisplayRefresh(double hz) => _hot('display_refresh', {'hz': hz});
 
   @override
   DisplayMode setDisplayMode(DisplayModeTarget target) {

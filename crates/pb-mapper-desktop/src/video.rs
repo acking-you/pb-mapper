@@ -76,12 +76,8 @@ impl VideoLimits {
             fps.clamp(MIN_VIEWER_FPS, MAX_FPS)
         } else if cfg!(target_os = "android") {
             60
-        } else if refresh_hz.is_finite() && refresh_hz > 0.0 {
-            refresh_hz
-                .round()
-                .clamp(f64::from(MIN_VIEWER_FPS), f64::from(MAX_FPS)) as u32
         } else {
-            60
+            refresh_fps(refresh_hz).unwrap_or(60)
         };
         let (max_width, max_height) = resolution.bounds();
         Self {
@@ -106,6 +102,19 @@ impl VideoLimits {
             ..self
         }
     }
+}
+
+/// The frame rate a display's refresh rate asks for: rounded to whole
+/// frames, so that a 59.94 or 119.88 Hz mode asks 60 or 120 and does not
+/// hold a 60 or 120 Hz host a frame a second below its own rate, within
+/// `MIN_VIEWER_FPS..=MAX_FPS`. `None` for a rate that is not finite and
+/// positive.
+pub(crate) fn refresh_fps(refresh_hz: f64) -> Option<u32> {
+    (refresh_hz.is_finite() && refresh_hz > 0.0).then(|| {
+        refresh_hz
+            .round()
+            .clamp(f64::from(MIN_VIEWER_FPS), f64::from(MAX_FPS)) as u32
+    })
 }
 
 /// The largest picture a viewer asks for. The host keeps the display's
@@ -201,4 +210,35 @@ pub struct VideoFormat {
 pub struct EncodedFrame {
     pub format: VideoFormat,
     pub bytes: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A display's fractional mode asks the whole rate it stands for: 59.94
+    /// Hz asks 60 and 119.88 Hz 120, where a whole-hertz reading (59, 119)
+    /// would hold a 60 or 120 Hz host a frame a second below its rate. A
+    /// rate beyond the bounds is clamped, and one that is no rate is
+    /// ignored.
+    #[test]
+    fn a_fractional_refresh_asks_the_whole_frame_rate() {
+        for (hz, fps) in [
+            (59.94, Some(60)),
+            (119.88, Some(120)),
+            (59.0, Some(59)),
+            (143.98, Some(MAX_FPS)),
+            (24.0, Some(MIN_VIEWER_FPS)),
+            (0.0, None),
+            (-60.0, None),
+            (f64::NAN, None),
+            (f64::INFINITY, None),
+        ] {
+            assert_eq!(refresh_fps(hz), fps, "{hz}");
+        }
+        if !cfg!(target_os = "android") {
+            let at = |hz| VideoLimits::choose(hz, Resolution::Native, None).max_fps;
+            assert_eq!((at(59.94), at(119.88), at(f64::NAN)), (60, 120, 60));
+        }
+    }
 }
