@@ -7,16 +7,26 @@
 // (ui/windows/runner/desktop_video.cpp) and the Android one (DesktopVideo.kt,
 // VideoFeeder.kt). While a source is attached, a decoder thread pulls H.264
 // or H.265 access units straight from Rust (the pb_mapper_desktop_video_*_v1
-// exports of ui/native/pb_mapper_ffi/src/desktop_video.rs), decodes them with
-// VideoToolbox into IOSurface-backed BGRA pixel buffers, and keeps the newest
-// for Flutter, whose compositor takes it in copyPixelBuffer: the presentation
-// receipt Rust validates. Nothing of the video crosses Dart.
+// exports of ui/native/pb_mapper_ffi/src/desktop_video.rs) and decodes them
+// with VideoToolbox. How a picture reaches the screen is the viewer's
+// presenter, chosen at create:
+// - texture (iOS, and macOS unless Dart asks for a layer): IOSurface-backed
+//   BGRA pixel buffers, the newest kept for Flutter, whose compositor takes
+//   it in copyPixelBuffer: the presentation receipt Rust validates.
+// - layer (macOS, when Dart asks for it): IOSurface-backed 420v pixel
+//   buffers, which the decoder thread commits to the viewer's own Core
+//   Animation layer as each is decoded, with no BGRA pass and no Flutter
+//   frame. The commit is the receipt. Flutter shows the layer through the
+//   platform view `pb_mapper/desktop_video_view`.
+// Nothing of the video crosses Dart.
 
 import CoreMedia
 import CoreVideo
 import Foundation
 import ImageIO
+import QuartzCore
 import VideoToolbox
+import os
 
 #if os(iOS)
   import Flutter
@@ -24,9 +34,18 @@ import VideoToolbox
 #elseif os(macOS)
   import AppKit
   import FlutterMacOS
+  import QuartzCore
 #endif
 
 private let channelName = "pb_mapper/desktop_video"
+#if os(macOS)
+  /// The platform view that shows a layer presenter's pictures.
+  private let viewType = "pb_mapper/desktop_video_view"
+  /// The pictures a layer presenter keeps referenced: the one on screen and
+  /// those before it, which the WindowServer may still composite, stay out
+  /// of VideoToolbox's pool.
+  private let heldPictures = 3
+#endif
 
 // The video C ABI (desktop_video.rs): what `next` returns.
 private let videoUnit: Int32 = 1
@@ -67,6 +86,37 @@ private let snapshotQueue = DispatchQueue(label: "pb-desktop-snapshot", qos: .us
 /// every line starts with "PbDesktopVideo:".
 private func logVideo(_ message: String) {
   NSLog("%@", "PbDesktopVideo: \(message)")
+}
+
+/// Instruments' points of interest, by picture: `Decoded` as a picture
+/// leaves the decoder, `Commit` around a layer presenter's commit, and
+/// `Consumed` when Flutter's compositor takes a texture's picture, each with
+/// the picture's generation and frame. Animation Hitches with the Points of
+/// Interest instrument added records them in one trace with the display's
+/// frames. Points of interest go to the system log whether or not a trace
+/// records them, so they are marked only while the stats ask for timings,
+/// as the acceptance tool and the quality panel do.
+private enum Signpost {
+  static let log = OSLog(subsystem: "pb-mapper.desktop-video", category: .pointsOfInterest)
+
+  static func event(_ name: StaticString, _ generation: UInt64, _ frame: UInt64) {
+    guard log.signpostsEnabled else { return }
+    os_signpost(.event, log: log, name: name, "generation %llu frame %llu", generation, frame)
+  }
+
+  /// An interval's start, nil when nothing records it.
+  static func begin(_ name: StaticString, _ generation: UInt64, _ frame: UInt64) -> OSSignpostID? {
+    guard log.signpostsEnabled else { return nil }
+    let id = OSSignpostID(log: log)
+    os_signpost(
+      .begin, log: log, name: name, signpostID: id, "generation %llu frame %llu", generation, frame)
+    return id
+  }
+
+  static func end(_ name: StaticString, _ id: OSSignpostID?) {
+    guard let id = id else { return }
+    os_signpost(.end, log: log, name: name, signpostID: id)
+  }
 }
 
 /// A failure, in the words the Quality sheet and Rust's log show.
@@ -356,6 +406,13 @@ private func withBt709(_ format: CMVideoFormatDescription) throws -> CMVideoForm
   for (key, value) in tags where extensions[key as String] == nil {
     extensions[key as String] = value
   }
+  return try retagged(format, extensions, "Tag the stream as BT.709")
+}
+
+/// [format] with [extensions] in place of its own.
+private func retagged(
+  _ format: CMVideoFormatDescription, _ extensions: [String: Any], _ operation: String
+) throws -> CMVideoFormatDescription {
   let dimensions = CMVideoFormatDescriptionGetDimensions(format)
   var tagged: CMFormatDescription?
   try check(
@@ -363,9 +420,62 @@ private func withBt709(_ format: CMVideoFormatDescription) throws -> CMVideoForm
       allocator: kCFAllocatorDefault, codecType: CMFormatDescriptionGetMediaSubType(format),
       width: dimensions.width, height: dimensions.height, extensions: extensions as CFDictionary,
       formatDescriptionOut: &tagged),
-    "Tag the stream as BT.709")
+    operation)
   return tagged ?? format
 }
+
+#if os(macOS)
+  /// The layer presenter's tags, whatever the stream says: sRGB transfer,
+  /// BT.709 primaries and the stream's matrix (BT.709 when it names none).
+  /// Every pb-mapper host puts sRGB values through the BT.709 matrix with
+  /// no transfer conversion and tags its VUI BT.709 (the Mac encoder's
+  /// session properties, the Windows host's NV12 conversion). Flutter shows
+  /// the BGRA conversion's values as sRGB, so a BT.709 transfer would have
+  /// Core Animation lift mid-greys (128 to 139); sRGB keeps the texture
+  /// path's look within 2 levels. VideoToolbox carries the tags onto each
+  /// picture and its IOSurface, which Core Animation reads.
+  private func forLayer(_ format: CMVideoFormatDescription) throws -> CMVideoFormatDescription {
+    var extensions = (CMFormatDescriptionGetExtensions(format) as? [String: Any]) ?? [:]
+    extensions.removeValue(forKey: kCMFormatDescriptionExtension_VerbatimSampleDescription as String)
+    extensions.removeValue(forKey: kCMFormatDescriptionExtension_VerbatimISOSampleEntry as String)
+    extensions[kCMFormatDescriptionExtension_TransferFunction as String] =
+      kCMFormatDescriptionTransferFunction_sRGB
+    extensions[kCMFormatDescriptionExtension_ColorPrimaries as String] =
+      kCMFormatDescriptionColorPrimaries_ITU_R_709_2
+    if extensions[kCMFormatDescriptionExtension_YCbCrMatrix as String] == nil {
+      extensions[kCMFormatDescriptionExtension_YCbCrMatrix as String] =
+        kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2
+    }
+    return try retagged(format, extensions, "Tag the stream as sRGB")
+  }
+
+  /// Whether a decoded picture carries the layer presenter's sRGB transfer.
+  /// Before macOS 12, which has no CVBufferCopyAttachment, the call it
+  /// replaced reads it.
+  private func carriesSrgb(_ buffer: CVPixelBuffer) -> Bool {
+    let transfer: CFTypeRef?
+    if #available(macOS 12.0, *) {
+      transfer = CVBufferCopyAttachment(buffer, kCVImageBufferTransferFunctionKey, nil)
+    } else {
+      transfer = CVBufferGetAttachment(buffer, kCVImageBufferTransferFunctionKey, nil)?
+        .takeUnretainedValue()
+    }
+    guard let tag = transfer else { return false }
+    return CFEqual(tag, kCVImageBufferTransferFunction_sRGB)
+  }
+
+  /// Tags a picture VideoToolbox left without the layer's tags. Its colour
+  /// space goes: Core Animation reads an IOSurface's colour space before its
+  /// transfer function, so a stale BT.709 one would stay in force.
+  private func tagSrgb(_ buffer: CVPixelBuffer, matrix: CFTypeRef) {
+    CVBufferSetAttachment(buffer, kCVImageBufferYCbCrMatrixKey, matrix, .shouldPropagate)
+    CVBufferSetAttachment(
+      buffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+    CVBufferSetAttachment(
+      buffer, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_sRGB, .shouldPropagate)
+    CVBufferRemoveAttachment(buffer, kCVImageBufferCGColorSpaceKey)
+  }
+#endif
 
 /// VideoToolbox's output callback. It runs before
 /// VTDecompressionSessionDecodeFrame returns: no frame asks for asynchronous
@@ -383,8 +493,11 @@ private func videoDecoded(
 /// A VideoToolbox session for one codec, size and set of parameter sets.
 /// Decoding is synchronous: each access unit's picture comes out before the
 /// call returns, so nothing is held back or reordered (the hosts send no
-/// reordered frames). It runs in real time, into IOSurface-backed BGRA pixel
-/// buffers of the session's size that VideoToolbox's own pool recycles.
+/// reordered frames). It runs in real time, into IOSurface-backed pixel
+/// buffers of the session's size that VideoToolbox's own pool recycles:
+/// BGRA for a texture, which Flutter samples as RGB, and for a layer
+/// presenter the decoder's own 420v (NV12, video range), which Core
+/// Animation composites, so VideoToolbox runs no conversion pass.
 private final class VideoDecoder {
   let codec: Codec
   let width: UInt32
@@ -396,13 +509,32 @@ private final class VideoDecoder {
   // Written by the output callback, during a decode call.
   fileprivate var outputStatus: OSStatus = 0
   fileprivate var outputImage: CVImageBuffer?
+  #if os(macOS)
+    /// A layer presenter's decoder: the matrix its pictures are tagged
+    /// with, whether its first picture was checked for the sRGB tags, and
+    /// whether every picture needs them set because VideoToolbox did not
+    /// carry them.
+    private let layerMatrix: CFTypeRef?
+    private var tagsChecked = false
+    private var retag = false
+  #endif
 
   var name: String { "VideoToolbox \(codec.name)" }
 
-  init(codec: Codec, width: UInt32, height: UInt32, format: CMVideoFormatDescription) throws {
+  /// [layered]: for a layer presenter, which takes 420v tagged sRGB.
+  init(codec: Codec, width: UInt32, height: UInt32, format: CMVideoFormatDescription, layered: Bool)
+    throws
+  {
     self.codec = codec
     self.width = width
     self.height = height
+    #if os(macOS)
+      let format = layered ? try forLayer(format) : format
+      layerMatrix =
+        layered
+        ? CMFormatDescriptionGetExtension(format, extensionKey: kCMFormatDescriptionExtension_YCbCrMatrix)
+          ?? kCVImageBufferYCbCrMatrix_ITU_R_709_2 : nil
+    #endif
     self.format = format
     var callback = VTDecompressionOutputCallbackRecord(
       decompressionOutputCallback: videoDecoded,
@@ -411,8 +543,8 @@ private final class VideoDecoder {
     let status = VTDecompressionSessionCreate(
       allocator: kCFAllocatorDefault, formatDescription: format,
       decoderSpecification: VideoDecoder.specification,
-      imageBufferAttributes: VideoDecoder.attributes(width, height), outputCallback: &callback,
-      decompressionSessionOut: &created)
+      imageBufferAttributes: VideoDecoder.attributes(width, height, layered: layered),
+      outputCallback: &callback, decompressionSessionOut: &created)
     if status == invalidSessionErr || status == decoderNotAvailableNowErr { throw DecoderLost() }
     try check(status, "Create the \(codec.name) decoder")
     guard let session = created else { throw VideoError("Create the \(codec.name) decoder") }
@@ -438,9 +570,11 @@ private final class VideoDecoder {
     #endif
   }
 
-  private static func attributes(_ width: UInt32, _ height: UInt32) -> CFDictionary {
+  /// Metal compatible in either format: a later GPU pass may sample them.
+  private static func attributes(_ width: UInt32, _ height: UInt32, layered: Bool) -> CFDictionary {
+    let format = layered ? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange : kCVPixelFormatType_32BGRA
     let attributes: [String: Any] = [
-      kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+      kCVPixelBufferPixelFormatTypeKey as String: format,
       kCVPixelBufferWidthKey as String: Int(width),
       kCVPixelBufferHeightKey as String: Int(height),
       kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
@@ -500,8 +634,24 @@ private final class VideoDecoder {
     outputImage = nil
     if result == invalidSessionErr || result == decoderNotAvailableNowErr { throw DecoderLost() }
     try check(result, "Decode \(codec.name)")
+    #if os(macOS)
+      if let matrix = layerMatrix, let picture = image { tagForLayer(picture, matrix) }
+    #endif
     return (image, ns)
   }
+
+  #if os(macOS)
+    /// The first picture says whether VideoToolbox carried the sRGB tags
+    /// onto its pictures; if not, each picture is tagged before its commit.
+    private func tagForLayer(_ picture: CVPixelBuffer, _ matrix: CFTypeRef) {
+      if !tagsChecked {
+        tagsChecked = true
+        retag = !carriesSrgb(picture)
+        if retag { logVideo("VideoToolbox did not tag \(codec.name) pictures sRGB; tagging each") }
+      }
+      if retag { tagSrgb(picture, matrix: matrix) }
+    }
+  #endif
 
   func close() {
     if let session = session { VTDecompressionSessionInvalidate(session) }
@@ -563,16 +713,305 @@ private struct UnitMeta {
   var codec: Codec { flags & flagH265 != 0 ? .h265 : .h264 }
 }
 
-/// One texture. While a source is attached, its Feed thread decodes into the
-/// newest picture, which waits for the compositor: a queue of one, so a
-/// picture the compositor did not take in time is superseded, never queued.
+#if os(macOS)
+  /// The delegate of every layer here: no property change animates, on any
+  /// thread or in any transaction, so a picture, a resize or the grey still
+  /// takes effect at the commit that carries it.
+  private final class StillLayers: NSObject, CALayerDelegate {
+    static let shared = StillLayers()
+
+    func action(for layer: CALayer, forKey event: String) -> CAAction? { NSNull() }
+  }
+
+  /// A layer presenter's layers: a container that a hosting view adds as its
+  /// sublayer, holding the picture's content layer and, above it, the grey
+  /// still's two layers. Made at create, so the decoder thread commits
+  /// pictures before Flutter makes the view, and kept through a reconnect,
+  /// so the last picture stays.
+  ///
+  /// The decoder thread sets only the content layer's contents, each time in
+  /// its own explicit transaction, which commits at once: that thread has no
+  /// run loop to commit an implicit one. Everything else (hosting, resizing,
+  /// the grey still) is the platform thread's.
+  private final class LayerPresenter {
+    let container = CALayer()
+    private let content = CALayer()
+    /// The grey still (GreyStill in viewer_overlays.dart): Core Animation's
+    /// own compositing filters take the picture's luminance, then halve it.
+    /// A CIColorMatrix with GreyStill's coefficients would need the view's
+    /// layerUsesCoreImageFilters and, applied in linear light, came out up
+    /// to twice as bright as GreyStill.
+    private let desaturate = CALayer()
+    private let halve = CALayer()
+    /// Decoder thread, or the platform thread once none runs: the pictures
+    /// last committed, oldest first, kept from VideoToolbox's pool while
+    /// the WindowServer may still composite them.
+    private var held: [CVPixelBuffer] = []
+
+    init() {
+      let fill: CAAutoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+      for layer in [container, content, desaturate, halve] {
+        layer.delegate = StillLayers.shared
+        layer.autoresizingMask = fill
+      }
+      content.isOpaque = true
+      content.contentsGravity = .resize
+      content.minificationFilter = .linear
+      content.magnificationFilter = .linear
+      desaturate.backgroundColor = CGColor(gray: 0.5, alpha: 1)
+      desaturate.compositingFilter = "colorBlendMode"
+      halve.backgroundColor = CGColor(gray: 0, alpha: 0.5)
+      for layer in [desaturate, halve] { layer.isHidden = true }
+      for layer in [content, desaturate, halve] { container.addSublayer(layer) }
+      held.reserveCapacity(heldPictures)
+    }
+
+    // MARK: Decoder thread
+
+    /// Shows [buffer] at once. False when it has no IOSurface to show.
+    func commit(_ buffer: CVPixelBuffer) -> Bool {
+      guard let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue() else { return false }
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      content.contents = surface
+      CATransaction.commit()
+      if held.count == heldPictures { held.removeFirst() }
+      held.append(buffer)
+      return true
+    }
+
+    // MARK: Platform thread
+
+    /// Moves the layers into [host], a view's own layer, from any view that
+    /// hosted them before: Flutter may make a new view for the same viewer.
+    func host(in host: CALayer) {
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      container.frame = host.bounds
+      host.addSublayer(container)
+      CATransaction.commit()
+    }
+
+    func grey(_ on: Bool) {
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      desaturate.isHidden = !on
+      halve.isHidden = !on
+      CATransaction.commit()
+    }
+
+    /// Once no decoder thread runs: the picture and those held go.
+    func clear() {
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      content.contents = nil
+      CATransaction.commit()
+      held.removeAll()
+    }
+  }
+
+  /// FlutterView's hook (FlutterView.mm), which only a FlutterView answers:
+  /// the engine's cursor plugin and the pointer plugin (DesktopPointer.swift)
+  /// tell it each cursor they set.
+  private let flutterViewCursorHook = NSSelectorFromString("didUpdateMouseCursor:")
+
+  /// The platform view that shows a layer presenter: a layer-backed view
+  /// whose own layer hosts the presenter's container. Pointer and keyboard
+  /// stay Flutter's: every mouse, scroll and gesture event goes up the
+  /// responder chain to the FlutterView and its controller, as it would from
+  /// any view without handlers, and the view never takes the keyboard.
+  private final class DesktopVideoView: NSView {
+    private weak var viewer: DesktopVideoViewer?
+    private var screenObserver: NSObjectProtocol?
+
+    init(viewer: DesktopVideoViewer?) {
+      self.viewer = viewer
+      super.init(frame: .zero)
+      wantsLayer = true
+      layerContentsRedrawPolicy = .never
+      // The cursor is whatever Flutter or the pointer plugin set last: no
+      // cursor rects, and a cursor update over the picture, as the pointer
+      // enters it or the app comes back to the front, sets that cursor
+      // again (cursorUpdate(with:)). AppKit takes cursor updates only in an
+      // active app (NSTrackingArea.h: not supported with activeAlways).
+      addTrackingArea(
+        NSTrackingArea(
+          rect: .zero, options: [.cursorUpdate, .inVisibleRect, .activeInActiveApp], owner: self,
+          userInfo: nil))
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    deinit {
+      if let observer = screenObserver { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    /// The backing layer only hosts: nothing is drawn into it.
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {}
+
+    /// FlutterView's: the first click into an inactive window reaches the
+    /// remote computer, here as over the rest of the viewer.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var acceptsFirstResponder: Bool { false }
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func resetCursorRects() {}
+
+    /// AppKit sends a cursor update to the view under the pointer, which
+    /// over the picture is this one, after it set a cursor of its own (an
+    /// arrow, as a menu closes or the app comes back to the front).
+    /// FlutterView sets its last cursor again on a cursor update only where
+    /// it is that view itself, so over the picture this view does: Flutter's
+    /// cursor, hidden while the pointer is the remote's, or the host's shape
+    /// the pointer plugin set. No super call, which would leave AppKit's.
+    override func cursorUpdate(with event: NSEvent) {
+      flutterCursor()?.set()
+    }
+
+    /// The cursor the FlutterView this view sits in was told last: its
+    /// `_lastCursor` (FlutterView.mm), the one its own cursorUpdate: sets.
+    /// Nil if the engine keeps none, which leaves the cursor as it is.
+    private func flutterCursor() -> NSCursor? {
+      var ancestor = superview
+      while let view = ancestor {
+        if view.responds(to: flutterViewCursorHook) {
+          guard let ivar = class_getInstanceVariable(object_getClass(view), "_lastCursor"),
+            let encoding = ivar_getTypeEncoding(ivar), String(cString: encoding).hasPrefix("@")
+          else { return nil }
+          return object_getIvar(view, ivar) as? NSCursor
+        }
+        ancestor = view.superview
+      }
+      return nil
+    }
+
+    override func viewDidMoveToWindow() {
+      super.viewDidMoveToWindow()
+      if let observer = screenObserver { NotificationCenter.default.removeObserver(observer) }
+      screenObserver = nil
+      if let window = window {
+        // A window on another display may refresh differently.
+        screenObserver = NotificationCenter.default.addObserver(
+          forName: NSWindow.didChangeScreenNotification, object: window, queue: .main
+        ) { [weak self] _ in
+          guard let self = self else { return }
+          self.viewer?.viewChanged(self)
+        }
+      }
+      viewer?.viewChanged(self)
+    }
+  }
+
+  /// The display link of a layer presenter's view: while the source streams
+  /// and the view is on screen, it asks a variable-refresh display (a
+  /// ProMotion panel) for its fastest rate, which the video commits no
+  /// longer get from Flutter's own frames, and, while the stats ask for
+  /// timings, has the viewer count the pictures committed beyond one a
+  /// refresh, which no refresh showed. Before macOS 14, which has no NSView
+  /// display link, a CVDisplayLink counts and nothing asks for a rate. Each
+  /// callback gives the time of its refresh and the refresh period, since
+  /// the NSView link's callbacks run on the main thread, which Flutter's
+  /// UI thread shares: a busy one misses refreshes, which arrive as one
+  /// callback. Platform thread.
+  private final class RefreshLink: NSObject {
+    private weak var viewer: DesktopVideoViewer?
+    /// The CADisplayLink (macOS 14), which holds this object as its target
+    /// until stop invalidates it.
+    private var link: AnyObject?
+    private var cvLink: CVDisplayLink?
+
+    init(viewer: DesktopVideoViewer) {
+      self.viewer = viewer
+      super.init()
+    }
+
+    /// A CVDisplayLink does not hold this object: it stops with it.
+    deinit { stop() }
+
+    var running: Bool { link != nil || cvLink != nil }
+
+    /// Runs on [view]'s display, asking for [hz] if not nil.
+    func start(_ view: NSView, askHz hz: Double?) {
+      stop()
+      if #available(macOS 14.0, *) {
+        let link = view.displayLink(target: self, selector: #selector(refreshed(_:)))
+        if let hz = hz {
+          let rate = Float(hz)
+          link.preferredFrameRateRange = CAFrameRateRange(
+            minimum: min(60, rate), maximum: rate, preferred: rate)
+        }
+        link.add(to: .main, forMode: .common)
+        self.link = link
+        return
+      }
+      var created: CVDisplayLink?
+      guard CVDisplayLinkCreateWithActiveCGDisplays(&created) == kCVReturnSuccess, let cvLink = created
+      else { return }
+      let number = view.window?.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+      if let display = (number as? NSNumber)?.uint32Value {
+        CVDisplayLinkSetCurrentCGDisplay(cvLink, display)
+      }
+      // The callback runs on CoreVideo's thread; the count takes the
+      // viewer's lock, nothing else.
+      CVDisplayLinkSetOutputHandler(cvLink) { [weak viewer] _, _, output, _, _ in
+        let stamp = output.pointee
+        let scale = Double(stamp.videoTimeScale)
+        let valid = stamp.flags & CVTimeStampFlags.videoTimeValid.rawValue != 0 && scale > 0
+        viewer?.refreshed(
+          at: valid ? Double(stamp.videoTime) / scale : 0,
+          period: valid ? Double(stamp.videoRefreshPeriod) / scale : 0)
+        return kCVReturnSuccess
+      }
+      CVDisplayLinkStart(cvLink)
+      self.cvLink = cvLink
+    }
+
+    func stop() {
+      if #available(macOS 14.0, *), let link = link as? CADisplayLink { link.invalidate() }
+      link = nil
+      if let cvLink = cvLink { CVDisplayLinkStop(cvLink) }
+      cvLink = nil
+    }
+
+    @objc private func refreshed(_ link: AnyObject) {
+      guard #available(macOS 14.0, *), let link = link as? CADisplayLink else { return }
+      viewer?.refreshed(at: link.timestamp, period: link.duration)
+    }
+  }
+#endif
+
+/// One viewer's picture. While a source is attached, its Feed thread decodes
+/// each unit. With a texture the newest picture waits for the compositor: a
+/// queue of one, so a picture the compositor did not take in time is
+/// superseded, never queued. With a layer presenter (macOS) the Feed thread
+/// commits each picture to the layer as it is decoded.
 private final class DesktopVideoViewer: NSObject, FlutterTexture {
   private weak var textures: FlutterTextureRegistry?
   private let library: VideoLibrary
-  /// Set by the plugin once the texture is registered, before any attach.
+  /// Set by the plugin once the texture is registered, or, for a layer
+  /// presenter, given out, before any attach.
   var textureId: Int64 = -1
   /// Platform thread only: signalled when the attached source's thread ends.
   private var worker: DispatchSemaphore?
+  #if os(macOS)
+    /// The layer presenter, when the viewer has one rather than a texture.
+    let presenter: LayerPresenter?
+    // Platform thread only: the view showing the presenter, the display
+    // link on it, whether a source is attached and streams (not paused),
+    // and whether the grey still is on.
+    private weak var view: DesktopVideoView?
+    private lazy var refreshLink = RefreshLink(viewer: self)
+    private var attached = false
+    private var streaming = false
+    private var grey = false
+  #endif
+  private var layered: Bool {
+    #if os(macOS)
+      return presenter != nil
+    #else
+      return false
+    #endif
+  }
 
   private let lock = NSLock()
   // Guarded by lock.
@@ -596,10 +1035,17 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
   private var decoderName = ""
   private var lowLatency = false
   private var hardware: Bool?
+  /// Layer presenter, while timed and the display link runs: pictures
+  /// committed since it last fired (`CACurrentMediaTime`), and the time in
+  /// seconds of the refresh it last fired for.
+  private var countingRefreshes = false
+  private var commitTimes: [Double] = []
+  private var lastRefresh: Double?
   // While a stats read asks for timings: from a picture's publication to
-  // the compositor taking it, and VTDecompressionSessionDecodeFrame's own
-  // time (key frames included).
-  private var surfaceConsume: Timing?
+  // the compositor taking it (texture: `surface_consume`) or from its
+  // decode to the end of its commit (layer: `present`), and
+  // VTDecompressionSessionDecodeFrame's own time (key frames included).
+  private var shownTiming: Timing?
   private var decodeTime: Timing?
   /// While timed: the CPU time of this texture's Feed threads, the running
   /// one's as it read it at the end of its last unit. Each attach starts a
@@ -610,9 +1056,13 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
   /// While timed: the CPU time of the Feed threads that ended.
   private var endedCpuNs: UInt64 = 0
 
-  init(textures: FlutterTextureRegistry, library: VideoLibrary) {
+  /// [layered]: a layer presenter (macOS) instead of a texture.
+  init(textures: FlutterTextureRegistry?, library: VideoLibrary, layered: Bool) {
     self.textures = textures
     self.library = library
+    #if os(macOS)
+      presenter = layered ? LayerPresenter() : nil
+    #endif
     super.init()
   }
 
@@ -628,7 +1078,7 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     lock.lock()
     self.consumer = consumer
     lock.unlock()
-    let feed = Feed(viewer: self, library: library, consumer: consumer)
+    let feed = Feed(viewer: self, library: library, consumer: consumer, layered: layered)
     let done = DispatchSemaphore(value: 0)
     let thread = Thread {
       feed.run()
@@ -638,6 +1088,11 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     thread.qualityOfService = .userInteractive
     worker = done
     thread.start()
+    #if os(macOS)
+      self.attached = true
+      streaming = true
+      updateRefreshLink()
+    #endif
   }
 
   /// Detaching wakes a blocked pull, so the wait is short. Then, with no Feed
@@ -658,6 +1113,11 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     stopping = false
     revision += 1
     lock.unlock()
+    #if os(macOS)
+      attached = false
+      streaming = false
+      updateRefreshLink()
+    #endif
   }
 
   func close() {
@@ -665,6 +1125,13 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     lock.lock()
     closed = true
     lock.unlock()
+    #if os(macOS)
+      if let presenter = presenter {
+        refreshLink.stop()
+        presenter.clear()
+        return
+      }
+    #endif
     textures?.unregisterTexture(textureId)
   }
 
@@ -672,14 +1139,16 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
   /// them, and the decoder threads' CPU time with them.
   func stats(timings: Bool) -> [String: Any] {
     lock.lock()
-    defer { lock.unlock() }
+    let wasTimed = decodeTime != nil
     if !timings {
-      surfaceConsume = nil
+      shownTiming = nil
       decodeTime = nil
       decoderCpuNs = nil
       endedCpuNs = 0
-    } else if surfaceConsume == nil {
-      surfaceConsume = Timing()
+      commitTimes.removeAll()
+      lastRefresh = nil
+    } else if decodeTime == nil {
+      shownTiming = Timing()
       decodeTime = Timing()
     }
     var values: [String: Any] = [
@@ -688,12 +1157,77 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
       "decoder": decoderName, "lowLatency": lowLatency,
     ]
     if let hardware = hardware { values["hardware"] = hardware }
-    if let surface = surfaceConsume, let decode = decodeTime {
-      values["timings"] = ["surface_consume": surface.snapshot, "decode": decode.snapshot]
+    if let shown = shownTiming, let decode = decodeTime {
+      values["timings"] = [layered ? "present" : "surface_consume": shown.snapshot, "decode": decode.snapshot]
     }
     if let cpu = decoderCpuNs { values["decoderCpuMs"] = Double(cpu) / 1_000_000 }
+    lock.unlock()
+    #if os(macOS)
+      if timings != wasTimed { updateRefreshLink() }
+    #endif
     return values
   }
+
+  #if os(macOS)
+    /// The view Flutter made for this viewer now shows the presenter's
+    /// layers, taken from any view that showed them before.
+    func host(in view: DesktopVideoView) {
+      guard let presenter = presenter, let layer = view.layer else { return }
+      self.view = view
+      presenter.host(in: layer)
+      updateRefreshLink()
+    }
+
+    /// The hosting view entered or left a window, or its window another
+    /// display.
+    func viewChanged(_ view: DesktopVideoView) {
+      if view === self.view { updateRefreshLink() }
+    }
+
+    /// The Feed thread of [consumer] saw its source pause or resume; a word
+    /// from a source detached since changes nothing.
+    func setStreaming(_ on: Bool, consumer: UInt64) {
+      lock.lock()
+      let current = consumer == self.consumer
+      lock.unlock()
+      guard current, attached, streaming != on else { return }
+      streaming = on
+      updateRefreshLink()
+    }
+
+    /// The grey still on the picture, which no Flutter filter reaches.
+    func setGrey(_ on: Bool) {
+      guard let presenter = presenter, grey != on else { return }
+      grey = on
+      presenter.grey(on)
+    }
+
+    /// The display link runs while a source streams to a view on screen, on
+    /// a display whose refresh varies (which it asks for its fastest rate,
+    /// from macOS 14, the first with a link that can ask) or while timings
+    /// count the pictures no refresh showed. Otherwise it runs none.
+    private func updateRefreshLink() {
+      guard presenter != nil else { return }
+      lock.lock()
+      let timed = decodeTime != nil
+      lock.unlock()
+      var askHz: Double?
+      var run = false
+      if attached, streaming, let view = view, let screen = view.window?.screen {
+        if #available(macOS 14.0, *), screen.minimumRefreshInterval < screen.maximumRefreshInterval {
+          askHz = Double(screen.maximumFramesPerSecond)
+        }
+        run = timed || askHz != nil
+        if run { refreshLink.start(view, askHz: askHz) }
+      }
+      if !run { refreshLink.stop() }
+      lock.lock()
+      countingRefreshes = run && refreshLink.running && decodeTime != nil
+      commitTimes.removeAll(keepingCapacity: countingRefreshes)
+      lastRefresh = nil
+      lock.unlock()
+    }
+  #endif
 
   /// D23: the picture the compositor took last, which is the one on screen,
   /// as a JPEG at most maxWidth wide, written beside path and renamed over
@@ -736,6 +1270,7 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     latestTaken = true
     shown = picture.buffer
     var acknowledge = false
+    let timed = shownTiming != nil
     if picture.revision == revision
       && (consumedRevision != picture.revision || consumedFrame != picture.frame)
     {
@@ -743,7 +1278,7 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
       consumedFrame = picture.frame
       acknowledge = true
       presented += 1
-      if let timing = surfaceConsume, picture.readyNs != 0 {
+      if let timing = shownTiming, picture.readyNs != 0 {
         let now = DispatchTime.now().uptimeNanoseconds
         timing.add(now > picture.readyNs ? now - picture.readyNs : 0)
       }
@@ -752,8 +1287,9 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     lock.unlock()
     // Taken by the compositor: the receipt Rust validates and forwards for
     // input authorisation. Non-blocking.
-    if acknowledge && consumer != 0 {
-      _ = library.presented(consumer, picture.generation, picture.frame)
+    if acknowledge {
+      if timed { Signpost.event("Consumed", picture.generation, picture.frame) }
+      if consumer != 0 { _ = library.presented(consumer, picture.generation, picture.frame) }
     }
     return Unmanaged.passRetained(picture.buffer)
   }
@@ -832,8 +1368,15 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
   }
 
   /// The newest picture, for the compositor. The platform thread tells
-  /// Flutter at most once per frame it has not handled yet.
-  func publish(_ decodedPicture: Picture) {
+  /// Flutter at most once per frame it has not handled yet. A layer
+  /// presenter shows it at once instead.
+  func publish(_ decodedPicture: Picture) throws {
+    #if os(macOS)
+      if let presenter = presenter {
+        try present(decodedPicture, presenter)
+        return
+      }
+    #endif
     var picture = decodedPicture
     lock.lock()
     decoded += 1
@@ -842,7 +1385,7 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
       return
     }
     if let previous = latest, !latestTaken, previous.revision == revision { dropped += 1 }
-    if surfaceConsume != nil { picture.readyNs = DispatchTime.now().uptimeNanoseconds }
+    if shownTiming != nil { picture.readyNs = DispatchTime.now().uptimeNanoseconds }
     latest = picture
     latestTaken = false
     let post = !framePosted && !closed
@@ -850,6 +1393,95 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     lock.unlock()
     if post { DispatchQueue.main.async { [weak self] in self?.frameAvailable() } }
   }
+
+  #if os(macOS)
+    /// Commits a picture of the current revision to the layer, outside the
+    /// lock: the commit is the presentation receipt, once per picture, as
+    /// the compositor taking it is a texture's. A picture of an older
+    /// revision is not shown. While timed, `present` runs from the end of
+    /// its decode ([Picture.readyNs]) to the end of its commit.
+    private func present(_ picture: Picture, _ presenter: LayerPresenter) throws {
+      lock.lock()
+      decoded += 1
+      let current = picture.revision == revision
+      lock.unlock()
+      guard current else { return }
+      // Stamped at its decode's end only while timed.
+      let timed = picture.readyNs != 0
+      let span = timed ? Signpost.begin("Commit", picture.generation, picture.frame) : nil
+      let committed = presenter.commit(picture.buffer)
+      Signpost.end("Commit", span)
+      guard committed else { throw VideoError("The decoded picture has no IOSurface") }
+      lock.lock()
+      shown = picture.buffer
+      var acknowledge = false
+      if picture.revision == revision
+        && (consumedRevision != picture.revision || consumedFrame != picture.frame)
+      {
+        consumedRevision = picture.revision
+        consumedFrame = picture.frame
+        acknowledge = true
+        presented += 1
+        if countingRefreshes {
+          if commitTimes.count < 512 {
+            commitTimes.append(CACurrentMediaTime())
+          } else {
+            dropped += 1
+          }
+        }
+        if let timing = shownTiming, picture.readyNs != 0 {
+          let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+          timing.add(now > picture.readyNs ? now - picture.readyNs : 0)
+        }
+      }
+      let consumer = self.consumer
+      lock.unlock()
+      // Committed to the WindowServer: the receipt Rust validates and
+      // forwards for input authorisation. Non-blocking.
+      if acknowledge && consumer != 0 {
+        _ = library.presented(consumer, picture.generation, picture.frame)
+      }
+    }
+
+    /// Thread of the display link, for the refresh at [time] seconds, every
+    /// [period] seconds: within each refresh interval since its last callback,
+    /// commits beyond the first were superseded before any composite showed
+    /// them. Idle intervals after a burst never offset earlier superseded
+    /// commits; without a period (0) all commits fall in one interval. Counted
+    /// only while timed.
+    func refreshed(at time: Double, period: Double) {
+      lock.lock()
+      if countingRefreshes {
+        var refreshes = 1
+        if let last = lastRefresh, period > 0, time > last {
+          // Bounded before the conversion: a gap of hours stays an Int.
+          refreshes = max(1, Int(min((time - last) / period, 1_000_000).rounded()))
+        }
+        if refreshes == 1 || period <= 0 {
+          if commitTimes.count > 1 { dropped += commitTimes.count - 1 }
+        } else if !commitTimes.isEmpty {
+          let end = CACurrentMediaTime()
+          var currentSlot = -1
+          var inSlot = 0
+          for committed in commitTimes {
+            let age = max(0, end - committed)
+            let slot = min(refreshes - 1, Int((age / period).rounded(.down)))
+            if slot == currentSlot {
+              inSlot += 1
+            } else {
+              if inSlot > 1 { dropped += inSlot - 1 }
+              currentSlot = slot
+              inSlot = 1
+            }
+          }
+          if inSlot > 1 { dropped += inSlot - 1 }
+        }
+        lastRefresh = period > 0 ? time : nil
+      }
+      commitTimes.removeAll(keepingCapacity: true)
+      lock.unlock()
+    }
+  #endif
 }
 
 /// The decoder thread of one attached source, with the decoder state rules
@@ -867,11 +1499,15 @@ private final class Feed {
   private var last: UInt64 = 0
   private var awaitingKey = true
   private var paused = false
+  /// Decodes for a layer presenter: 420v tagged sRGB, each picture stamped
+  /// at its decode's end while timed.
+  private let layered: Bool
 
-  init(viewer: DesktopVideoViewer, library: VideoLibrary, consumer: UInt64) {
+  init(viewer: DesktopVideoViewer, library: VideoLibrary, consumer: UInt64, layered: Bool) {
     self.viewer = viewer
     self.library = library
     self.consumer = consumer
+    self.layered = layered
   }
 
   func run() {
@@ -885,7 +1521,7 @@ private final class Feed {
     while !viewer.isStopping {
       let result = library.next(consumer, pullTimeoutMs, buffer, UInt32(capacity), meta)
       if result == videoUnit {
-        paused = false
+        setPaused(false)
         autoreleasepool { accept(buffer, UnitMeta(meta)) }
       } else if result == videoNeedCapacity {
         // The unit stays queued in Rust and arrives on the next call.
@@ -895,7 +1531,7 @@ private final class Feed {
         capacity = needed
         buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: capacity)
       } else if result == videoPaused {
-        paused = true
+        setPaused(true)
       } else if result != videoTimeout {
         break  // Closed, detached or invalid: this consumer is done.
       }
@@ -904,6 +1540,19 @@ private final class Feed {
     decoder?.close()
     decoder = nil
     viewer.feedEnded()
+  }
+
+  /// A layer presenter's display link runs only while the source streams:
+  /// the platform thread hears of each pause and resume.
+  private func setPaused(_ now: Bool) {
+    guard paused != now else { return }
+    paused = now
+    #if os(macOS)
+      if layered {
+        let consumer = self.consumer
+        DispatchQueue.main.async { [weak viewer] in viewer?.setStreaming(!now, consumer: consumer) }
+      }
+    #endif
   }
 
   private func accept(_ base: UnsafeMutablePointer<UInt8>, _ unit: UnitMeta) {
@@ -992,17 +1641,22 @@ private final class Feed {
       try configure(unit)
       decoded = try decoder?.decode(sample.bytes, sample.length, timed: timed) ?? (nil, nil)
     }
+    // A layer presenter's `present` starts here, at the decode's end.
+    let decodedNs = timed && layered ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0
     guard let picture = decoded.image else {
       viewer.drop()
       return decoded.ns
     }
+    if timed { Signpost.event("Decoded", unit.generation, unit.frame) }
     guard CVPixelBufferGetWidth(picture) == Int(unit.width),
       CVPixelBufferGetHeight(picture) == Int(unit.height)
     else {
       throw VideoError("Decoded picture does not match the authorized frame")
     }
-    viewer.publish(
-      Picture(buffer: picture, generation: unit.generation, frame: unit.frame, revision: revision))
+    try viewer.publish(
+      Picture(
+        buffer: picture, generation: unit.generation, frame: unit.frame, revision: revision,
+        readyNs: decodedNs))
     return decoded.ns
   }
 
@@ -1011,7 +1665,7 @@ private final class Feed {
     decoder = nil
     let next = try VideoDecoder(
       codec: unit.codec, width: unit.width, height: unit.height,
-      format: bitstream.describe(unit.codec))
+      format: bitstream.describe(unit.codec), layered: layered)
     decoder = next
     viewer.configured(next)
     logVideo(
@@ -1160,8 +1814,9 @@ private enum DecoderProbe {
 }
 
 /// The `pb_mapper/desktop_video` channel: probes the decoders, and creates,
-/// attaches, snapshots, reads and disposes textures. Platform thread only;
-/// what runs elsewhere replies through the main queue.
+/// attaches, snapshots, reads, greys and disposes textures; on macOS also the
+/// factory of the platform view that shows a layer presenter. Platform
+/// thread only; what runs elsewhere replies through the main queue.
 final class DesktopVideoPlugin: NSObject, FlutterPlugin {
   private weak var textures: FlutterTextureRegistry?
   /// Resolved by the first create: Dart has loaded the library by then.
@@ -1172,6 +1827,9 @@ final class DesktopVideoPlugin: NSObject, FlutterPlugin {
     /// read takes the refresh from: the window can move. It holds the
     /// engine only weakly, so holding it here makes no cycle.
     private var registrar: FlutterPluginRegistrar?
+    /// The next id a layer presenter gets. Texture ids are the addresses
+    /// of Flutter's texture wrappers, never this small.
+    private var nextLayerId: Int64 = 1
   #endif
 
   private init(textures: FlutterTextureRegistry) {
@@ -1190,6 +1848,7 @@ final class DesktopVideoPlugin: NSObject, FlutterPlugin {
     let plugin = DesktopVideoPlugin(textures: textures)
     #if os(macOS)
       plugin.registrar = registrar
+      registrar.register(plugin, withId: viewType)
     #endif
     let channel = FlutterMethodChannel(name: channelName, binaryMessenger: messenger)
     registrar.addMethodCallDelegate(plugin, channel: channel)
@@ -1223,13 +1882,25 @@ final class DesktopVideoPlugin: NSObject, FlutterPlugin {
       throw VideoError("Missing desktop video arguments")
     }
     if call.method == "create" {
+      let layered = try presenter(args)
       try checkInstance(UInt64(bitPattern: number(args, "instance")))
       guard viewers.count < textureLimit else { throw VideoError("Desktop texture limit reached") }
       guard let textures = textures, let library = library else {
         throw VideoError("Desktop video is not set up")
       }
-      let viewer = DesktopVideoViewer(textures: textures, library: library)
-      let id = textures.register(viewer)
+      let viewer = DesktopVideoViewer(textures: textures, library: library, layered: layered)
+      let id: Int64
+      #if os(macOS)
+        if layered {
+          while viewers[nextLayerId] != nil { nextLayerId += 1 }
+          id = nextLayerId
+          nextLayerId += 1
+        } else {
+          id = textures.register(viewer)
+        }
+      #else
+        id = textures.register(viewer)
+      #endif
       viewer.textureId = id
       viewers[id] = viewer
       result(id)
@@ -1253,6 +1924,12 @@ final class DesktopVideoPlugin: NSObject, FlutterPlugin {
       var stats = viewer.stats(timings: args["timings"] as? Bool ?? true)
       stats["refreshHz"] = refreshHz
       result(stats)
+    case "grey":
+      guard let on = args["on"] as? Bool else { throw VideoError("Missing video field on") }
+      #if os(macOS)
+        viewer.setGrey(on)
+      #endif
+      result(nil)
     case "dispose":
       viewers.removeValue(forKey: id)
       viewer.close()
@@ -1265,6 +1942,18 @@ final class DesktopVideoPlugin: NSObject, FlutterPlugin {
   private func number(_ args: [String: Any], _ key: String) throws -> Int64 {
     guard let value = args[key] as? NSNumber else { throw VideoError("Missing video field \(key)") }
     return value.int64Value
+  }
+
+  /// `create`'s `presenter`: `layer` (macOS only) or `texture`, the default.
+  private func presenter(_ args: [String: Any]) throws -> Bool {
+    switch args["presenter"] {
+    case nil, is NSNull: return false
+    case let name as String where name == "texture": return false
+    #if os(macOS)
+      case let name as String where name == "layer": return true
+    #endif
+    default: throw VideoError("Unknown desktop video presenter")
+    }
   }
 
   /// `decoders` takes no arguments: VideoToolbox is asked off the platform
@@ -1288,3 +1977,24 @@ final class DesktopVideoPlugin: NSObject, FlutterPlugin {
     guard native == dart else { throw VideoError("native video library loaded twice") }
   }
 }
+
+#if os(macOS)
+  /// `pb_mapper/desktop_video_view`, made with `{textureId}`: the view that
+  /// shows that viewer's layer presenter. A view for a viewer gone, or one
+  /// with a texture, shows nothing.
+  extension DesktopVideoPlugin: FlutterPlatformViewFactory {
+    func create(withViewIdentifier viewId: Int64, arguments args: Any?) -> NSView {
+      let id = ((args as? [String: Any])?["textureId"] as? NSNumber)?.int64Value
+      let viewer = id.flatMap { viewers[$0] }
+      let view = DesktopVideoView(viewer: viewer)
+      viewer?.host(in: view)
+      let hosting = viewer?.presenter != nil
+      logVideo("Video view \(viewId) for \(id.map(String.init) ?? "no id"): \(hosting ? "its layer" : "empty")")
+      return view
+    }
+
+    func createArgsCodec() -> (NSObjectProtocol & FlutterMessageCodec)? {
+      FlutterStandardMessageCodec.sharedInstance()
+    }
+  }
+#endif
