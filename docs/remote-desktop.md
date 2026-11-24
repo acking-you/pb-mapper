@@ -1397,7 +1397,8 @@ where that fits. Seven rules carry it:
 2. **Capture runs at the QoS pace, anchored on the display's presents.** It
    never pauses or resumes as flow control. A tick is skipped only while two
    units wait for send credit or the encoder holds four (two on a Mac
-   host's VideoToolbox). A picture the
+   host's VideoToolbox); an encoder that keeps filling to four caps the pace
+   near what it delivers. A picture the
    backend dates places the next tick a period after its present, up to a
    quarter period early and at most 1/64 period earlier than a period after
    the last tick, and only a picture of a single present moves it earlier:
@@ -1503,7 +1504,67 @@ two, an encoder that kept each unit 40 ms delivered 40 FPS at a pace of 60, and
 one that kept it 60 ms delivered 30. Four cover a latency of nearly four
 periods, and a fast encoder never holds more than one, so it adds no latency.
 The bound is fixed rather than derived from the measured dwell, because a
-queueing encoder's dwell grows with its depth. A Mac host holds VideoToolbox
+queueing encoder's dwell grows with its depth.
+
+An encoder slower than the pace that still takes input, as a Media
+Foundation encoder serial at its bottleneck can, fills to the four anyway:
+each unit waits behind the three before it, and the ticks it skips space the
+frames unevenly. Thread C therefore counts, each second, the due ticks it
+skips for four units in the encoder (or the helper), its full ticks, apart
+from transport skips, with the units the encoder returned and their median
+dwell (`worker/throughput.rs`). A second is full when it had a full tick and
+the encoder held three units or more on average over it (the units a second
+times their median dwell, by Little's law): however close to the pace the
+encoder is, it then skips a tick now and then, while a heavy picture skips
+ticks with most units waiting behind none, and a stall returns too few units
+to hold three. A full second caps the pace at 0.95 × the units that second,
+no lower than the highest minimum frame rate of the viewers' presets, and
+only below what the encoder returned, so that its queue drains. A guard
+then judges the cap
+by the first second, 2 s or more after it, that loads it (returns 0.9 × the
+cap or more), later while the three queued units drain at the units a second
+the cap leaves spare (4 s for an encoder of 20 a second, at most 8 s):
+unless
+its median dwell fell below 0.6 × that of the second that set the cap,
+latency rather than throughput filled the encoder (a pipelined encoder holds
+as many units at any pace near its throughput), and the cap lifts, with none
+set again for 30 s, a hold that doubles with each lift in a row up to 8 min.
+
+The cap then holds what it measured. After three loaded seconds since the
+last full one, a median dwell that shows the encoder serving a step (a
+twentieth, at least 1) more than the cap, 0.95 ÷ the dwell, raises the cap
+to that, since a unit's dwell is at least its service time; it stops short
+of the cap the encoder last filled at, unless it shows a step more than that
+too. Only 30 s after a measurement does a probe raise the cap by a step each
+such second, since the dwell may understate what a pipelined encoder serves.
+A full second while capped, at a probe past the encoder or with heavier
+pictures, lowers the cap to 0.95 × what the encoder returned, and the next
+probe waits twice as long, up to 4 min. Seconds that do not load the cap,
+as on a still desktop, and a pace asked at or below it, as in a viewer's
+startup hold, leave it as it is. It clears once it reaches the pace the
+viewers ask for, and a rebuilt encoder (new limits, desktop or codec, or a
+recovery) starts over. Thread C paces within the cap at once and publishes
+it to each viewer's session, whose QoS takes it into its pace, as it takes
+the viewer's cap, at its next update (within a 250 ms tick): the expected
+bitrate, a receipt cut, a timestamp encoder's bitrate and `Stats`'
+`pace_fps` follow the frames actually made, while thread C is still asked
+for the pace without the cap, which tells it when the cap no longer holds
+anything back. Nothing new crosses the wire or the helper pipe. A Mac host's
+gate keeps its count below four, so it never caps there; NVIDIA's HEVC
+encoder took a mean 3.1 ms a 4K unit
+([Encoder rate model per GPU](#encoder-rate-model-per-gpu)), inside a period
+at 120. Whether an AMD or Intel encoder at 4K or 1440p and 120 FPS fills
+up is unmeasured; `desktop_encoder_cap` (see
+[Diagnostics](#diagnostics)) shows it where it does. On this Mac, a
+synthetic encoder serving a unit each 11 ms at a pace of 120 over an 18 ms
+path went from a dwell of 39 or 40 ms in every second and 29 skipped ticks a
+second to 11 or 12 ms at a cap of 85 with no tick skipped, in every second
+but the two or three of the first probe, 30 s after the cap, which filled
+the encoder again for one second at 38 ms and 5 or 6 skipped ticks; it
+received 85.7 to 85.8 FPS instead of 90.9
+([measurements](benchmarks/2026-11-24-encoder-throughput-cap/README.md)).
+
+A Mac host holds VideoToolbox
 to two units in flight (`VT_IN_FLIGHT`), finished units not counted, and
 thread C skips a tick that finds two as one that finds four: where
 it encodes asynchronously (pictures whose buffers do not cover a multiple of
@@ -2685,7 +2746,9 @@ The ceiling is also bounded by the viewer's `max_fps`. A viewer that lists
 the `fps_override` capability chose that `max_fps` itself: it is then every
 preset's ceiling, Quality's included, while each preset keeps its own start
 and minimum. The pace the host captures at is the controller's frame rate,
-bounded by the ceiling and the viewer's fps cap. It is held to
+bounded by the ceiling, the viewer's fps cap and thread C's cap at its
+encoder's throughput
+([Host: capture and encoding](#host-capture-and-encoding)). It is held to
 `min(start, 15 × scale)` for 1 s after the
 session starts and after a resume, to 2 FPS while the viewer is unresponsive,
 and to 8 FPS for JPEG. A viewer is unresponsive while its probe echo, or a
@@ -3407,6 +3470,7 @@ so read at the display's rate, and a still one on the timer only.
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
 | Credit window | `t` = base RTT (100 ms until measured) + a rebase + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms, or at once to the busy rate while a receipt episode lasts |
 | Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder (2 in flight in a Mac host's VideoToolbox) |
+| Encoder cap | a rolled second is full with a full tick (a due tick skipped for 4 in the encoder) and 3 or more units inside on average (units a second × median dwell); uncapped, a full one caps at max(the viewers' presets' highest minimum, ⌊0.95 × units a second⌋) where that is below the units a second; judged by the first second loading the cap (0.9 × it or more) at least max(2, ⌈3 ÷ (units a second − cap)⌉ + 1) rolls later, at most 8, whose median dwell not below 0.6 × the capping second's lifts it, none again for 30 s, doubling with each lift in a row up to 8 min; capped, 3 loaded seconds since a full one raise it to ⌊0.95 ÷ median dwell⌋ when that is a twentieth (≥ 1) more, below the cap it last filled at unless a twentieth above that too, and from 30 s after a measurement a probe adds a twentieth (≥ 1) each loaded second, that hold doubling with each fill up to 4 min; a full second lowers it to ⌊0.95 × units a second⌋; unloaded seconds and a pace asked at or below it leave it; cleared at the asked pace; reset when the encoder is rebuilt |
 | Mac encoder | low latency with QP up to 51; a dropped newest picture sent again at the next tick, at most twice a picture; dropped pictures traced at most once a second |
 | Mac capture interval | (n − 0.5) / refresh: n the pace's multiple where the refresh is one within 1%, else 1 below eight times the pace and floor(refresh / pace / 4) above, at most the most refreshes that fit in 0.9 / `max_fps`, at least 1; 0.9 / `max_fps` with no refresh; a slower pace after 1 s, a faster one, a new refresh (read each second), frame-rate limit or pause at once; the longest allowed while every viewer is paused; one change in flight, a refused one failing the stream |
 | Armed tick | a tick with no new picture, or whose Windows encoder has not asked for input, stays armed; ScreenCaptureKit wakes thread C, and in process so does the Windows encoder's capture thread for the next present, which it waits for at most 16 ms an `AcquireNextFrame` while armed, and the encoder's input request (asked again every 2 ms meanwhile); a repeat due, or a published picture taken 2 ms or more after it was published, waits up to 32 ms after the capture thread's arming for its answer that nothing newer waits; a capture thread not armed again (or asked again by a refinement repeat) for 2 s stops looking; through the helper the worker is asked again every 2 ms for 250 ms after an injected input or a new picture and while the encoder holds units (an input brings a pending poll in to 2 ms), and once a period otherwise |
@@ -3455,10 +3519,11 @@ null.
 
 Where the frame rate goes is then one comparison at a time: a capture rate
 below the pace is the host's source or its gate (`skipped_per_s`,
-`encoder_dwell_ms`); a pace below `max_fps` is the controller, the viewer's cap
-or the preset's ceiling (Quality's is 30 unless the viewer chose a frame
-rate); received below capture is the transport (`ack_queue_ms`); presented
-below received is the viewer's decoder or display.
+`encoder_dwell_ms`); a pace below `max_fps` is the controller, the viewer's cap,
+the host's cap at its encoder's throughput (`desktop_encoder_cap`) or the
+preset's ceiling (Quality's is 30 unless the viewer chose a frame rate);
+received below capture is the transport (`ack_queue_ms`); presented below
+received is the viewer's decoder or display.
 
 Thread C also traces each second it captured as `desktop_capture_pacing` on
 `pb_mapper_desktop::feedback` (debug): `wait_p50_us` and `wait_p95_us`, from a
@@ -3466,10 +3531,20 @@ dated picture's present to the capture call that took it; `dated_share`, the
 captures whose picture was dated; and per second `captures_per_s` (captures
 that spent their tick), `presents_per_s` (the presents their pictures
 covered), `coalesced_per_s` (those beyond one per picture: presents no
-capture took) and `empty_polls_per_s` (captures that left the tick armed:
+capture took), `empty_polls_per_s` (captures that left the tick armed:
 they found nothing new, a Windows encoder that had not asked for input
 yet, or on a Mac host the encoder's submit thread busy, or they sent a
-refinement repeat). A
+refinement repeat) and `full_ticks_per_s` (due ticks skipped for four units
+in the encoder or the helper). It traces each change of its cap at the
+encoder's throughput as `desktop_encoder_cap` there: `action` (`capped`,
+`kept`, `lifted`, `cleared` or `reset` at info, so the background service's
+host log keeps them too; `raised` and `lowered`, which a probe brings, at
+debug), `cap` (absent once there is none), `asked_fps` (the least pace the
+viewers ask for, before the cap), the rolled second's `full_ticks`, `units`
+and `window_ms` (none of these for `reset`, which a rebuilt encoder brings),
+and `dwell_before_us`, the median dwell of the second that set the cap,
+with, for `kept` and `lifted`, `dwell_after_us`, that of the second the
+guard judged by. A
 Mac host traces `macos_capture_timing` there too, once a second while it
 submits: ScreenCaptureKit's `complete_per_s`, `idle_per_s` and
 `replaced_per_s` (pictures a newer one replaced before thread C took them),
@@ -3536,8 +3611,10 @@ from its announcement to the start of the drain's call that collected it
 targets at info, and its capture helper logs nothing.
 
 The host traces each second as `desktop_feedback_interval` on
-`pb_mapper_desktop::feedback` (debug): `action`, `fps`, `pace_fps`,
-`viewer_cap`, `paused`, `unresponsive`, `bpf`, `bitrate`, `encoder_bitrate`,
+`pb_mapper_desktop::feedback` (debug): `action`, `fps`, `pace_fps` (within
+the encoder's cap), `viewer_cap`, `encoder_cap` (the cap at the encoder's
+throughput, as the session's QoS last read it), `paused`, `unresponsive`,
+`bpf`, `bitrate`, `encoder_bitrate`,
 `sent_bitrate`, `rate_model`, `rtt_ms`, `baseline_ms`, `delay_ms`, `tainted`,
 `ack_queue_ms`, `forward_queue_ms` and `reverse_queue_ms` (with arrival
 times), `rate_fps`, `rebase_ms`, `standing_ms`, `busy_bps`, `used_bps`,
@@ -3719,7 +3796,8 @@ shows that install hint (see "What the viewer decodes").
 
 Read in order, the rates place a loss: capture below pace is the host's
 source or its capture gate; pace below the ceiling is the QoS controller
-(its startup hold included) or the viewer's cap; received below capture is
+(its startup hold included), the viewer's cap or the host's cap at its
+encoder's throughput; received below capture is
 the transport; presented below received is this device's presenter. The
 Mac's layer presenter, when built in, presents every picture it decodes,
 so there the decoder's dropped figure, not the presented rate, shows the
@@ -4574,6 +4652,16 @@ first session's, and the third climbed within 20 s.
 has five runs before and after a reconnect started at the rate its last
 session ended at, and five on a first version whose lowered start climbed
 back only at the receipts' plain raise.
+`lan_rtt_keeps_120` runs a 120 FPS session on the 18 ms path, first with a
+synthetic encoder that serves a unit each 11 ms, one at a time, while it
+takes four, then with one that keeps each unit 45 ms but takes many. It
+reports, from 8 s to 48 s, past the first encoder's first probe and the
+second's second cap, the encoder's dwell, the received rate, the pace and
+the skipped ticks, then each `desktop_encoder_cap`, and asserts for the
+first a dwell of 25 ms or less at the median and in all but 5 of the 40
+seconds at 75 FPS or more received, and 75 FPS or more for the second.
+[Encoder throughput cap measurements](benchmarks/2026-11-24-encoder-throughput-cap/README.md)
+has three runs before and after the cap.
 
 `video_bench 10 60 --animate --max-width 1920 --max-height 1080` still reaches
 59.9 unique capture and encode FPS at a mean 1.9 ms encode with one unit in

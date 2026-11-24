@@ -1,0 +1,18 @@
+# RUST_LOG=off cargo run --release -p pb-mapper-desktop --example host_send_bench
+# run 1, after: the branch (48ac484 + the slow_link case)
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1126 allocs_per_unit=18.76 alloc_bytes_per_unit=40121
+case=video+pointer units_per_s=60.0 inputs_per_s=247.1 allocs_per_s=3493 allocs_per_unit=58.23 alloc_bytes_per_unit=47056
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.9 allocs_per_s=10031 allocs_per_unit=167.22 alloc_bytes_per_unit=100588
+case=peer_cursor samples=256 p50_us=158 p95_us=335 p99_us=503
+case=shape samples=128 p50_us=2452 p90_us=2610 p99_us=2677 max_us=2687
+case=host_pointer pace=60 units_per_s=59.9 samples=128 p50_us=8025 p90_us=14887 p99_us=16092 max_us=16158
+case=host_pointer pace=120 units_per_s=119.8 samples=128 p50_us=4282 p90_us=7886 p99_us=8647 max_us=11658
+
+# run 2, before: base 26b91fc's sources
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1131 allocs_per_unit=18.85 alloc_bytes_per_unit=40254
+case=video+pointer units_per_s=60.2 inputs_per_s=249.9 allocs_per_s=3515 allocs_per_unit=58.40 alloc_bytes_per_unit=47018
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.4 allocs_per_s=10021 allocs_per_unit=167.08 alloc_bytes_per_unit=100568
+case=peer_cursor samples=256 p50_us=156 p95_us=321 p99_us=480
+case=shape samples=128 p50_us=2458 p90_us=2526 p99_us=2687 max_us=3167
+case=host_pointer pace=60 units_per_s=59.8 samples=128 p50_us=7636 p90_us=14258 p99_us=15949 max_us=16281
+case=host_pointer pace=120 units_per_s=119.8 samples=128 p50_us=4597 p90_us=7909 p99_us=8614 max_us=8640

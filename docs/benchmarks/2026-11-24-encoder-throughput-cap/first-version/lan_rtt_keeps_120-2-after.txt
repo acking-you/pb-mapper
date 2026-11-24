@@ -1,0 +1,19 @@
+# run 2, after: the branch
+running 1 test
+test slow_link::lan_rtt_keeps_120 ... lan_rtt_keeps_120 encoder=serial_11ms one_way_ms=18 seconds=8..18 received_fps_mean=88.8 encoder_dwell_ms_p50=11 encoder_dwell_ms=[38, 11, 11, 11, 11, 27, 37, 37, 11, 11] received_fps=[90.47592, 90.60987, 88.49238, 85.49607, 86.71312, 89.573296, 91.6108, 90.658615, 87.49253, 86.5712] pace_fps=[97, 86, 86, 86, 90, 94, 94, 86, 86, 86] skipped_per_s=[6.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.9999228, 0.0, 0.0, 0.0] expired_encoder_outputs=0 state=Streaming
+lan_rtt_keeps_120 encoder=serial_11ms desktop_encoder_cap t_ms=1981 capped:85 asked=120 full_ticks=26 units=90 dwell_before_ms=39.5 dwell_after_ms=-
+lan_rtt_keeps_120 encoder=serial_11ms desktop_encoder_cap t_ms=3981 kept:85 asked=120 full_ticks=0 units=85 dwell_before_ms=39.5 dwell_after_ms=11.8
+lan_rtt_keeps_120 encoder=serial_11ms desktop_encoder_cap t_ms=5981 raised:89 asked=120 full_ticks=0 units=85 dwell_before_ms=39.5 dwell_after_ms=-
+lan_rtt_keeps_120 encoder=serial_11ms desktop_encoder_cap t_ms=6981 raised:93 asked=120 full_ticks=0 units=89 dwell_before_ms=39.5 dwell_after_ms=-
+lan_rtt_keeps_120 encoder=serial_11ms desktop_encoder_cap t_ms=7981 raised:97 asked=120 full_ticks=0 units=90 dwell_before_ms=39.5 dwell_after_ms=-
+lan_rtt_keeps_120 encoder=serial_11ms desktop_encoder_cap t_ms=8981 lowered:86 asked=120 full_ticks=6 units=91 dwell_before_ms=39.5 dwell_after_ms=-
+lan_rtt_keeps_120 encoder=serial_11ms desktop_encoder_cap t_ms=11982 raised:90 asked=120 full_ticks=0 units=86 dwell_before_ms=39.5 dwell_after_ms=-
+lan_rtt_keeps_120 encoder=serial_11ms desktop_encoder_cap t_ms=12983 raised:94 asked=120 full_ticks=0 units=90 dwell_before_ms=39.5 dwell_after_ms=-
+lan_rtt_keeps_120 encoder=serial_11ms desktop_encoder_cap t_ms=14983 lowered:86 asked=120 full_ticks=3 units=91 dwell_before_ms=39.5 dwell_after_ms=-
+lan_rtt_keeps_120 encoder=serial_11ms desktop_encoder_cap t_ms=17984 raised:90 asked=120 full_ticks=0 units=86 dwell_before_ms=39.5 dwell_after_ms=-
+lan_rtt_keeps_120 encoder=pipelined_45ms one_way_ms=18 seconds=8..18 received_fps_mean=80.0 encoder_dwell_ms_p50=45 encoder_dwell_ms=[45, 45, 45, 45, 45, 45, 46, 46, 45, 45] received_fps=[80.528786, 79.556366, 80.79792, 79.463295, 79.59594, 80.72127, 78.88224, 80.75674, 79.51352, 80.645294] pace_fps=[120, 120, 120, 120, 120, 120, 120, 120, 120, 120] skipped_per_s=[40.0, 39.977943, 39.98638, 40.0, 39.985424, 39.91867, 39.99959, 40.0, 40.0, 39.987293] expired_encoder_outputs=0 state=Streaming
+lan_rtt_keeps_120 encoder=pipelined_45ms desktop_encoder_cap t_ms=1980 capped:75 asked=120 full_ticks=40 units=79 dwell_before_ms=46.0 dwell_after_ms=-
+lan_rtt_keeps_120 encoder=pipelined_45ms desktop_encoder_cap t_ms=3980 lifted:- asked=120 full_ticks=0 units=75 dwell_before_ms=46.0 dwell_after_ms=46.1
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 399 filtered out; finished in 36.40s

@@ -1,0 +1,36 @@
+# run 1, after: the branch (1580eb5), RUST_LOG=off cargo run --release -p pb-mapper-desktop --example host_send_bench; load average before: 3.72 2.86 3.01
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1130 allocs_per_unit=18.83 alloc_bytes_per_unit=40255
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3518 allocs_per_unit=58.66 alloc_bytes_per_unit=47126
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.8 allocs_per_s=10015 allocs_per_unit=166.98 alloc_bytes_per_unit=100578
+case=peer_cursor samples=256 p50_us=156 p95_us=319 p99_us=470
+case=shape samples=128 p50_us=2418 p90_us=2472 p99_us=2501 max_us=2521
+case=host_pointer pace=60 units_per_s=59.9 samples=128 p50_us=7078 p90_us=13574 p99_us=16105 max_us=16216
+case=host_pointer pace=120 units_per_s=119.9 samples=128 p50_us=4086 p90_us=7585 p99_us=8446 max_us=8451
+
+# run 2, before: base 26b91fc, the same command; load average before: 3.94 3.02 3.06
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1130 allocs_per_unit=18.85 alloc_bytes_per_unit=40251
+case=video+pointer units_per_s=60.0 inputs_per_s=249.8 allocs_per_s=3529 allocs_per_unit=58.82 alloc_bytes_per_unit=47129
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=493.0 allocs_per_s=9878 allocs_per_unit=164.68 alloc_bytes_per_unit=100106
+case=peer_cursor samples=256 p50_us=175 p95_us=340 p99_us=480
+case=shape samples=128 p50_us=2420 p90_us=2515 p99_us=2639 max_us=2657
+case=host_pointer pace=60 units_per_s=59.9 samples=128 p50_us=7825 p90_us=14315 p99_us=16162 max_us=16207
+case=host_pointer pace=120 units_per_s=119.9 samples=128 p50_us=4592 p90_us=7926 p99_us=8484 max_us=8648
+
+# run 3, after: the branch (1580eb5), RUST_LOG=off cargo run --release -p pb-mapper-desktop --example host_send_bench; load average before: 4.34 3.32 3.17
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1131 allocs_per_unit=18.86 alloc_bytes_per_unit=40255
+case=video+pointer units_per_s=60.0 inputs_per_s=247.5 allocs_per_s=3489 allocs_per_unit=58.17 alloc_bytes_per_unit=47033
+case=2viewers+pointer units_per_s=59.8 inputs_per_s=482.5 allocs_per_s=9593 allocs_per_unit=160.47 alloc_bytes_per_unit=99427
+case=peer_cursor samples=256 p50_us=156 p95_us=314 p99_us=338
+case=shape samples=128 p50_us=2364 p90_us=4053 p99_us=16729 max_us=16953
+case=host_pointer pace=60 units_per_s=60.0 samples=128 p50_us=7528 p90_us=14385 p99_us=18405 max_us=30073
+case=host_pointer pace=120 units_per_s=118.9 samples=128 p50_us=4483 p90_us=8085 p99_us=12209 max_us=14181
+
+# run 4, before: base 26b91fc, the same command; load average before: 9.98 4.89 3.75
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1133 allocs_per_unit=18.89 alloc_bytes_per_unit=40283
+case=video+pointer units_per_s=60.2 inputs_per_s=249.9 allocs_per_s=3523 allocs_per_unit=58.53 alloc_bytes_per_unit=47061
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=497.8 allocs_per_s=9981 allocs_per_unit=166.41 alloc_bytes_per_unit=100451
+case=peer_cursor samples=256 p50_us=156 p95_us=314 p99_us=316
+case=shape samples=128 p50_us=2412 p90_us=2486 p99_us=2673 max_us=2888
+case=host_pointer pace=60 units_per_s=60.0 samples=128 p50_us=8085 p90_us=14630 p99_us=16169 max_us=16234
+case=host_pointer pace=120 units_per_s=119.8 samples=128 p50_us=4608 p90_us=7636 p99_us=8389 max_us=8622
+

@@ -1,0 +1,19 @@
+# run 5, before: base 26b91fc's sources with only slow_link.rs from the branch
+# load before the run:21:22  up 2 days, 20:03, 4 users, load averages: 4.59 3.77 3.63
+running 1 test
+test slow_link::lan_rtt_keeps_120 ... lan_rtt_keeps_120 encoder=serial_11ms one_way_ms=18 seconds=8..18 received_fps_mean=91.0 encoder_dwell_ms_p50=39 encoder_dwell_ms=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39] received_fps=[91.297165, 90.574905, 91.47289, 90.36663, 91.51541, 90.37337, 91.60167, 90.464424, 90.67691, 91.47581] pace_fps=[120, 120, 120, 120, 120, 120, 120, 120, 120, 120] skipped_per_s=[29.0, 28.99712, 30.0, 28.930882, 29.0, 29.0, 28.949528, 29.0, 28.97402, 28.979914] expired_encoder_outputs=0 state=Streaming
+lan_rtt_keeps_120 encoder=pipelined_45ms one_way_ms=18 seconds=8..18 received_fps_mean=80.0 encoder_dwell_ms_p50=45 encoder_dwell_ms=[45, 45, 45, 45, 45, 45, 46, 45, 45, 45] received_fps=[79.61238, 79.66817, 79.546974, 80.64782, 80.686584, 79.60329, 80.45637, 79.68942, 80.66738, 79.650085] pace_fps=[120, 120, 120, 120, 120, 120, 120, 120, 120, 120] skipped_per_s=[39.9916, 40.0, 40.0, 39.99525, 39.94845, 39.989952, 40.0, 40.0, 39.978203, 39.956875] expired_encoder_outputs=0 state=Streaming
+
+thread 'slow_link::lan_rtt_keeps_120' (8465395) panicked at crates/pb-mapper-desktop/src/slow_link.rs:1401:13:
+[39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    slow_link::lan_rtt_keeps_120
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 391 filtered out; finished in 36.40s
+
+error: test failed, to rerun pass `-p pb-mapper-desktop --lib`
