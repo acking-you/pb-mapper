@@ -1,0 +1,166 @@
+load: 12:08  up 2 days, 10:49, 3 users, load averages: 2.98 3.43 3.65
+    Finished `release` profile [optimized] target(s) in 0.13s
+     Running unittests src/lib.rs (target/release/deps/pb_mapper_desktop-091641b62e13cc64)
+
+running 2 tests
+test platform::macos::tests::video_toolbox_rate_model_h264 ... case codec=H264 size=1920x1080 low_latency=true nominal_fps=60 bitrate=4000000
+ INFO pb_mapper_desktop::session: event="macos_encoder_opened" codec=H264 low_latency=true width=1920 height=1080 fps=60 hardware=false gop=2147483647 data_rate_limits=true
+pace=60 submitted=240 units=239 keyframes=0 skipped_ticks=0 bits_per_unit=67006 dwell_p50_ms=5.28 dwell_p95_ms=6.26
+pace=30 submitted=120 units=120 keyframes=0 skipped_ticks=0 bits_per_unit=132728 dwell_p50_ms=5.04 dwell_p95_ms=5.72
+pace=15 submitted=60 units=60 keyframes=0 skipped_ticks=0 bits_per_unit=269293 dwell_p50_ms=7.13 dwell_p95_ms=7.89
+pace=5 submitted=20 units=20 keyframes=0 skipped_ticks=0 bits_per_unit=766048 dwell_p50_ms=8.29 dwell_p95_ms=8.99
+pace=60 produced_mbps=4.004 nominal_expected_mbps=4.000 nominal_ratio=1.001 timestamp_ratio=1.001
+pace=30 produced_mbps=3.982 nominal_expected_mbps=2.000 nominal_ratio=1.991 timestamp_ratio=0.995
+pace=15 produced_mbps=4.039 nominal_expected_mbps=1.000 nominal_ratio=4.039 timestamp_ratio=1.010
+pace=5 produced_mbps=3.830 nominal_expected_mbps=0.333 nominal_ratio=11.491 timestamp_ratio=0.958
+rate_model=timestamp within_25_percent=true
+after_pause largest_unit_bits=559184 frame_budget_bits=66666 ratio=8.39
+case codec=H264 size=1920x1080 low_latency=false nominal_fps=60 bitrate=4000000
+ INFO pb_mapper_desktop::session: event="macos_encoder_opened" codec=H264 low_latency=false width=1920 height=1080 fps=60 hardware=true gop=2147483647 data_rate_limits=true
+pace=60 submitted=240 units=240 keyframes=0 skipped_ticks=0 bits_per_unit=66712 dwell_p50_ms=9.54 dwell_p95_ms=10.02
+pace=30 submitted=120 units=120 keyframes=0 skipped_ticks=0 bits_per_unit=124654 dwell_p50_ms=10.11 dwell_p95_ms=10.95
+pace=15 submitted=60 units=60 keyframes=0 skipped_ticks=0 bits_per_unit=200426 dwell_p50_ms=10.78 dwell_p95_ms=11.44
+pace=5 submitted=20 units=20 keyframes=0 skipped_ticks=0 bits_per_unit=341882 dwell_p50_ms=11.78 dwell_p95_ms=13.08
+pace=60 produced_mbps=4.003 nominal_expected_mbps=4.000 nominal_ratio=1.001 timestamp_ratio=1.001
+pace=30 produced_mbps=3.740 nominal_expected_mbps=2.000 nominal_ratio=1.870 timestamp_ratio=0.935
+pace=15 produced_mbps=3.006 nominal_expected_mbps=1.000 nominal_ratio=3.006 timestamp_ratio=0.752
+pace=5 produced_mbps=1.709 nominal_expected_mbps=0.333 nominal_ratio=5.128 timestamp_ratio=0.427
+rate_model=timestamp within_25_percent=false
+after_pause largest_unit_bits=587504 frame_budget_bits=66666 ratio=8.81
+case codec=H264 size=2560x1440 low_latency=true nominal_fps=60 bitrate=4000000
+ INFO pb_mapper_desktop::session: event="macos_encoder_opened" codec=H264 low_latency=true width=2560 height=1440 fps=60 hardware=false gop=2147483647 data_rate_limits=true
+pace=60 submitted=240 units=240 keyframes=0 skipped_ticks=0 bits_per_unit=66420 dwell_p50_ms=7.01 dwell_p95_ms=7.67
+pace=30 submitted=120 units=120 keyframes=0 skipped_ticks=0 bits_per_unit=134100 dwell_p50_ms=7.55 dwell_p95_ms=8.36
+pace=15 submitted=60 units=60 keyframes=0 skipped_ticks=0 bits_per_unit=266225 dwell_p50_ms=7.87 dwell_p95_ms=9.43
+pace=5 submitted=20 units=20 keyframes=0 skipped_ticks=0 bits_per_unit=773389 dwell_p50_ms=9.65 dwell_p95_ms=9.84
+pace=60 produced_mbps=3.985 nominal_expected_mbps=4.000 nominal_ratio=0.996 timestamp_ratio=0.996
+pace=30 produced_mbps=4.023 nominal_expected_mbps=2.000 nominal_ratio=2.011 timestamp_ratio=1.006
+pace=15 produced_mbps=3.993 nominal_expected_mbps=1.000 nominal_ratio=3.993 timestamp_ratio=0.998
+pace=5 produced_mbps=3.867 nominal_expected_mbps=0.333 nominal_ratio=11.601 timestamp_ratio=0.967
+rate_model=timestamp within_25_percent=true
+after_pause largest_unit_bits=317144 frame_budget_bits=66666 ratio=4.76
+case codec=H264 size=2560x1440 low_latency=false nominal_fps=60 bitrate=4000000
+ INFO pb_mapper_desktop::session: event="macos_encoder_opened" codec=H264 low_latency=false width=2560 height=1440 fps=60 hardware=true gop=2147483647 data_rate_limits=true
+pace=60 submitted=240 units=240 keyframes=0 skipped_ticks=0 bits_per_unit=66873 dwell_p50_ms=15.64 dwell_p95_ms=15.97
+pace=30 submitted=120 units=120 keyframes=0 skipped_ticks=0 bits_per_unit=124439 dwell_p50_ms=16.25 dwell_p95_ms=16.98
+pace=15 submitted=60 units=60 keyframes=0 skipped_ticks=0 bits_per_unit=200100 dwell_p50_ms=17.04 dwell_p95_ms=17.50
+pace=5 submitted=20 units=20 keyframes=0 skipped_ticks=0 bits_per_unit=338001 dwell_p50_ms=17.65 dwell_p95_ms=19.03
+pace=60 produced_mbps=4.012 nominal_expected_mbps=4.000 nominal_ratio=1.003 timestamp_ratio=1.003
+pace=30 produced_mbps=3.733 nominal_expected_mbps=2.000 nominal_ratio=1.867 timestamp_ratio=0.933
+pace=15 produced_mbps=3.001 nominal_expected_mbps=1.000 nominal_ratio=3.001 timestamp_ratio=0.750
+pace=5 produced_mbps=1.690 nominal_expected_mbps=0.333 nominal_ratio=5.070 timestamp_ratio=0.423
+rate_model=timestamp within_25_percent=false
+after_pause largest_unit_bits=828080 frame_budget_bits=66666 ratio=12.42
+case codec=H264 size=3840x2160 low_latency=true nominal_fps=60 bitrate=4000000
+ INFO pb_mapper_desktop::session: event="macos_encoder_opened" codec=H264 low_latency=true width=3840 height=2160 fps=60 hardware=false gop=2147483647 data_rate_limits=true
+pace=60 submitted=197 units=197 keyframes=0 skipped_ticks=0 bits_per_unit=80166 dwell_p50_ms=13.71 dwell_p95_ms=14.22
+pace=30 submitted=120 units=120 keyframes=0 skipped_ticks=0 bits_per_unit=132455 dwell_p50_ms=14.01 dwell_p95_ms=15.46
+pace=15 submitted=60 units=60 keyframes=0 skipped_ticks=0 bits_per_unit=281412 dwell_p50_ms=13.94 dwell_p95_ms=17.22
+pace=5 submitted=20 units=20 keyframes=0 skipped_ticks=0 bits_per_unit=822277 dwell_p50_ms=15.79 dwell_p95_ms=18.45
+pace=60 produced_mbps=3.948 nominal_expected_mbps=4.000 nominal_ratio=0.987 timestamp_ratio=0.987
+pace=30 produced_mbps=3.974 nominal_expected_mbps=2.000 nominal_ratio=1.987 timestamp_ratio=0.993
+pace=15 produced_mbps=4.221 nominal_expected_mbps=1.000 nominal_ratio=4.221 timestamp_ratio=1.055
+pace=5 produced_mbps=4.111 nominal_expected_mbps=0.333 nominal_ratio=12.334 timestamp_ratio=1.028
+rate_model=timestamp within_25_percent=true
+after_pause largest_unit_bits=1658592 frame_budget_bits=66666 ratio=24.88
+case codec=H264 size=3840x2160 low_latency=false nominal_fps=60 bitrate=4000000
+ INFO pb_mapper_desktop::session: event="macos_encoder_opened" codec=H264 low_latency=false width=3840 height=2160 fps=60 hardware=true gop=2147483647 data_rate_limits=true
+pace=60 submitted=240 units=240 keyframes=0 skipped_ticks=0 bits_per_unit=67145 dwell_p50_ms=13.73 dwell_p95_ms=18.37
+pace=30 submitted=120 units=119 keyframes=0 skipped_ticks=0 bits_per_unit=125786 dwell_p50_ms=31.86 dwell_p95_ms=33.35
+pace=15 submitted=60 units=60 keyframes=0 skipped_ticks=0 bits_per_unit=201731 dwell_p50_ms=32.81 dwell_p95_ms=35.40
+pace=5 submitted=20 units=20 keyframes=0 skipped_ticks=0 bits_per_unit=346706 dwell_p50_ms=33.57 dwell_p95_ms=38.31
+pace=60 produced_mbps=4.029 nominal_expected_mbps=4.000 nominal_ratio=1.007 timestamp_ratio=1.007
+pace=30 produced_mbps=3.742 nominal_expected_mbps=2.000 nominal_ratio=1.871 timestamp_ratio=0.936
+pace=15 produced_mbps=3.026 nominal_expected_mbps=1.000 nominal_ratio=3.026 timestamp_ratio=0.756
+pace=5 produced_mbps=1.734 nominal_expected_mbps=0.333 nominal_ratio=5.201 timestamp_ratio=0.433
+rate_model=timestamp within_25_percent=false
+after_pause largest_unit_bits=334192 frame_budget_bits=66666 ratio=5.01
+summary codec=H264 size=1920x1080 low_latency=true rate_model=timestamp within_25_percent=true
+summary codec=H264 size=1920x1080 low_latency=false rate_model=timestamp within_25_percent=false
+summary codec=H264 size=2560x1440 low_latency=true rate_model=timestamp within_25_percent=true
+summary codec=H264 size=2560x1440 low_latency=false rate_model=timestamp within_25_percent=false
+summary codec=H264 size=3840x2160 low_latency=true rate_model=timestamp within_25_percent=true
+summary codec=H264 size=3840x2160 low_latency=false rate_model=timestamp within_25_percent=false
+ok
+test platform::macos::tests::video_toolbox_rate_model_h265 ... case codec=H265 size=1920x1080 low_latency=true nominal_fps=60 bitrate=4000000
+ INFO pb_mapper_desktop::session: event="macos_encoder_opened" codec=H265 low_latency=true width=1920 height=1080 fps=60 hardware=false gop=2147483647 data_rate_limits=true
+pace=60 submitted=240 units=240 keyframes=0 skipped_ticks=0 bits_per_unit=66828 dwell_p50_ms=5.46 dwell_p95_ms=6.12
+pace=30 submitted=120 units=120 keyframes=0 skipped_ticks=0 bits_per_unit=132966 dwell_p50_ms=6.09 dwell_p95_ms=7.55
+pace=15 submitted=60 units=60 keyframes=0 skipped_ticks=0 bits_per_unit=211104 dwell_p50_ms=6.83 dwell_p95_ms=8.45
+pace=5 submitted=20 units=20 keyframes=0 skipped_ticks=0 bits_per_unit=825118 dwell_p50_ms=8.03 dwell_p95_ms=9.11
+pace=60 produced_mbps=4.010 nominal_expected_mbps=4.000 nominal_ratio=1.002 timestamp_ratio=1.002
+pace=30 produced_mbps=3.989 nominal_expected_mbps=2.000 nominal_ratio=1.994 timestamp_ratio=0.997
+pace=15 produced_mbps=3.167 nominal_expected_mbps=1.000 nominal_ratio=3.167 timestamp_ratio=0.792
+pace=5 produced_mbps=4.126 nominal_expected_mbps=0.333 nominal_ratio=12.377 timestamp_ratio=1.031
+rate_model=timestamp within_25_percent=true
+after_pause largest_unit_bits=593640 frame_budget_bits=66666 ratio=8.90
+case codec=H265 size=1920x1080 low_latency=false nominal_fps=60 bitrate=4000000
+ INFO pb_mapper_desktop::session: event="macos_encoder_opened" codec=H265 low_latency=false width=1920 height=1080 fps=60 hardware=true gop=2147483647 data_rate_limits=true
+pace=60 submitted=240 units=240 keyframes=0 skipped_ticks=0 bits_per_unit=67389 dwell_p50_ms=10.33 dwell_p95_ms=11.16
+pace=30 submitted=120 units=120 keyframes=0 skipped_ticks=0 bits_per_unit=122152 dwell_p50_ms=10.72 dwell_p95_ms=11.81
+pace=15 submitted=60 units=60 keyframes=0 skipped_ticks=0 bits_per_unit=189242 dwell_p50_ms=11.09 dwell_p95_ms=13.91
+pace=5 submitted=20 units=20 keyframes=0 skipped_ticks=0 bits_per_unit=341450 dwell_p50_ms=11.57 dwell_p95_ms=15.34
+pace=60 produced_mbps=4.043 nominal_expected_mbps=4.000 nominal_ratio=1.011 timestamp_ratio=1.011
+pace=30 produced_mbps=3.665 nominal_expected_mbps=2.000 nominal_ratio=1.832 timestamp_ratio=0.916
+pace=15 produced_mbps=2.839 nominal_expected_mbps=1.000 nominal_ratio=2.839 timestamp_ratio=0.710
+pace=5 produced_mbps=1.707 nominal_expected_mbps=0.333 nominal_ratio=5.122 timestamp_ratio=0.427
+rate_model=timestamp within_25_percent=false
+after_pause largest_unit_bits=211888 frame_budget_bits=66666 ratio=3.18
+case codec=H265 size=2560x1440 low_latency=true nominal_fps=60 bitrate=4000000
+ INFO pb_mapper_desktop::session: event="macos_encoder_opened" codec=H265 low_latency=true width=2560 height=1440 fps=60 hardware=false gop=2147483647 data_rate_limits=true
+pace=60 submitted=240 units=240 keyframes=0 skipped_ticks=0 bits_per_unit=71424 dwell_p50_ms=6.96 dwell_p95_ms=7.31
+pace=30 submitted=120 units=120 keyframes=0 skipped_ticks=0 bits_per_unit=139577 dwell_p50_ms=7.25 dwell_p95_ms=9.39
+pace=15 submitted=60 units=60 keyframes=0 skipped_ticks=0 bits_per_unit=280792 dwell_p50_ms=7.66 dwell_p95_ms=10.23
+pace=5 submitted=20 units=20 keyframes=0 skipped_ticks=0 bits_per_unit=561519 dwell_p50_ms=7.96 dwell_p95_ms=11.05
+pace=60 produced_mbps=4.285 nominal_expected_mbps=4.000 nominal_ratio=1.071 timestamp_ratio=1.071
+pace=30 produced_mbps=4.187 nominal_expected_mbps=2.000 nominal_ratio=2.094 timestamp_ratio=1.047
+pace=15 produced_mbps=4.212 nominal_expected_mbps=1.000 nominal_ratio=4.212 timestamp_ratio=1.053
+pace=5 produced_mbps=2.808 nominal_expected_mbps=0.333 nominal_ratio=8.423 timestamp_ratio=0.702
+rate_model=timestamp within_25_percent=false
+after_pause largest_unit_bits=3785824 frame_budget_bits=66666 ratio=56.79
+case codec=H265 size=2560x1440 low_latency=false nominal_fps=60 bitrate=4000000
+ INFO pb_mapper_desktop::session: event="macos_encoder_opened" codec=H265 low_latency=false width=2560 height=1440 fps=60 hardware=true gop=2147483647 data_rate_limits=true
+pace=60 submitted=240 units=240 keyframes=0 skipped_ticks=0 bits_per_unit=66731 dwell_p50_ms=17.97 dwell_p95_ms=19.81
+pace=30 submitted=120 units=119 keyframes=0 skipped_ticks=0 bits_per_unit=121783 dwell_p50_ms=17.28 dwell_p95_ms=19.28
+pace=15 submitted=60 units=60 keyframes=0 skipped_ticks=0 bits_per_unit=191833 dwell_p50_ms=17.60 dwell_p95_ms=19.62
+pace=5 submitted=20 units=20 keyframes=0 skipped_ticks=0 bits_per_unit=270895 dwell_p50_ms=17.87 dwell_p95_ms=23.77
+pace=60 produced_mbps=4.004 nominal_expected_mbps=4.000 nominal_ratio=1.001 timestamp_ratio=1.001
+pace=30 produced_mbps=3.623 nominal_expected_mbps=2.000 nominal_ratio=1.812 timestamp_ratio=0.906
+pace=15 produced_mbps=2.877 nominal_expected_mbps=1.000 nominal_ratio=2.877 timestamp_ratio=0.719
+pace=5 produced_mbps=1.354 nominal_expected_mbps=0.333 nominal_ratio=4.063 timestamp_ratio=0.339
+rate_model=timestamp within_25_percent=false
+after_pause largest_unit_bits=831168 frame_budget_bits=66666 ratio=12.47
+case codec=H265 size=3840x2160 low_latency=true nominal_fps=60 bitrate=4000000
+ INFO pb_mapper_desktop::session: event="macos_encoder_opened" codec=H265 low_latency=true width=3840 height=2160 fps=60 hardware=false gop=2147483647 data_rate_limits=true
+pace=60 submitted=197 units=197 keyframes=0 skipped_ticks=0 bits_per_unit=61537 dwell_p50_ms=13.76 dwell_p95_ms=13.97
+pace=30 submitted=120 units=120 keyframes=0 skipped_ticks=0 bits_per_unit=105852 dwell_p50_ms=13.99 dwell_p95_ms=14.32
+pace=15 submitted=60 units=60 keyframes=0 skipped_ticks=0 bits_per_unit=211363 dwell_p50_ms=14.56 dwell_p95_ms=14.94
+pace=5 submitted=20 units=20 keyframes=0 skipped_ticks=0 bits_per_unit=818070 dwell_p50_ms=14.84 dwell_p95_ms=21.45
+pace=60 produced_mbps=3.031 nominal_expected_mbps=4.000 nominal_ratio=0.758 timestamp_ratio=0.758
+pace=30 produced_mbps=3.176 nominal_expected_mbps=2.000 nominal_ratio=1.588 timestamp_ratio=0.794
+pace=15 produced_mbps=3.170 nominal_expected_mbps=1.000 nominal_ratio=3.170 timestamp_ratio=0.793
+pace=5 produced_mbps=4.090 nominal_expected_mbps=0.333 nominal_ratio=12.271 timestamp_ratio=1.023
+rate_model=timestamp within_25_percent=true
+after_pause largest_unit_bits=14328 frame_budget_bits=66666 ratio=0.21
+case codec=H265 size=3840x2160 low_latency=false nominal_fps=60 bitrate=4000000
+ INFO pb_mapper_desktop::session: event="macos_encoder_opened" codec=H265 low_latency=false width=3840 height=2160 fps=60 hardware=true gop=2147483647 data_rate_limits=true
+pace=60 submitted=240 units=240 keyframes=0 skipped_ticks=0 bits_per_unit=67034 dwell_p50_ms=13.61 dwell_p95_ms=14.66
+pace=30 submitted=120 units=119 keyframes=0 skipped_ticks=0 bits_per_unit=127728 dwell_p50_ms=42.44 dwell_p95_ms=72.51
+pace=15 submitted=60 units=60 keyframes=0 skipped_ticks=0 bits_per_unit=208525 dwell_p50_ms=35.90 dwell_p95_ms=37.81
+pace=5 submitted=20 units=20 keyframes=0 skipped_ticks=0 bits_per_unit=413942 dwell_p50_ms=36.33 dwell_p95_ms=48.74
+pace=60 produced_mbps=4.022 nominal_expected_mbps=4.000 nominal_ratio=1.006 timestamp_ratio=1.006
+pace=30 produced_mbps=3.800 nominal_expected_mbps=2.000 nominal_ratio=1.900 timestamp_ratio=0.950
+pace=15 produced_mbps=3.128 nominal_expected_mbps=1.000 nominal_ratio=3.128 timestamp_ratio=0.782
+pace=5 produced_mbps=2.070 nominal_expected_mbps=0.333 nominal_ratio=6.209 timestamp_ratio=0.517
+rate_model=timestamp within_25_percent=false
+after_pause largest_unit_bits=180184 frame_budget_bits=66666 ratio=2.70
+summary codec=H265 size=1920x1080 low_latency=true rate_model=timestamp within_25_percent=true
+summary codec=H265 size=1920x1080 low_latency=false rate_model=timestamp within_25_percent=false
+summary codec=H265 size=2560x1440 low_latency=true rate_model=timestamp within_25_percent=false
+summary codec=H265 size=2560x1440 low_latency=false rate_model=timestamp within_25_percent=false
+summary codec=H265 size=3840x2160 low_latency=true rate_model=timestamp within_25_percent=true
+summary codec=H265 size=3840x2160 low_latency=false rate_model=timestamp within_25_percent=false
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 245 filtered out; finished in 306.41s
+
