@@ -73,8 +73,9 @@ struct Shared {
     /// [`Host::changes`].
     changes: ChangeSignal,
     /// Where the last session its transport ended left its rate: the next
-    /// session of its preset, within `qos::START_MEMORY`, starts no higher.
-    /// Kept here rather than in a room, which ends with its last viewer.
+    /// session of its preset that opens a room, within `qos::START_MEMORY`,
+    /// starts no higher. Kept here rather than in a room, which ends with
+    /// its last viewer.
     closing_rate: Mutex<Option<ClosingRate>>,
 }
 

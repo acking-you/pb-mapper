@@ -224,7 +224,8 @@ impl Acceptor {
         })
         .await;
         // Recorded before the slot frees, so a viewer that reconnects once
-        // this one is gone starts from it.
+        // this one is gone starts from it. A session that leaves none keeps
+        // the record as it was, with its own end.
         if let Some(rate) = session.closing_rate(Instant::now()) {
             *self.shared.closing_rate.lock() = Some(rate);
         }
@@ -276,7 +277,6 @@ impl Acceptor {
             .capabilities
             .iter()
             .any(|capability| capability == CAPABILITY_H265);
-        let previous = *self.shared.closing_rate.lock();
         if let Some(room) = active.as_ref().cloned() {
             let Some((codec, incompatible)) = room.negotiate_codec(&request.codecs, offered) else {
                 drop(active);
@@ -312,6 +312,9 @@ impl Acceptor {
                 }
                 room.set_codec(codec);
             }
+            // A closed session's rate starts only a session that opens a
+            // room: one that joins shares the encoder, which runs at the
+            // least of its viewers' rates, with viewers it would pull down.
             let session = Session::new_in_room(
                 slot,
                 room.shared.wake.clone(),
@@ -323,7 +326,7 @@ impl Acceptor {
                 request.limits,
                 request.quality,
                 room.rate_model,
-                previous,
+                None,
                 &request.capabilities,
                 &capabilities,
                 self.shared.changes.clone(),
@@ -386,6 +389,7 @@ impl Acceptor {
         .ok()?;
         let room_shared = RoomShared::new(self.shared.policy.clone(), codec);
         let slot = PeerSlot::FIRST;
+        let previous = *self.shared.closing_rate.lock();
         let session = Session::new_in_room(
             slot,
             room_shared.wake.clone(),

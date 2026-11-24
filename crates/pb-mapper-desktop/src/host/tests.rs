@@ -667,9 +667,45 @@ async fn encoder_bitrate(viewer: &mut Viewer) -> u32 {
     }
 }
 
+/// A one-pixel desktop whose encoder makes a byte of whatever codec it is
+/// asked for.
+struct Encoding;
+impl crate::Backend for Encoding {
+    fn display(&mut self) -> Result<crate::Display> {
+        crate::Backend::display(&mut Pixel)
+    }
+    fn capture(&mut self) -> Result<Vec<u8>> {
+        Ok(vec![1])
+    }
+    fn capture_video(
+        &mut self,
+        _: &crate::DesktopContext,
+        codec: VideoCodec,
+        keyframe: bool,
+        _: crate::VideoRate,
+    ) -> Result<Option<crate::EncodedFrame>> {
+        Ok(Some(crate::EncodedFrame {
+            format: crate::VideoFormat {
+                codec,
+                width: 10,
+                height: 10,
+                keyframe,
+                ..crate::VideoFormat::default()
+            },
+            bytes: vec![1],
+        }))
+    }
+    fn input(&mut self, _: &crate::Input) -> Result<()> {
+        Err(error("read-only test backend"))
+    }
+    fn release(&mut self) {}
+}
+
 /// A session whose viewer's connection closes leaves the host the rate it
-/// ended at, which the next session of its preset starts from; one the host
-/// ended leaves nothing.
+/// ended at, which the next session of its preset that opens a room starts
+/// from; one the host ended leaves nothing, one that joins a room starts at
+/// its preset's start, and one the record started that measured nothing
+/// leaves the record as it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_closed_connection_starts_the_next_session_no_higher() {
     let relay = pb_mapper_testkit::Relay::start("desktop-closing-rate").await;
@@ -680,13 +716,14 @@ async fn a_closed_connection_starts_the_next_session_no_higher() {
         None,
     );
     let host = Host::builder(options())
-        .backend(|| Ok(Pixel))
+        .backend(|| Ok(Encoding))
         .start(&client)
         .await
         .unwrap();
     let invitation = host.invitation().clone();
     let token = invitation.token_text();
-    let connect = || authenticate(&client, &invitation, token.clone(), vec![VideoCodec::Jpeg]);
+    let connect = || authenticate(&client, &invitation, token.clone(), vec![VideoCodec::H264]);
+    let record = || *host.shared.closing_rate.lock();
 
     // Disconnect, from the host, leaves nothing.
     let (mut first, answer) = connect().await;
@@ -694,7 +731,7 @@ async fn a_closed_connection_starts_the_next_session_no_higher() {
     let start = encoder_bitrate(&mut first).await;
     host.end_session();
     until(|| host.status().viewer.is_none()).await;
-    assert_eq!(*host.shared.closing_rate.lock(), None);
+    assert_eq!(record(), None);
     drop(first);
 
     // A connection that closes leaves Balanced's start, at 1080p.
@@ -702,16 +739,19 @@ async fn a_closed_connection_starts_the_next_session_no_higher() {
     assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
     until(|| host.status().viewer.is_some()).await;
     drop(second);
-    until(|| host.shared.closing_rate.lock().is_some()).await;
-    let record = host.shared.closing_rate.lock().unwrap();
-    assert_eq!(record.preset, QualityPreset::Balanced);
-    assert!((record.bpf - 66_667.0).abs() < 1.0, "{record:?}");
+    until(|| record().is_some()).await;
+    let closed = record().unwrap();
+    assert_eq!(closed.preset, QualityPreset::Balanced);
+    assert!((closed.bpf - 66_667.0).abs() < 1.0, "{closed:?}");
 
-    // Had it ended at half that, the next session starts there.
-    *host.shared.closing_rate.lock() = Some(ClosingRate {
-        bpf: record.bpf / 2.0,
-        ..record
-    });
+    // Had it ended at half that, the next session starts there; closing
+    // before its own link moved anything, it leaves that record, end and
+    // all, rather than renewing it.
+    let half = ClosingRate {
+        bpf: closed.bpf / 2.0,
+        ..closed
+    };
+    *host.shared.closing_rate.lock() = Some(half);
     let (mut third, answer) = connect().await;
     assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
     let lowered = encoder_bitrate(&mut third).await;
@@ -720,6 +760,20 @@ async fn a_closed_connection_starts_the_next_session_no_higher() {
         "{lowered} after {start}"
     );
     drop(third);
+    until(|| host.status().viewer.is_none()).await;
+    assert_eq!(record(), Some(half));
+
+    // A viewer that joins a room starts at the preset's start: the room's
+    // encoder runs at the least of its viewers' rates.
+    let (mut opened, answer) = connect().await;
+    assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+    let lowered = encoder_bitrate(&mut opened).await;
+    let (mut joined, answer) = connect().await;
+    assert!(matches!(answer, HostMessage::Accepted { .. }), "{answer:?}");
+    until(|| host.status().viewers.len() == 2).await;
+    assert_eq!(encoder_bitrate(&mut joined).await, start);
+    assert!(lowered < start, "{lowered} after {start}");
+    drop((opened, joined));
     host.stop().await.unwrap();
 }
 

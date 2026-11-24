@@ -188,7 +188,8 @@ impl Session {
 
     /// A session attached to a shared multi-viewer room. `previous` is where
     /// the last session its transport ended left its rate, which starts this
-    /// one no higher (`Qos::new`).
+    /// one no higher (`Qos::new`); the host passes it only to a session that
+    /// opens a room.
     #[expect(
         clippy::too_many_arguments,
         reason = "each room and handshake parameter is distinct"
@@ -289,11 +290,12 @@ impl Session {
 
     /// Where this session's rate stood at `now`, if its transport ended it:
     /// the viewer closed it, the connection failed, or the viewer went silent
-    /// for `HOST_READ_TIMEOUT`. `None` while it runs, and when the host, the
-    /// capture or a protocol error ended it.
+    /// for `HOST_READ_TIMEOUT`. `None` while it runs, when the host, the
+    /// capture or a protocol error ended it, and when its QoS leaves none
+    /// (`Qos::closing_rate`).
     pub fn closing_rate(&self, now: Instant) -> Option<ClosingRate> {
         let closed = matches!(*self.ending.lock(), Some(End::Closed));
-        closed.then(|| self.qos.lock().closing_rate(now))
+        closed.then(|| self.qos.lock().closing_rate(now)).flatten()
     }
 
     /// The viewer is hidden: no capture and no control until it resumes.
