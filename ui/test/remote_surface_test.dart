@@ -52,57 +52,145 @@ void main() {
     'original size keeps its 1:1 picture on whole device pixels wherever '
     'the pointer leads it, with no ground at the edges and slow pans kept',
     () {
-      const origin = Offset(10.4, 36.7);
       const remote = Size(2560, 1440);
       final random = math.Random(5);
       for (final dpr in _dprs) {
         for (final stage in const [Size(701, 419), Size(1003.3, 577.7)]) {
-          final reason = 'dpr $dpr, stage $stage';
-          final v = RemoteViewport()
-            ..aspectRatio = remote.aspectRatio
-            ..layout(stage)
-            ..setPixels(display: remote, video: remote, dpr: dpr)
-            ..setMode(ViewerScaleMode.original)
-            ..setOrigin(origin);
-          expect(
-            v.scene.width * v.scale * dpr,
-            moreOrLessEquals(remote.width, epsilon: 1e-6),
-            reason: reason,
-          );
-          for (var i = 0; i < 40; i++) {
-            final pointer = Offset(
-              random.nextDouble() * stage.width,
-              random.nextDouble() * stage.height,
-            );
-            v.autoScrollTo(pointer);
-            _expectOnDevicePixels(origin + v.offset, dpr, reason: reason);
-            final picture = v.offset & v.scene * v.scale;
-            expect(picture.left, lessThanOrEqualTo(1e-9), reason: reason);
-            expect(picture.top, lessThanOrEqualTo(1e-9), reason: reason);
-            expect(picture.right, greaterThan(stage.width - 1e-9));
-            expect(picture.bottom, greaterThan(stage.height - 1e-9));
-            // What the pointer is over is what the host is told it is over.
+          // Rounding the stage's place to device pixels goes up for some
+          // of these and down for others, at each edge.
+          for (final origin in const [
+            Offset(10.4, 36.7),
+            Offset(0.45, 0.55),
+            Offset(7.55, 12.45),
+          ]) {
+            final reason = 'dpr $dpr, stage $stage, origin $origin';
+            final v = RemoteViewport()
+              ..aspectRatio = remote.aspectRatio
+              ..layout(stage)
+              ..setPixels(display: remote, video: remote, dpr: dpr)
+              ..setMode(ViewerScaleMode.original)
+              ..setOrigin(origin);
             expect(
-              v.toLocal(v.toNormalized(pointer)!),
-              offsetMoreOrLessEquals(pointer),
+              v.scene.width * v.scale * dpr,
+              moreOrLessEquals(remote.width, epsilon: 1e-6),
               reason: reason,
             );
-          }
+            void expectOnGridWithNoGround(Offset pointer) {
+              final at = '$reason, pointer $pointer';
+              _expectOnDevicePixels(origin + v.offset, dpr, reason: at);
+              final picture = v.offset & v.scene * v.scale;
+              expect(picture.left, lessThanOrEqualTo(1e-9), reason: at);
+              expect(picture.top, lessThanOrEqualTo(1e-9), reason: at);
+              expect(
+                picture.right,
+                greaterThanOrEqualTo(stage.width - 1e-9),
+                reason: at,
+              );
+              expect(
+                picture.bottom,
+                greaterThanOrEqualTo(stage.height - 1e-9),
+                reason: at,
+              );
+            }
 
-          // A pan in steps smaller than a device pixel still moves.
-          v.autoScrollTo(stage.center(Offset.zero));
-          final start = v.offset;
-          for (var i = 0; i < 10; i++) {
-            v.panBy(const Offset(-0.3, 0.3));
+            for (var i = 0; i < 40; i++) {
+              final pointer = Offset(
+                random.nextDouble() * stage.width,
+                random.nextDouble() * stage.height,
+              );
+              v.autoScrollTo(pointer);
+              expectOnGridWithNoGround(pointer);
+              // What the pointer is over is what the host is told it is
+              // over.
+              expect(
+                v.toLocal(v.toNormalized(pointer)!),
+                offsetMoreOrLessEquals(pointer),
+                reason: reason,
+              );
+            }
+            // At an edge the picture is as far over as it goes: rounding
+            // must not pull it off the edge.
+            final w = stage.width, h = stage.height;
+            for (final pointer in [
+              Offset.zero,
+              Offset(w, 0),
+              Offset(0, h),
+              Offset(w, h),
+              Offset(w / 2, 0),
+              Offset(w / 2, h),
+              Offset(0, h / 2),
+              Offset(w, h / 2),
+            ]) {
+              v.autoScrollTo(pointer);
+              expectOnGridWithNoGround(pointer);
+            }
+
+            // A pan in steps smaller than a device pixel still moves.
+            v.autoScrollTo(stage.center(Offset.zero));
+            final start = v.offset;
+            for (var i = 0; i < 10; i++) {
+              v.panBy(const Offset(-0.3, 0.3));
+            }
+            expect(
+              v.offset.dx,
+              moreOrLessEquals(start.dx - 3, epsilon: 1 / dpr),
+            );
+            expect(
+              v.offset.dy,
+              moreOrLessEquals(start.dy + 3, epsilon: 1 / dpr),
+            );
+            _expectOnDevicePixels(origin + v.offset, dpr, reason: reason);
+            v.dispose();
           }
-          expect(v.offset.dx, moreOrLessEquals(start.dx - 3, epsilon: 1 / dpr));
-          expect(v.offset.dy, moreOrLessEquals(start.dy + 3, epsilon: 1 / dpr));
-          _expectOnDevicePixels(origin + v.offset, dpr, reason: reason);
-          v.dispose();
         }
       }
     },
   );
+
+  test('a live resize in original size keeps the point at the visible '
+      'centre, however many device pixels it goes through', () {
+    const origin = Offset(0.4, 36.6);
+    const remote = Size(2560, 1440);
+    for (final dpr in _dprs) {
+      // The stage in device pixels, as a window resizing one at a time.
+      Size stage(int width, int height) => Size(width / dpr, height / dpr);
+      final v = RemoteViewport()
+        ..aspectRatio = remote.aspectRatio
+        ..layout(stage(1001, 600))
+        ..setPixels(display: remote, video: remote, dpr: dpr)
+        ..setMode(ViewerScaleMode.original)
+        ..setOrigin(origin);
+      v.autoScrollTo(const Offset(240, 330) / dpr);
+      final start = v.offset;
+      final centre = v.toNormalized(v.visibleRect.center)!;
+      void expectCentreKept(String reason) {
+        final now = v.toNormalized(v.visibleRect.center)!;
+        // Within the half device pixel, one remote pixel, a snap moves.
+        expect(
+          (now.dx - centre.dx).abs() * remote.width,
+          lessThanOrEqualTo(0.5 + 1e-6),
+          reason: reason,
+        );
+        expect(
+          (now.dy - centre.dy).abs() * remote.height,
+          lessThanOrEqualTo(0.5 + 1e-6),
+          reason: reason,
+        );
+        _expectOnDevicePixels(origin + v.offset, dpr, reason: reason);
+      }
+
+      for (var d = 1; d <= 200; d++) {
+        v.layout(stage(1001 - d, 600 - d));
+        expectCentreKept('dpr $dpr, shrunk by $d');
+      }
+      for (var d = 199; d >= 0; d--) {
+        v.layout(stage(1001 - d, 600 - d));
+        expectCentreKept('dpr $dpr, grown back to $d');
+      }
+      expect(v.offset, offsetMoreOrLessEquals(start), reason: 'dpr $dpr');
+      v.dispose();
+    }
+  });
 
   test('a fit that would enlarge the picture by less than 4% shows it one '
       'device pixel per video pixel, centred on device pixels', () {

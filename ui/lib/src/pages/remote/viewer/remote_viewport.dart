@@ -322,6 +322,9 @@ final class RemoteViewport extends ChangeNotifier {
 
   @override
   void dispose() {
+    // A viewer that closes under a pinch ends it while the frame tears the
+    // tree down: the change it queued must not reach this after the frame.
+    _notifyQueued = false;
     _visibleRegion.dispose();
     super.dispose();
   }
@@ -375,12 +378,15 @@ final class RemoteViewport extends ChangeNotifier {
 
   /// Applies a change to the layout, the aspect or the mode while keeping
   /// the picture point at the centre of the visible rect. A zoom of the
-  /// user's stays in fit mode; original size follows the new scene.
+  /// user's stays in fit mode; original size follows the new scene. The
+  /// point is taken where the picture was before it snapped: taken where
+  /// it shows, each relayout of a live resize would add its snap's
+  /// rounding and the picture would slide.
   void _relayout(VoidCallback change, {bool rescale = false}) {
     final before = scene;
     final centre = before.isEmpty
         ? const Offset(0.5, 0.5)
-        : toNormalized(visibleRect.center, clamp: true)!;
+        : _beforeSnap(visibleRect.center);
     change();
     _pinch = null;
     final next = rescale || before.isEmpty || _mode == ViewerScaleMode.original
@@ -392,6 +398,16 @@ final class RemoteViewport extends ChangeNotifier {
       visibleRect.center -
           Offset(centre.dx * s.width, centre.dy * s.height) * next,
       force: true,
+    );
+  }
+
+  /// The picture point under [local], clamped to the picture, with the
+  /// picture at [_free]; the scene must not be empty.
+  Offset _beforeSnap(Offset local) {
+    final s = scene * _scale;
+    return Offset(
+      ((local.dx - _free.dx) / s.width).clamp(0.0, 1.0),
+      ((local.dy - _free.dy) / s.height).clamp(0.0, 1.0),
     );
   }
 

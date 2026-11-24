@@ -131,6 +131,7 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
       _arm();
       return;
     }
+    _viewport.setOrigin(_originOf(e));
     final n = _viewport.toNormalized(e.localPosition);
     if (n == null || !_input.ready.value) return;
     _syncButtons(e.pointer, e.buttons, n);
@@ -144,9 +145,9 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
     }
     final held = _buttons[e.pointer];
     if (held == null || !_input.ready.value) return;
-    _viewport
-      ..setOrigin(_originOf(e))
-      ..autoScrollTo(e.localPosition);
+    // A drag's moves keep its down's transform, stale if the stage moved
+    // since: the origin came with the down, or with a layout since.
+    _viewport.autoScrollTo(e.localPosition);
     final n = _viewport.toNormalized(e.localPosition, clamp: true);
     if (n == null) return;
     _input.move(n);
@@ -249,9 +250,9 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
 
   // ---------------------------------------------------------------- origin
 
-  /// The surface's top left in the view, from the event's own transform,
-  /// current even when the stage moved without a new layout; null unless
-  /// that transform only translates.
+  /// The surface's top left in the view, from the transform of a hover or
+  /// a down, each hit-tested where the stage is now: current even when the
+  /// stage moved without a new layout. Null unless it only translates.
   static Offset? _originOf(PointerEvent e) {
     final transform = e.transform;
     if (transform == null) return Offset.zero;
