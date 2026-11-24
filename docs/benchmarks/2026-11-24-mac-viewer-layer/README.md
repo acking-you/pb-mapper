@@ -99,7 +99,7 @@ glass, and they are not one span shortened. CPU is a share of one core.
 - The matrix's four builds came from this change before its last two
   edits, a log line when the platform view is made and a CVDisplayLink
   stopped with its owner (before macOS 14 only). A last layer run, 1080p at
-  60, built from the final code (`final-layer` in
+  60, built with the runner as committed (`final-layer` in
   [summary.jsonl](summary.jsonl)) logged its platform view hosting the
   layer (`PbDesktopVideo: Video view 0 for 1: its layer`) and read decode
   0.91 ms, present 0.37 ms and 59.8 pictures presented a second.
