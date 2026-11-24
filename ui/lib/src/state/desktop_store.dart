@@ -60,6 +60,9 @@ const _hostChangeBusyRetry = Duration(seconds: 1);
 /// or no display, so a grant made beside a visible window, or a display
 /// attached, shows within this. Returning to the app reads them at once.
 const _capabilityFallback = Duration(seconds: 10);
+
+/// The view leaf's read when no frame, no move and no moving peer pointer
+/// reads it (see `DesktopStore._acceptView`).
 const _viewTick = Duration(milliseconds: 16);
 const _moveInterval = Duration(milliseconds: 4);
 const _snapshotBound = Duration(milliseconds: 300);
@@ -324,7 +327,8 @@ class DesktopStore {
 
   /// The remote cursor, the session's: what the viewer moves, and the
   /// host's reports where they say something new. The view leaf reports
-  /// them, read every rendered frame and every 16 ms (D11).
+  /// them, read every rendered frame, every 16 ms, and every 4 ms while
+  /// this viewer moves the pointer (D11).
   DesktopCursor get cursor => _cursor;
 
   /// Other controlling viewers' pointers on the active display (`[0, 1]`);
@@ -1793,17 +1797,25 @@ class DesktopStore {
     }
   }
 
-  /// The leaf runs every rendered frame, and from a timer at the rate the
-  /// host samples its cursor. A report that moves [cursor] repaints it, and
-  /// asks for the frame that draws it. A change of generation, state or
-  /// flags re-reads the status, which publishes it.
+  /// The leaf runs every rendered frame, from a 16 ms timer, and as the
+  /// move gate closes, at most every 4 ms while this viewer moves the
+  /// pointer: a hover draws no frame where the cursor layer paints nothing,
+  /// and the shape the host gives the pointer for the move must not wait
+  /// for the timer. A report that moves [cursor] repaints it, and asks for
+  /// the frame that draws it. Peer pointers are read at the display's rate
+  /// while they move: a read that finds them moved, the timer's too, asks
+  /// for a frame, whose read asks for the next while they keep moving, and
+  /// one that finds them still asks for none. A change of generation,
+  /// state or flags re-reads the status, which publishes it.
   void _acceptView(DesktopView? view, {required bool inFrame}) {
     final previous = _view;
     _view = view;
+    final cursor = _publishCursor();
+    final peers = _publishPeerCursors();
+    final shape = _publishShape(view);
     // After paint a repaint asks for no frame: ask for the one that draws
     // the new cursor.
-    if ((_publishCursor() | _publishPeerCursors() | _publishShape(view)) &&
-        inFrame) {
+    if (peers || (inFrame && (cursor || shape))) {
       SchedulerBinding.instance.scheduleFrame();
     }
     if (view == null) return;
@@ -2637,13 +2649,19 @@ class DesktopStore {
   }
 
   /// The gate closes: the newest move waiting behind it goes, and opens the
-  /// gate again.
+  /// gate again. The view leaf is read then too, once the move went (see
+  /// [_acceptView]).
   void _flushMove() {
     _moveGate = null;
     final geometry = _geometry.value;
     final move = _takeMove();
-    if (move == null || geometry == null || !_accepts(geometry.epoch)) return;
-    if (_deliver(move)) _moveGate = Timer(_moveInterval, _flushMove);
+    if (move != null &&
+        geometry != null &&
+        _accepts(geometry.epoch) &&
+        _deliver(move)) {
+      _moveGate = Timer(_moveInterval, _flushMove);
+    }
+    if (_viewPolling) _acceptView(_readLeaf(), inFrame: false);
   }
 
   /// Rust stamps the frame id and sequence; Dart names only the generation.

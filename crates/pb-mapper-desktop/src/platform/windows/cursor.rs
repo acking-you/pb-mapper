@@ -61,7 +61,7 @@ impl CursorSource for WinCursor {
     const SHAPES: bool = true;
     /// Each read keeps the display and the system awake a little longer, as
     /// a capture call does: while a session runs unpaused, thread C reads the
-    /// pointer every 16 ms, and the helper's worker at each desktop check and
+    /// pointer at least every 16 ms, and the helper's worker at each desktop check and
     /// video request, even while the network or the encoder holds capture
     /// back. Once the session pauses, nothing reads it (through the helper,
     /// once the encoder's last output is drained). A move the injector made

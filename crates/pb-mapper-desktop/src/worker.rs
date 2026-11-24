@@ -18,7 +18,7 @@ mod window;
 
 use self::{
     capture::unavailable_reason,
-    cursor::CursorEcho,
+    cursor::{CursorEcho, ShapeLook},
     hold::{DragHold, LeftPress},
     window::{Window, WindowStats},
 };
@@ -470,6 +470,8 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     /// The next context check, or the next retry while unavailable.
     context_due: Instant,
     cursor_due: Instant,
+    /// The shape look a controller's move left, while one is pending.
+    shape_due: Option<ShapeLook>,
     /// At least one attached viewer reads shapes, and the backend reports them.
     cursor_shapes: bool,
     cursor_shape: Option<CursorShape>,
@@ -563,6 +565,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             hot_until: now,
             context_due: now,
             cursor_due: now,
+            shape_due: None,
             cursor_shapes: false,
             cursor_shape: None,
             drain_due: now,
@@ -949,8 +952,9 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         }
     }
 
-    /// The earliest of the next tick, cursor sample, context check, encoder
-    /// poll, hold end and notice expiry; every wait also ends on a wake.
+    /// The earliest of the next tick, cursor sample or shape look, context
+    /// check, encoder poll, hold end and notice expiry; every wait also ends
+    /// on a wake.
     fn deadline(&self, now: Instant) -> Instant {
         let mut deadline = now + CONTEXT_CHECK_INTERVAL;
         for slot in self.slots.iter().flatten() {
@@ -970,10 +974,12 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if self.paused || !self.slots.iter().any(Option::is_some) {
             return deadline;
         }
-        deadline
+        let deadline = deadline
             .min(self.context_due)
             .min(self.capture_at())
-            .min(self.cursor_due)
+            .min(self.cursor_due);
+        self.shape_due
+            .map_or(deadline, |look| deadline.min(look.due()))
     }
 }
 impl<B: Backend, K: Clock> Drop for Engine<B, K> {

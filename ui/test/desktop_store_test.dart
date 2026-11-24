@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1368,6 +1369,139 @@ void main() {
       expect(textures.created, hasLength(2));
       expect(textures.created.last.disposed, isTrue);
       expect(store.picture.value, isNull);
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
+
+  testWidgets(
+    "a moving peer pointer is read at every frame, the timer's read asking "
+    'for the first, and a still one on the timer only',
+    (tester) async {
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final viewer = store.demand(DesktopDemand.viewer);
+      await _live(tester, store, api);
+      int reads() => api.ops.where((op) => op == 'view').length;
+      double? peerX() => store.peerCursors.value.singleOrNull?.position.dx;
+      void peerAt(int x, int seq) => api.viewValue = DesktopView(
+        generation: 1,
+        presentedFrameId: 1,
+        displayWidth: 1920,
+        displayHeight: 1080,
+        videoWidth: 1920,
+        videoHeight: 1080,
+        state: 2,
+        controlAllowed: true,
+        fresh: true,
+        peerCursorSeq: seq,
+        peerCursors: [DesktopPeerCursor(color: 1, x: x, y: 540)],
+      );
+      // A peer pointer shows: the timer's read asks for a frame, whose read
+      // finds it still and asks for none.
+      peerAt(192, 1);
+      await tester.binding.delayed(const Duration(milliseconds: 16));
+      expect(peerX(), 0.1);
+      expect(tester.binding.hasScheduledFrame, isTrue);
+      var before = reads();
+      await tester.pump();
+      expect(reads() - before, 1);
+      expect(tester.binding.hasScheduledFrame, isFalse);
+
+      // Still: only the timer reads it, and asks for no frame.
+      before = reads();
+      await tester.binding.delayed(const Duration(milliseconds: 160));
+      expect(reads() - before, 10);
+      expect(tester.binding.hasScheduledFrame, isFalse);
+
+      // It moves: the timer's read asks for a frame, whose read finds it
+      // moved again and asks for the next, at the display's rate.
+      peerAt(384, 2);
+      await tester.binding.delayed(const Duration(milliseconds: 16));
+      expect(peerX(), 0.2);
+      expect(tester.binding.hasScheduledFrame, isTrue);
+      for (var seq = 3; seq < 8; seq++) {
+        peerAt(192 * seq, seq);
+        before = reads();
+        await tester.pump();
+        expect(reads() - before, 1);
+        expect(peerX(), closeTo(seq / 10, 1e-9));
+        expect(tester.binding.hasScheduledFrame, isTrue);
+      }
+      // At rest again: the next frame's read asks for none.
+      await tester.pump();
+      expect(tester.binding.hasScheduledFrame, isFalse);
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
+
+  testWidgets(
+    'while the pointer moves, the view is read as each 4 ms move gate '
+    'closes, so a shape named after a move is taken within 4 ms, with no '
+    'frame and before the timer',
+    (tester) async {
+      final api = FakeDesktopApi();
+      api.cursorShapes[1] = DesktopCursorShape(
+        kind: DesktopCursorKind.hand,
+        width: 1,
+        height: 1,
+        hotX: 0,
+        hotY: 0,
+        rgba: Uint8List(4),
+      );
+      final store = DesktopStore(api);
+      final viewer = store.demand(DesktopDemand.viewer);
+      await _live(tester, store, api, controlling: true);
+      final epoch = store.geometry.value!.epoch;
+      int reads() => api.ops.where((op) => op == 'view').length;
+      void named(int shape) => api.viewValue = DesktopView(
+        generation: 1,
+        presentedFrameId: 1,
+        displayWidth: 1920,
+        displayHeight: 1080,
+        videoWidth: 1920,
+        videoHeight: 1080,
+        cursorShape: shape,
+        state: 2,
+        controlling: true,
+        controlAllowed: true,
+        fresh: true,
+      );
+      named(0);
+      await tester.pump();
+      // Just after the timer's read: the next is 16 ms away.
+      var before = reads();
+      while (reads() == before) {
+        await tester.binding.delayed(const Duration(milliseconds: 1));
+      }
+
+      expect(
+        store.send(const DesktopInput.move(10, 10), geometryEpoch: epoch),
+        isTrue,
+      );
+      named(1);
+      await tester.binding.delayed(const Duration(milliseconds: 3));
+      expect(store.cursor.shape, isNull);
+      await tester.binding.delayed(const Duration(milliseconds: 1));
+      expect(store.cursor.shape?.definition.kind, DesktopCursorKind.hand);
+      expect(tester.binding.hasScheduledFrame, isFalse);
+
+      // Moves every millisecond: one goes each 4 ms, and the view is read
+      // as each gate closes, besides the timer.
+      await tester.binding.delayed(const Duration(milliseconds: 12));
+      before = reads();
+      for (var x = 0; x < 32; x++) {
+        store.send(DesktopInput.move(x, 10), geometryEpoch: epoch);
+        await tester.binding.delayed(const Duration(milliseconds: 1));
+      }
+      expect(reads() - before, 8 + 2);
+      // At rest: the last gate's read, then the timer alone.
+      before = reads();
+      await tester.binding.delayed(const Duration(milliseconds: 64));
+      expect(reads() - before, 1 + 4);
 
       viewer.dispose();
       store.dispose();
