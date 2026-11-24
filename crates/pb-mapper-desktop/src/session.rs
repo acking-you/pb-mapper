@@ -141,6 +141,9 @@ pub(crate) struct Session {
     qos: Mutex<Qos>,
     /// Wakes B-send: credit came back, or B-recv refused a control request.
     credit_changed: Notify,
+    /// A clamped window refused a unit, with no IDR in flight, since the last
+    /// receipt: congestion the receipts' controller reads with a small queue.
+    blocked: AtomicBool,
     /// B-recv refused a control request at the edge; B-send reports it.
     control_denied: AtomicBool,
     ending: Mutex<Option<End>>,
@@ -240,6 +243,7 @@ impl Session {
             credit: Mutex::new(CreditLedger::new(now, arrival_time)),
             qos: Mutex::new(qos),
             credit_changed: Notify::new(),
+            blocked: AtomicBool::new(false),
             control_denied: AtomicBool::new(false),
             ending: Mutex::new(None),
             changes,
@@ -305,12 +309,15 @@ impl Session {
 
     /// Change the controller and publish its targets to C. The targets are
     /// stored under the `qos` lock, so the newest decision is the one C reads.
+    /// The baseline a rebase moved then reaches the credit ledger, once the
+    /// `qos` lock is released.
     fn update_qos(&self, now: Instant, change: impl FnOnce(&mut Qos)) {
-        let changed = {
+        let (changed, rebase) = {
             let mut qos = self.qos.lock();
             change(&mut qos);
-            self.store_targets(qos.targets(now))
+            (self.store_targets(qos.targets(now)), qos.rebase_offset())
         };
+        self.credit.lock().set_rebase(rebase);
         if changed {
             self.shared.wake.notify();
         }
@@ -334,19 +341,26 @@ impl Session {
         self.update_qos(now, |qos| qos.tick(now, &credit, produced));
     }
 
-    /// Whether a unit fits the send window now.
+    /// Whether a unit fits the send window now. A clamped window that refuses
+    /// one with no IDR in flight marks the session blocked until the next
+    /// receipt. The `qos` lock is released before `credit` is taken.
     fn admissible(&self, len: usize, idr: bool, now: Instant) -> bool {
-        let (pace, expected, base) = {
+        let (pace, expected, base, clamp) = {
             let qos = self.qos.lock();
             (
                 qos.targets(now).pace_fps,
                 qos.expected_bps(now),
                 qos.base_rtt(),
+                qos.clamp_rate(now),
             )
         };
         let mut credit = self.credit.lock();
-        let window = credit.window(self.codec, pace, expected, base, now);
-        credit.fits(len, idr, &window)
+        let window = credit.window(self.codec, pace, expected, base, clamp, now);
+        let fits = credit.fits(len, idr, &window);
+        if !fits && window.clamped && credit.idr_inflight().is_none() {
+            self.blocked.store(true, Ordering::Release);
+        }
+        fits
     }
 
     /// B-recv's handling of one message: inline, never waiting for thread C.
@@ -363,7 +377,8 @@ impl Session {
                     .lock()
                     .on_receipt(seq, now, at_us)
                     .map_err(Violation::Receipt)?;
-                self.update_qos(now, |qos| qos.on_receipt(receipt, now));
+                let blocked = self.blocked.swap(false, Ordering::AcqRel);
+                self.update_qos(now, |qos| qos.on_receipt(receipt, blocked, now));
                 self.credit_changed.notify_one();
             }
             ViewerMessage::ProbeEcho { nonce, at_us } => {
@@ -456,7 +471,7 @@ impl Session {
                 if self.route.swap(code, Ordering::AcqRel) != code {
                     self.changes.bump();
                 }
-                self.qos.lock().reset_baseline();
+                self.update_qos(now, Qos::reset_baseline);
                 self.credit.lock().reset_one_way();
             }
             ViewerMessage::Control { enabled } => {

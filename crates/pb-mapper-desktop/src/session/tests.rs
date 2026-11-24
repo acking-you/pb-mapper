@@ -383,6 +383,67 @@ fn read_queues(session: &Session, now: Instant) -> (Option<u32>, Duration, Optio
     (delay, credit.ack_queue(base, now), reverse)
 }
 
+/// A clamped window that refuses a unit, with no IDR in flight, marks the
+/// session blocked; the next receipt hands that to the controller and clears
+/// it. A window that is only full, unclamped, marks nothing.
+#[test]
+fn a_clamped_window_that_refuses_a_unit_blocks_until_the_next_receipt() {
+    let session = session_listing(&[]);
+    let t0 = Instant::now();
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    const UNIT: usize = 5 * 1024;
+    // A 20 ms base.
+    session.qos.lock().probe_sent(1, t0, false);
+    session
+        .handle(
+            ViewerMessage::ProbeEcho {
+                nonce: 1,
+                at_us: None,
+            },
+            at(20),
+        )
+        .unwrap();
+    // A full window, unclamped: nothing is blocked.
+    let mut booked = Vec::new();
+    while session.admissible(UNIT, false, at(30)) {
+        booked.push(session.credit.lock().book(UNIT, false, at(30)));
+    }
+    assert!(!booked.is_empty());
+    assert!(!session.blocked.load(Ordering::Acquire));
+    for seq in booked.drain(..) {
+        session
+            .handle(ViewerMessage::Received { seq, at_us: None }, at(50))
+            .unwrap();
+    }
+    // Receipts 170 ms after their units for longer than a delivery window:
+    // a 150 ms ack queue, and a window that follows the delivery rate.
+    let mut last = at(50);
+    for n in 0..30 {
+        let sent = 100 + n * 20;
+        let seq = session.credit.lock().book(UNIT, false, at(sent));
+        last = at(sent + 170);
+        session
+            .handle(ViewerMessage::Received { seq, at_us: None }, last)
+            .unwrap();
+    }
+    while session.admissible(UNIT, false, last) {
+        booked.push(session.credit.lock().book(UNIT, false, last));
+    }
+    assert!(session.blocked.load(Ordering::Acquire));
+    // The next receipt takes it.
+    let seq = booked.first().copied().unwrap();
+    session
+        .handle(ViewerMessage::Received { seq, at_us: None }, last)
+        .unwrap();
+    assert!(!session.blocked.load(Ordering::Acquire));
+    // Waiting behind an IDR in flight is not congestion.
+    let idr = session.credit.lock().book(64 * UNIT, true, last);
+    while session.admissible(UNIT, false, last) {
+        session.credit.lock().book(UNIT, false, last);
+    }
+    assert!(!session.blocked.load(Ordering::Acquire));
+    assert!(idr > seq);
+}
 /// B-recv hands a viewer's arrival times to the controller and the ledger
 /// when both ends listed `arrival_time`: 300 ms held on the viewer's uplink
 /// lengthens every round trip, which a session without them reads as a

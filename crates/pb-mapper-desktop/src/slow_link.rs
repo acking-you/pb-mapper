@@ -22,8 +22,9 @@ use tracing_subscriber::{Layer, filter::Targets, layer::SubscriberExt};
 
 /// Balanced's start at 1080p and 60 fps: 66 667 bits per frame (perf 5.9.1).
 const START_BPS: u64 = 4_000_000;
-/// Balanced's most bits per frame at 1080p.
+/// Balanced's most and fewest bits per frame at 1080p.
 const BPF_MAX: u64 = 133_333;
+const BPF_FLOOR: u64 = 16_667;
 /// Balanced's ceiling under the viewer's 60 fps limit.
 const CEILING_FPS: u64 = 60;
 /// The synthetic encoder's usual latency, and when an output left in it is
@@ -1143,6 +1144,14 @@ fn isolated_stall_does_not_collapse_fps() {
             assert!(recovered <= RECOVERY, "back at 55 only after {recovered:?}");
         }
         assert_eq!(last.cuts, first.cuts, "a stall is no congestion to cut for");
+        // Nor does a 3 s window step bits per frame down for it: the
+        // receipts own them.
+        for (before, lowest) in encoder {
+            assert!(
+                lowest >= before,
+                "the encoder bitrate fell to {lowest} from {before}"
+            );
+        }
         trace.assert_never_latched();
     });
 }
@@ -1427,13 +1436,15 @@ async fn bandwidth_limit(trace: &Trace, case: &str, sizes: Sizes) -> LimitRun {
     .await
 }
 
-/// A 1 Mbit/s link for 8 s, then an unlimited one: the delivery rate clamps
-/// the window at once, the probe lowers fps and bits per frame, and both
-/// recover once the link does. The encoder is drained throughout, and its
-/// per-frame budget never latches the timestamp model.
+/// A 1 Mbit/s link for 8 s, then an unlimited one: the window clamps at
+/// once, the receipts cut bits per frame to Balanced's floor and the pace to
+/// what the link delivers at it, so the viewer keeps receiving 35 FPS or
+/// more over the limit's last 5 s, and both recover once the link does. The
+/// encoder is drained throughout, and its per-frame budget never latches the
+/// timestamp model.
 #[test]
 #[ignore = "explicit ~45-second bandwidth limit and recovery acceptance"]
-fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
+fn bandwidth_limit_cuts_bits_per_frame_then_recovers() {
     traced(|trace| async move {
         let run = bandwidth_limit(&trace, "bandwidth_limit", TYPICAL).await;
         let status = &run.status;
@@ -1445,11 +1456,16 @@ fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
             clamped.is_some_and(|after| after <= Duration::from_secs(1) + session::STATS_INTERVAL),
             "the window must clamp within 1 s of the limit: {clamped:?}"
         );
-        let lowest_pace = run.lowest(|interval| interval.pace_fps);
-        assert!(lowest_pace <= 15, "{lowest_pace}");
-        // Bits per frame may have risen past the start before the limit, and
-        // go on rising for a window or two while the clamp holds the delay
-        // down, so the fall is any step down from where they had reached.
+        assert!(
+            run.limit.iter().any(|interval| interval.bpf <= BPF_FLOOR),
+            "bits per frame must reach the floor: {:?}",
+            run.limit
+        );
+        let (pace, received) = (mean_pace(&run.last_intervals()), mean(&run.last_received()));
+        assert!(pace >= 40.0, "the pace fell to {pace:.1}");
+        assert!(received >= 35.0, "the viewer received {received:.1} fps");
+        // Bits per frame may have risen past the start before the limit, so
+        // the fall is any step down from where they had reached.
         let encoder_trace = run.encoder_trace();
         assert!(
             std::iter::once(&run.before.encoder_bitrate)
@@ -1673,11 +1689,10 @@ fn recurring_stalls_cut() {
 }
 
 /// The same limit on an encoder that budgets per second. At the nominal model
-/// it spends the nominal bitrate at any pace, so its pictures fill the link,
-/// capture waits for credit and the pace falls below 3 FPS, where no 2 s of
-/// ticks holds six frames: no latch can come until pictures flow again, by
-/// when the pace is climbing back. Reports whether and when the latch came,
-/// and asserts that the session recovers as it does on a per-frame budget.
+/// it spends the nominal bitrate at any pace, so a lower pace sheds nothing:
+/// only a cut of bits per frame, which lowers the nominal bitrate, does.
+/// Reports whether and when the latch came, and asserts that the session
+/// recovers as it does on a per-frame budget.
 #[test]
 #[ignore = "explicit ~45-second per-second encoder measurement on a bandwidth limit"]
 fn per_second_encoder_on_a_bandwidth_limit() {
@@ -1846,7 +1861,7 @@ fn reverse_queue_with_forward_limit_still_cuts() {
 /// A 1 Mbit/s link from the start, with IDRs twenty times a P-frame: each
 /// takes over a second to cross. The P-frames behind the session's first IDR
 /// wait for it rather than age out into another, the viewer does not ask for
-/// it again, and fps and bits per frame fall as on any slow link.
+/// it again, and bits per frame fall as on any slow link.
 #[test]
 #[ignore = "explicit ~15-second slow IDR acceptance"]
 fn idr_slower_than_a_second_is_followed_not_replaced() {
