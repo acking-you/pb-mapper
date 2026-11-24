@@ -337,6 +337,8 @@ impl Codec {
                     display_remoting,
                     // The device's and process's, which `Encoder` holds.
                     gpu_priority: _,
+                    // The video processor's, which `Converter` takes.
+                    vp_usage: _,
                 },
         } = settings;
         let transform: IMFTransform = unsafe {
