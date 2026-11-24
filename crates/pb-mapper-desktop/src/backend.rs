@@ -225,6 +225,9 @@ pub trait Backend: 'static {
     }
     /// Release every held key and button.
     fn release(&mut self);
+    /// Drop any scroll distance kept short of a whole step, as when another
+    /// controller takes over scrolling.
+    fn forget_scroll(&mut self) {}
     /// The OS double-click time and box of the interactive session; `None`
     /// means a drag-start press is never held.
     fn double_click_guard(&mut self) -> Option<DoubleClickGuard> {
@@ -350,6 +353,9 @@ impl<B: Backend + ?Sized> Backend for Box<B> {
     fn release(&mut self) {
         (**self).release();
     }
+    fn forget_scroll(&mut self) {
+        (**self).forget_scroll();
+    }
     fn double_click_guard(&mut self) -> Option<DoubleClickGuard> {
         (**self).double_click_guard()
     }
@@ -417,6 +423,9 @@ pub struct BackendCaps {
     /// the pace. A `Nominal` session whose encoder overspends at a reduced
     /// pace still latches to `Timestamp`; nothing latches back.
     pub rate_model: RateModel,
+    /// It injects `Input::Scroll`: scrolling in 1/120 of a notch, a
+    /// trackpad's travel included, which the host lists as `wheel_hires`.
+    pub hires_wheel: bool,
 }
 impl BackendCaps {
     /// The values a host lists in `Accepted.capabilities` for these.
@@ -434,11 +443,15 @@ impl BackendCaps {
         let shapes = self
             .cursor_shapes
             .then(|| crate::protocol::CAPABILITY_CURSOR_SHAPE.to_string());
+        let hires_wheel = self
+            .hires_wheel
+            .then(|| crate::protocol::CAPABILITY_WHEEL_HIRES.to_string());
         lock.into_iter()
             .chain(modes)
             .chain(os)
             .chain(physical_keys)
             .chain(shapes)
+            .chain(hires_wheel)
             .collect()
     }
 }

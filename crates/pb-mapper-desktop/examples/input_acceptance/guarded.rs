@@ -132,6 +132,9 @@ impl Backend for Guarded {
     fn release(&mut self) {
         self.inner.release();
     }
+    fn forget_scroll(&mut self) {
+        self.inner.forget_scroll();
+    }
     fn double_click_guard(&mut self) -> Option<DoubleClickGuard> {
         self.inner.double_click_guard()
     }

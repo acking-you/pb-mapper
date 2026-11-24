@@ -17,7 +17,10 @@ use super::{
 };
 use crate::{
     BackendError, Button, DoubleClickGuard, FailureKind, Key, Permission, Result, error,
-    input::held::{NativeKeys, Pressed},
+    input::{
+        SCROLL_UNITS_PER_NOTCH, ScrollCarry,
+        held::{NativeKeys, Pressed},
+    },
     platform::Injector,
 };
 use objc2::rc::autoreleasepool;
@@ -52,6 +55,45 @@ pub(crate) struct MacInput {
     /// The layout named keys go through, and the read it came from.
     layout: (u64, Layout),
     keys: NativeKeys,
+    /// What scrolls left short of a whole point or line.
+    scrolls: ScrollSteps,
+}
+
+/// `Input::Scroll` units per point of continuous travel: a notch, 120
+/// units, is 100 points, as the viewer measures a trackpad's travel.
+const UNITS_PER_POINT: (i64, i64) = (6, 5);
+
+/// What a Mac posts of `Input::Scroll`s: whole points of continuous travel,
+/// 1.2 units a point, or whole lines of a wheel's, a notch a line as
+/// `Input::Wheel` posts them; what falls short of one is kept for the next.
+#[derive(Default)]
+struct ScrollSteps {
+    points: ScrollCarry,
+    lines: ScrollCarry,
+}
+impl ScrollSteps {
+    /// The unit and the wheel deltas to post for a scroll of these units,
+    /// in Core Graphics' directions (wheel 1 positive up, wheel 2 positive
+    /// left), or `None` while it completes no whole step.
+    fn take(
+        &mut self,
+        horizontal: i32,
+        vertical: i32,
+        continuous: bool,
+    ) -> Option<(CGScrollEventUnit, i32, i32)> {
+        let units = (horizontal, vertical);
+        let (unit, (x, y)) = if continuous {
+            let (per, worth) = UNITS_PER_POINT;
+            (
+                CGScrollEventUnit::Pixel,
+                self.points.take(units, worth, per),
+            )
+        } else {
+            let per = SCROLL_UNITS_PER_NOTCH.into();
+            (CGScrollEventUnit::Line, self.lines.take(units, 1, per))
+        };
+        ((x, y) != (0, 0)).then(|| (unit, y.saturating_neg(), x.saturating_neg()))
+    }
 }
 
 impl MacInput {
@@ -70,6 +112,7 @@ impl MacInput {
             access: None,
             layout: (layout::generation(), layout::current()),
             keys: NativeKeys::default(),
+            scrolls: ScrollSteps::default(),
         })
     }
 
@@ -270,6 +313,7 @@ impl Injector for MacInput {
     /// macOS has no public call that locks the screen.
     const LOCK: bool = false;
     const PHYSICAL_KEYS: bool = true;
+    const HIRES_WHEEL: bool = true;
     /// The cursor reports `(x, y)` until the window server has applied the
     /// move (`pointer.rs`).
     fn pointer(&mut self, x: i32, y: i32) -> Result<()> {
@@ -327,6 +371,30 @@ impl Injector for MacInput {
         }
         self.post(event)
     }
+    /// Continuous travel as a pixel scroll in points, marked continuous, as
+    /// a trackpad's: apps scroll by exactly that much. A wheel's notches as
+    /// lines, as `wheel` posts them, parts of one kept until it is whole.
+    fn scroll(&mut self, horizontal: i32, vertical: i32, continuous: bool) -> Result<()> {
+        self.allowed()?;
+        let Some((unit, wheel1, wheel2)) = self.scrolls.take(horizontal, vertical, continuous)
+        else {
+            return Ok(());
+        };
+        let event =
+            CGEvent::new_scroll_wheel_event2(Some(&self.source), unit, 2, wheel1, wheel2, 0);
+        if let Some(event) = &event {
+            self.flag(event, self.modifiers.flags(), 0);
+            CGEvent::set_integer_value_field(
+                Some(event),
+                CGEventField::ScrollWheelEventIsContinuous,
+                i64::from(continuous),
+            );
+        }
+        self.post(event)
+    }
+    fn forget_scroll(&mut self) {
+        self.scrolls = ScrollSteps::default();
+    }
     /// `Meta` is Command and `Control` Control: the viewer's Apple swap
     /// relies on it.
     fn key(&mut self, key: Key, down: bool) -> Result<()> {
@@ -359,5 +427,40 @@ impl Injector for MacInput {
             time_ms: (interval * 1000.0).round() as u32,
             half_box: (half, half),
         })
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::{CGScrollEventUnit, ScrollSteps};
+
+    /// A trackpad's travel, sent in uneven parts, posts a point for each
+    /// 1.2 units, wheel 1 up for a scroll down and wheel 2 left for one
+    /// right; a wheel's notch posts a line, half notches a line every
+    /// second; what one kind left over waits for that kind alone.
+    #[test]
+    fn a_mac_posts_points_of_travel_and_lines_of_notches() {
+        let mut steps = ScrollSteps::default();
+        let (mut up, mut left) = (0, 0);
+        // 360 units down and 180 right: 300 points and 150.
+        for units in [2, 4, 6, 8, 10, 6].repeat(10) {
+            if let Some((unit, wheel1, wheel2)) = steps.take(units / 2, units, true) {
+                assert_eq!(unit, CGScrollEventUnit::Pixel);
+                up += wheel1;
+                left += wheel2;
+            }
+        }
+        assert_eq!((up, left), (-300, -150));
+        let line = |wheel1, wheel2| Some((CGScrollEventUnit::Line, wheel1, wheel2));
+        assert_eq!(steps.take(0, 120, false), line(-1, 0));
+        assert_eq!(steps.take(0, -60, false), None);
+        assert_eq!(steps.take(0, -60, false), line(1, 0));
+        assert_eq!(steps.take(-240, 0, false), line(0, 2));
+        assert_eq!(steps.take(0, 1, true), None);
+        assert_eq!(steps.take(0, 60, false), None);
+        assert_eq!(
+            steps.take(0, 1, true),
+            Some((CGScrollEventUnit::Pixel, -1, 0))
+        );
     }
 }

@@ -11,7 +11,7 @@ use crate::{
     VideoCodec, VideoFormat, VideoLimits, VideoRate, Waker,
     backend::capture_checked,
     error,
-    input::{Typed, cursor::confine, held::Held},
+    input::{SCROLL_UNITS_PER_NOTCH, ScrollCarry, Typed, cursor::confine, held::Held},
     modes::{self, Guard, Journal, Mode, ModeList},
     platform::{
         self, CursorSource, Desktop, DisplayModes, Injector, Parts, Platform, StillCapture,
@@ -42,6 +42,9 @@ pub(crate) struct PlatformBackend<P: Platform> {
     parts: Parts<P>,
     grant: Arc<P::Grant>,
     held: Held,
+    /// What an `Input::Scroll` toward an injector that scrolls only in
+    /// notches left short of the next one.
+    notches: ScrollCarry,
     limits: VideoLimits,
     /// A pushing source's wake: a session's once bound, else one of its own,
     /// so a backend no session drives (the helper's worker, a bench) is never
@@ -77,6 +80,7 @@ impl<P: Platform> PlatformBackend<P> {
             parts,
             grant,
             held: Held::default(),
+            notches: ScrollCarry::default(),
             limits: UNCONFIGURED,
             waker: Waker(crate::scheduler::Wake::new()),
             modes: Guard::new(journal),
@@ -158,6 +162,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
                 physical_keys: <P::Input as Injector>::PHYSICAL_KEYS,
                 cursor_shapes: <P::Cursor as CursorSource>::SHAPES,
                 rate_model: <P::Video as VideoSource>::RATE_MODEL,
+                hires_wheel: <P::Input as Injector>::HIRES_WHEEL,
             },
             display,
         })
@@ -369,6 +374,26 @@ impl<P: Platform> Backend for PlatformBackend<P> {
             Input::PhysicalKey { .. } => {
                 Err(BackendError::new(FailureKind::Unsupported, "physical keys").into())
             }
+            Input::Scroll {
+                horizontal,
+                vertical,
+                continuous,
+            } if <P::Input as Injector>::HIRES_WHEEL => {
+                input.scroll(*horizontal, *vertical, *continuous)
+            }
+            // A host that did not list `wheel_hires` is sent none; one that
+            // comes anyway scrolls whole notches, the rest kept for the next.
+            Input::Scroll {
+                horizontal,
+                vertical,
+                ..
+            } => match self
+                .notches
+                .take((*horizontal, *vertical), 1, SCROLL_UNITS_PER_NOTCH.into())
+            {
+                (0, 0) => Ok(()),
+                (horizontal, vertical) => input.wheel(horizontal, vertical),
+            },
             // The interactive session's own lock; the desktop switch that
             // follows invalidates the generation through the context check.
             Input::Lock {} if input.can_lock() => input.lock(),
@@ -386,8 +411,17 @@ impl<P: Platform> Backend for PlatformBackend<P> {
     fn presented(&mut self, _expected: &DesktopContext) -> Result<()> {
         Ok(())
     }
+    /// Held input is let go, and what a scroll kept short of a step is
+    /// dropped: thread C releases everything as control ends, the picture
+    /// goes stale or the desktop's generation moves on, after which that
+    /// part belongs to nobody's next scroll.
     fn release(&mut self) {
         release(&mut self.held, &mut self.parts.input);
+        self.forget_scroll();
+    }
+    fn forget_scroll(&mut self) {
+        self.notches = ScrollCarry::default();
+        self.parts.input.forget_scroll();
     }
     fn double_click_guard(&mut self) -> Option<DoubleClickGuard> {
         let _scope = self.parts.desktop.scope();
@@ -574,6 +608,9 @@ impl Backend for NativeBackend {
     fn release(&mut self) {
         self.0.release();
     }
+    fn forget_scroll(&mut self) {
+        self.0.forget_scroll();
+    }
     fn double_click_guard(&mut self) -> Option<DoubleClickGuard> {
         self.0.double_click_guard()
     }
@@ -654,5 +691,50 @@ mod tests {
         assert_eq!(probe.checks(), forgot(fresh(1)));
         assert!(!backend.restore_display_mode().unwrap());
         assert_eq!(probe.checks(), forgot(Checks::default()));
+    }
+
+    /// Toward an injector that scrolls in notches alone, which the host
+    /// does not list as `wheel_hires`, a scroll goes as whole notches, the
+    /// rest kept for the next; a release drops what was kept, here and in
+    /// an injector that keeps its own, so one controller's part of a step
+    /// never completes the next one's.
+    #[test]
+    fn a_release_drops_what_a_scroll_kept_short_of_a_step() {
+        let probe = Probe::default();
+        let mut backend = PlatformBackend::<Synthetic<false, false>>::open(
+            Arc::new(probe.clone()),
+            &Probe::display(),
+            Journal::default(),
+        )
+        .unwrap();
+        assert!(!backend.describe(false).unwrap().caps.hires_wheel);
+        let context = backend.context().unwrap();
+        let scroll = |backend: &mut PlatformBackend<_>, vertical| {
+            let input = Input::Scroll {
+                horizontal: 0,
+                vertical,
+                continuous: false,
+            };
+            backend.input_in_context(&context, &input).unwrap();
+        };
+        scroll(&mut backend, 180);
+        assert_eq!(probe.wheels(), [(0, 1)]);
+        scroll(&mut backend, 30);
+        backend.release();
+        scroll(&mut backend, 60);
+        assert_eq!(probe.wheels(), [(0, 1)], "90 kept would make a notch");
+        scroll(&mut backend, 60);
+        assert_eq!(probe.wheels(), [(0, 1), (0, 1)]);
+        assert!(probe.scrolls().is_empty());
+
+        let probe = Probe::default();
+        let mut backend = PlatformBackend::<Synthetic<false>>::open(
+            Arc::new(probe.clone()),
+            &Probe::display(),
+            Journal::default(),
+        )
+        .unwrap();
+        backend.release();
+        assert_eq!(probe.scroll_forgets(), 1);
     }
 }

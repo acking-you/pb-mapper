@@ -467,10 +467,12 @@ Nothing in the SDK crates knows it exists.
     or is offered Update); `background.rs` and `background/`, its own host
     and that host's grant at rest; `os/`, its Win32 glue by concern. The
     service side and the `pb-mapper-desktop-helper` binary need `--features
-    windows-helper`. `HELPER_PROTOCOL` (now 11) and the `.v<n>` pipe names
+    windows-helper`. `HELPER_PROTOCOL` (now 12) and the `.v<n>` pipe names
     change together; an installed helper of another protocol, or of another
     build (its executable differs from the one bundled with the app), is
-    offered Update. Protocol 11: `Request::Adapter` and `Response.adapter`,
+    offered Update. Protocol 12: `Input::Scroll` inside `Request::Input`,
+    and `StartCaps.hires_wheel`, whether the worker injects it.
+    Protocol 11: `Request::Adapter` and `Response.adapter`,
     the GPU and driver that drive the worker's display (`AdapterKey`, named
     by the platform through `oop/server.rs`'s `NamedAdapter`), asked only
     for a viewer that decodes H.265; the `H265` answer names the GPU only
@@ -523,10 +525,12 @@ Nothing in the SDK crates knows it exists.
   - `input/`: the input vocabulary a controlling viewer sends (`Input`,
     `Button`, `Key`, `InputEvent`, `DoubleClickGuard`; `Input` and `Key` are
     `#[non_exhaustive]`, and `Input::PhysicalKey` carries a USB HID usage,
-    0x04 to 0xE7, sent only to a host that listed `physical_keys`) and the
-    neutral rules every platform's injector follows: held-input release
-    (`held.rs`, physical keys included), text as runs with one Enter or Tab
-    per line break or tab (`Input::typed`), and cursor confinement, the
+    0x04 to 0xE7, sent only to a host that listed `physical_keys`, and
+    `Input::Scroll` 1/120 of a notch, sent only to one that listed
+    `wheel_hires`) and the neutral rules every platform's injector follows:
+    held-input release (`held.rs`, physical keys included), text as runs
+    with one Enter or Tab per line break or tab (`Input::typed`), whole
+    steps out of scroll units (`ScrollCarry`), and cursor confinement, the
     pointer's shape and the pointer a posted move leaves (`cursor.rs`:
     `CursorShape`, `CursorKind`, the scale-down to 256 a side; `Pointer`,
     the injected pixel until the OS shows it, which the Windows and macOS
@@ -752,6 +756,12 @@ The design and its rules are in `docs/ui-design.md`.
     `pb_mapper/desktop_pointer` channel (`lib/src/ffi/desktop_pointer.dart`;
     `windows/runner/desktop_pointer.cpp`, `darwin/DesktopPointer.swift` in
     the macOS runner only, `linux/runner/desktop_pointer.cc`).
+    `remote_scroll.dart` turns a wheel's distance back into the notches this
+    computer's embedder made of it (on Windows with the lines a notch
+    scrolls, the Windows runner's `wheel_lines` on the same channel), keeps
+    what falls short of a step, and carries a touchpad's fling on with this
+    platform's scroll physics (`ScrollFling`), which `remote_surface.dart`
+    drives from a ticker.
     `tool/pointer_latency.dart` times both paths against the rebuild they
     replace, and the painted pointer the bitmap path replaces, in a release
     build. `decoder_hint.dart` says, in the quality panel and under the

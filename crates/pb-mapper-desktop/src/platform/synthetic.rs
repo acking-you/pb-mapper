@@ -4,7 +4,9 @@
 //! a pushing one that wakes thread C when a unit is ready, as a callback
 //! encoder does. A pushing source can also be a dated display
 //! (`Probe::date`): pictures presented at a set rate on the test's clock,
-//! each waking thread C as it lands, as ScreenCaptureKit's do.
+//! each waking thread C as it lands, as ScreenCaptureKit's do. `HIRES =
+//! false` is an injector that scrolls in whole notches alone, which a host
+//! does not list as `wheel_hires`.
 
 use super::{
     CursorSource, Desktop, DisplayModes, HostSupport, Injector, Parts, Platform, StillCapture,
@@ -27,7 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(crate) enum Synthetic<const PUSH: bool> {}
+pub(crate) enum Synthetic<const PUSH: bool, const HIRES: bool = true> {}
 
 /// One keyboard injection, as the synthetic injector saw it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +50,13 @@ struct State {
     released: Vec<Pressed>,
     /// Every key, physical key and text injected, in order.
     typed: Vec<Typed>,
+    /// Every scroll injected, in order: its units each way and whether it
+    /// was continuous.
+    scrolls: Vec<(i32, i32, bool)>,
+    /// Every wheel's notches injected, in order.
+    wheels: Vec<(i32, i32)>,
+    /// How often the injector was told to drop what scrolls kept.
+    scroll_forgets: usize,
     /// Ready to drained, per unit.
     latencies: Vec<Duration>,
     /// The display's size now, once a mode changed it.
@@ -186,6 +195,15 @@ impl Probe {
     pub(crate) fn typed(&self) -> Vec<Typed> {
         self.0.lock().typed.clone()
     }
+    pub(crate) fn scrolls(&self) -> Vec<(i32, i32, bool)> {
+        self.0.lock().scrolls.clone()
+    }
+    pub(crate) fn wheels(&self) -> Vec<(i32, i32)> {
+        self.0.lock().wheels.clone()
+    }
+    pub(crate) fn scroll_forgets(&self) -> usize {
+        self.0.lock().scroll_forgets
+    }
     pub(crate) fn released(&self) -> Vec<Pressed> {
         self.0.lock().released.clone()
     }
@@ -263,12 +281,12 @@ impl Probe {
     }
 }
 
-impl<const PUSH: bool> Platform for Synthetic<PUSH> {
+impl<const PUSH: bool, const HIRES: bool> Platform for Synthetic<PUSH, HIRES> {
     const OS: HostOs = HostOs::Linux;
     type Grant = Probe;
     type Desktop = SynDesktop;
     type Video = SynVideo<PUSH>;
-    type Input = SynInput;
+    type Input = SynInput<HIRES>;
     type Cursor = SynCursor;
     type Modes = SynModes;
     type Still = SynStill;
@@ -594,10 +612,11 @@ impl<const PUSH: bool> SynVideo<PUSH> {
     }
 }
 
-pub(crate) struct SynInput(Probe);
-impl Injector for SynInput {
+pub(crate) struct SynInput<const HIRES: bool>(Probe);
+impl<const HIRES: bool> Injector for SynInput<HIRES> {
     const LOCK: bool = false;
     const PHYSICAL_KEYS: bool = true;
+    const HIRES_WHEEL: bool = HIRES;
     fn pointer(&mut self, x: i32, y: i32) -> Result<()> {
         self.0.0.lock().pointer = Some((x, y));
         Ok(())
@@ -605,7 +624,8 @@ impl Injector for SynInput {
     fn button(&mut self, _: Button, _: bool) -> Result<()> {
         Ok(())
     }
-    fn wheel(&mut self, _: i32, _: i32) -> Result<()> {
+    fn wheel(&mut self, horizontal: i32, vertical: i32) -> Result<()> {
+        self.0.0.lock().wheels.push((horizontal, vertical));
         Ok(())
     }
     fn key(&mut self, key: Key, down: bool) -> Result<()> {
@@ -625,6 +645,17 @@ impl Injector for SynInput {
     fn physical_key(&mut self, usage: u16, down: bool) -> Result<()> {
         self.0.0.lock().typed.push(Typed::Physical(usage, down));
         Ok(())
+    }
+    fn scroll(&mut self, horizontal: i32, vertical: i32, continuous: bool) -> Result<()> {
+        self.0
+            .0
+            .lock()
+            .scrolls
+            .push((horizontal, vertical, continuous));
+        Ok(())
+    }
+    fn forget_scroll(&mut self) {
+        self.0.0.lock().scroll_forgets += 1;
     }
     fn lock(&mut self) -> Result<()> {
         Err(BackendError::new(FailureKind::Unsupported, "lock").into())
@@ -722,12 +753,9 @@ mod tests {
 
         let watching = Presenting::connect(&client, &host).await;
         let controlled = watching.control().await;
-        assert!(
-            controlled
-                .capabilities
-                .iter()
-                .any(|listed| listed == "physical_keys")
-        );
+        for listed in ["physical_keys", "wheel_hires"] {
+            assert!(controlled.capabilities.iter().any(|l| l == listed));
+        }
         let shift = Input::Key {
             key: Key::Shift,
             down: true,
@@ -771,6 +799,22 @@ mod tests {
                 Typed::Text("b".into()),
             ]
         );
+        // A trackpad's travel and a wheel's notch reach the injector as the
+        // viewer sent them, in 1/120 of a notch.
+        let scroll = |vertical, continuous| Input::Scroll {
+            horizontal: -5,
+            vertical,
+            continuous,
+        };
+        watching
+            .viewer
+            .input(
+                controlled.generation,
+                &[scroll(7, true), scroll(120, false)],
+            )
+            .unwrap();
+        until(|| probe.scrolls().len() == 2).await;
+        assert_eq!(probe.scrolls(), [(-5, 7, true), (-5, 120, false)]);
         if !PUSH {
             // The pointer takes another shape where the controller's own
             // move left it: the shape reaches the viewer all the same, and
