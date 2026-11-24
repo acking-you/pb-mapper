@@ -365,6 +365,13 @@ impl FpsCap {
         self.lag_ticks = 0;
     }
 
+    /// The session moved to another host session, which knows no cap: the
+    /// cap in force, a probe under watch taken back, to send it again.
+    pub fn resend(&mut self, now: Instant) -> Option<u32> {
+        self.freeze(now);
+        self.cap
+    }
+
     /// Paused, or the host does not stream: nothing is judged, and the hold
     /// toward a raise starts over afterwards. A probe under watch is taken
     /// back, without a verdict, so the host never stays above what the

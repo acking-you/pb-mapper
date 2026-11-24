@@ -16,7 +16,7 @@ mod reports;
 mod socket;
 mod tcp;
 
-pub(crate) use consumer::Consumer;
+pub(crate) use consumer::{Consumer, DirectOnly};
 pub(crate) use identity::transport;
 pub(crate) use memory::{DirectMemory, PauseScope};
 use pb_mapper_protocol::direct::{SETUP_TTL_MS, SessionGrant};

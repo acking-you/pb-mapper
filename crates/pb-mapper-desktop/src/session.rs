@@ -97,6 +97,10 @@ impl fmt::Display for Violation {
     }
 }
 
+/// What a standby's `Resume` does first: it takes its pair's place, unless
+/// it no longer stands by. Its room's, under the room's lock.
+pub(crate) type Promotion = Box<dyn FnOnce() -> bool + Send>;
+
 /// How a session ended; the first decision wins.
 #[derive(Clone)]
 enum End {
@@ -149,6 +153,8 @@ pub(crate) struct Session {
     /// B-recv refused a control request at the edge; B-send reports it.
     control_denied: AtomicBool,
     ending: Mutex<Option<End>>,
+    /// While this session stands by for a pair: what its `Resume` does.
+    standby: Mutex<Option<Promotion>>,
     /// The host's: bumped when what its status reads of this session
     /// changed (the record, pause, quality, path).
     changes: ChangeSignal,
@@ -255,8 +261,32 @@ impl Session {
             rebase_generation: AtomicU64::new(0),
             control_denied: AtomicBool::new(false),
             ending: Mutex::new(None),
+            standby: Mutex::new(None),
             changes,
         })
+    }
+
+    /// Stand by for a pair, paused: `promote` is what its `Resume` does
+    /// first. The room calls this under its lock, before the session runs.
+    pub fn stand_by(&self, promote: Promotion) {
+        *self.standby.lock() = Some(promote);
+        self.update_qos(Instant::now(), Qos::set_paused);
+    }
+
+    /// The session holds its pair's place now: a `Resume` is a resume.
+    pub fn leave_standby(&self) {
+        self.standby.lock().take();
+    }
+
+    /// Whether the session stands by for a pair.
+    pub fn standing_by(&self) -> bool {
+        self.standby.lock().is_some()
+    }
+
+    /// Whether its transport ended it: the viewer closed it, the connection
+    /// failed or went silent, or its standby took its place.
+    pub fn transport_ended(&self) -> bool {
+        matches!(*self.ending.lock(), Some(End::Closed))
     }
 
     /// End the session; B-send tells the viewer `reason`.
@@ -277,7 +307,7 @@ impl Session {
 
     /// What B-send tells the viewer at the end. A session cancelled with no
     /// decision of its own was cancelled by its host stopping.
-    fn outcome(&self) -> Option<(StopReason, String)> {
+    pub(crate) fn outcome(&self) -> Option<(StopReason, String)> {
         match self.ending.lock().clone() {
             Some(End::Stopped(reason, message)) => Some((reason, message)),
             Some(End::Closed) => None,
@@ -488,6 +518,18 @@ impl Session {
                 self.update_qos(now, |qos| qos.resume(now));
                 self.credit.lock().reset_one_way();
                 shared.idr.lock().force(IdrReason::Resume);
+                // A standby, resumed, takes its pair's place: thread C then
+                // knows it unpaused, and its first unit is the IDR.
+                let promote = self.standby.lock().take();
+                if let Some(promote) = promote
+                    && promote()
+                {
+                    tracing::info!(
+                        target: "pb_mapper_desktop::session",
+                        event = "desktop_host_promoted",
+                        slot = shared.slot.index(),
+                    );
+                }
                 shared.wake.notify();
                 self.credit_changed.notify_one();
                 if paused {
@@ -499,11 +541,13 @@ impl Session {
                     Route::Direct => 1,
                     Route::RelayTcp | Route::RelayQuic => 2,
                 };
+                // Only a new path resets the baseline: a standby that took
+                // its pair's place measured its own path all along.
                 if self.route.swap(code, Ordering::AcqRel) != code {
                     self.changes.bump();
+                    self.update_qos(now, Qos::reset_baseline);
+                    self.credit.lock().reset_one_way();
                 }
-                self.update_qos(now, Qos::reset_baseline);
-                self.credit.lock().reset_one_way();
             }
             ViewerMessage::Control { enabled } => {
                 if enabled && !shared.policy.allowed() {

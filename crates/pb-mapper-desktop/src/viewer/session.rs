@@ -1,8 +1,13 @@
-//! The viewer's network session: `handshake` authenticates, then `run`
-//! races the reader against the writer until one of them ends.
+//! The viewer's network session: `handshake` authenticates, then `run_leg`
+//! races the reader against the writer on one connection until one of them
+//! ends. The session runs on one connection at a time, its live leg; a
+//! standby's leg runs beside it, reading and writing only what keeps it
+//! alive, until it takes the live leg's place (`standby`).
 use super::{
-    ConnectError, CursorSlot, Notice, Stopped, VideoSink, VideoUnit, ViewerConfig, ViewerLink,
-    ViewerReason, ViewerShared, outbound::Next, stats::Traffic,
+    ConnectError, CursorSlot, Notice, VideoSink, VideoUnit, ViewerConfig, ViewerLink, ViewerReason,
+    ViewerShared,
+    outbound::{Next, Outbound},
+    stats::Traffic,
 };
 use crate::{
     Input, QualityPreset, VideoCodec, VideoLimits,
@@ -10,27 +15,31 @@ use crate::{
     protocol::{HostMessage, RejectReason, Route, SessionState, ViewerMessage, valid_capabilities},
     wire::{self, WireError},
 };
+use parking_lot::Mutex;
 use pb_mapper_client::sdk::{Connection, RelayTransport, TunnelMetrics};
 use std::{
     io,
-    sync::Arc,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, AtomicU64, Ordering},
+    },
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio_util::sync::CancellationToken;
 
 /// The host answers `Authenticate` within this.
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The host writes `Stats` every second, so silence this long is a dead link.
-const VIEWER_HEADER_TIMEOUT: Duration = Duration::from_secs(4);
+pub(super) const VIEWER_HEADER_TIMEOUT: Duration = Duration::from_secs(4);
 /// The viewer tick: fps cap, path and stats.
 pub(super) const VIEWER_TICK: Duration = Duration::from_millis(250);
 /// Ticks per path re-sample and stats roll-up.
 const TICKS_PER_SECOND: u64 = 4;
 /// Why a session whose decoder failed for good ended.
 const DECODER_FAILED: &str = "the remote picture could not be decoded";
-/// Why a session whose task panicked ended.
-const SESSION_PANICKED: &str = "the desktop session ended unexpectedly";
 const _: () = assert!(
     VIEWER_TICK.as_millis() * TICKS_PER_SECOND as u128 == 1000,
     "the path sample and the stats roll-up run once a second"
@@ -45,17 +54,29 @@ const _: () = assert!(
 );
 
 /// What `Accepted` settled for the session.
+#[derive(Clone)]
 pub(super) struct Accepted {
     pub(super) codec: VideoCodec,
     pub(super) quality: QualityPreset,
     pub(super) capabilities: Vec<String>,
+    /// What a standby of this session presents, from a host that gave one.
+    pub(super) ticket: Option<String>,
+}
+impl Accepted {
+    pub(super) fn listed(&self, wanted: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|capability| capability == wanted)
+    }
 }
 
-/// `Authenticate`, then the host's answer.
+/// `Authenticate`, then the host's answer: for a standby of the session
+/// whose ticket is `standby_for`, when there is one.
 pub(super) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     token: String,
     config: &ViewerConfig,
+    standby_for: Option<String>,
 ) -> std::result::Result<Accepted, ConnectError> {
     let authenticate = ViewerMessage::Authenticate {
         token,
@@ -63,6 +84,7 @@ pub(super) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
         limits: config.limits,
         quality: config.quality,
         capabilities: config.capabilities(),
+        standby_for,
     };
     wire::write_message(stream, &authenticate, None)
         .await
@@ -73,6 +95,7 @@ pub(super) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
             codec,
             quality,
             capabilities,
+            ticket,
             ..
         })) => {
             // H.265 too: only a viewer that offered it may receive it.
@@ -86,6 +109,7 @@ pub(super) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 codec,
                 quality,
                 capabilities,
+                ticket,
             })
         }
         Ok(Some(HostMessage::Rejected { reason })) => Err(match reason {
@@ -117,12 +141,17 @@ pub(super) async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-/// How a session ended.
-enum Ended {
+/// How a leg ended.
+pub(super) enum Ended {
     /// This end closed it: `Viewer::stop`, or with a reason, a decoder that
     /// cannot recover.
     Local(Option<(ViewerReason, String)>),
-    Stopped(ViewerReason, String),
+    /// The host said why, in `Stopped`.
+    Host(ViewerReason, String),
+    /// The connection failed, closed or went silent.
+    Transport(ViewerReason, String),
+    /// The host broke the protocol.
+    Protocol(String),
 }
 impl Ended {
     fn failed(failure: WireError) -> Self {
@@ -132,26 +161,182 @@ impl Ended {
             WireError::Io(failure) if failure.kind() == io::ErrorKind::TimedOut => {
                 ViewerReason::Timeout
             }
-            WireError::Framing(_) => ViewerReason::Protocol,
+            WireError::Framing(framing) => return Self::Protocol((*framing).into()),
             WireError::Io(_) => ViewerReason::Transport,
         };
-        Self::Stopped(reason, failure.to_string())
+        Self::Transport(reason, failure.to_string())
     }
     fn protocol(message: &str) -> Self {
-        Self::Stopped(
-            ViewerReason::Protocol,
-            format!("desktop protocol error: {message}"),
-        )
+        Self::Protocol(message.into())
+    }
+    /// Why the session stops with this end; no reason: stopped here.
+    pub(super) fn into_stop(self) -> (Option<ViewerReason>, String) {
+        match self {
+            Self::Local(failure) => failure.map_or((None, String::new()), |(reason, message)| {
+                (Some(reason), message)
+            }),
+            Self::Host(reason, message) | Self::Transport(reason, message) => {
+                (Some(reason), message)
+            }
+            Self::Protocol(message) => (
+                Some(ViewerReason::Protocol),
+                format!("desktop protocol error: {message}"),
+            ),
+        }
     }
 }
 
-/// What `run` owns besides the stream. Dropping it ends the session however
-/// `run` ends: returned, dropped with its runtime (polled or not) or
-/// unwinding from a panic.
-pub(super) struct Session {
+/// What a leg does with what it reads and what it writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum Role {
+    /// It keeps a standby's session alive: probes, its path and pings.
+    Standby,
+    /// It carries the session the app sees.
+    Live,
+    /// A standby took its place: it reads and drops what still comes until
+    /// its host session ends, which the promotion does, and writes only
+    /// pings.
+    Retired,
+}
+
+/// One connection to the host: the live session's, or a standby's, which
+/// stands by until it takes the live one's place.
+pub(super) struct Leg {
+    /// A `Role`: a standby's turns live once, and a live one retired once.
+    role: AtomicU8,
+    /// When its session began: what its arrival times and read times count
+    /// from.
+    pub(super) epoch: Instant,
+    /// Its read times are kept: a session without standbys keeps none.
+    watched: bool,
+    /// When it last read a byte, and the end of a whole message: in
+    /// microseconds since `epoch`.
+    read_at: AtomicU64,
+    message_at: AtomicU64,
+    /// What a standby writes while it stands by: its probe echoes, its path
+    /// and pings.
+    outbound: Outbound,
+    /// The path it reported last.
+    route: Mutex<Option<Route>>,
+    /// The tunnel it rides on; `None` only over a test stream.
+    pub(super) connection: Option<Arc<Connection>>,
+}
+impl Leg {
+    /// The session's first leg, live from the start, its read times kept
+    /// when it is `watched`.
+    pub(super) fn live(connection: Option<Arc<Connection>>, watched: bool) -> Arc<Self> {
+        Self::new(Role::Live, watched, Instant::now(), None, false, connection)
+    }
+    /// A standby's leg, whose session began at `epoch`, stamping arrival
+    /// times from then for a host that, by `arrival_time`, reads them.
+    pub(super) fn standby(
+        epoch: Instant,
+        arrival_time: bool,
+        keyframe_seq: bool,
+        connection: Option<Arc<Connection>>,
+    ) -> Arc<Self> {
+        Self::new(
+            Role::Standby,
+            true,
+            epoch,
+            arrival_time.then_some(epoch),
+            keyframe_seq,
+            connection,
+        )
+    }
+    fn new(
+        role: Role,
+        watched: bool,
+        epoch: Instant,
+        arrival_epoch: Option<Instant>,
+        keyframe_seq: bool,
+        connection: Option<Arc<Connection>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            role: AtomicU8::new(role as u8),
+            epoch,
+            watched,
+            read_at: AtomicU64::new(0),
+            message_at: AtomicU64::new(0),
+            outbound: Outbound::new(arrival_epoch, keyframe_seq),
+            route: Mutex::new(None),
+            connection,
+        })
+    }
+    fn role(&self) -> Role {
+        match self.role.load(Ordering::Acquire) {
+            0 => Role::Standby,
+            1 => Role::Live,
+            _ => Role::Retired,
+        }
+    }
+    pub(super) fn is_live(&self) -> bool {
+        self.role() == Role::Live
+    }
+    /// The standby takes the session: from its next message on, its reader
+    /// and writer serve the app's, and a probe it took as a standby is
+    /// answered on the session's outbound.
+    pub(super) fn go_live(&self, session: &Outbound) {
+        self.role.store(Role::Live as u8, Ordering::Release);
+        session.adopt_probe(&self.outbound);
+        self.outbound.wake();
+    }
+    /// A standby took this leg's place: it touches nothing more of the
+    /// session's, a payload already under way included, until its host
+    /// session ends.
+    pub(super) fn retire(&self) {
+        self.role.store(Role::Retired as u8, Ordering::Release);
+        self.outbound.wake();
+    }
+    /// The path this leg reported last, if any.
+    pub(super) fn route(&self) -> Option<Route> {
+        *self.route.lock()
+    }
+    fn stamp(&self, at: &AtomicU64) {
+        let elapsed = pb_mapper_core::time::saturating_micros(self.epoch.elapsed());
+        at.store(elapsed, Ordering::Release);
+    }
+    fn since(&self, at: &AtomicU64, now: Instant) -> Duration {
+        let then = self.epoch + Duration::from_micros(at.load(Ordering::Acquire));
+        now.saturating_duration_since(then)
+    }
+    /// How long since it last read a byte, or since its session began.
+    pub(super) fn silent_for(&self, now: Instant) -> Duration {
+        self.since(&self.read_at, now)
+    }
+    /// How long since it last read a whole message, or since its session
+    /// began.
+    pub(super) fn quiet_for(&self, now: Instant) -> Duration {
+        self.since(&self.message_at, now)
+    }
+}
+
+/// A leg's read half, noting when it read a byte.
+struct Stamped<'a, R> {
+    inner: R,
+    leg: &'a Leg,
+}
+impl<R: AsyncRead + Unpin> AsyncRead for Stamped<'_, R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        let polled = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if self.leg.watched && matches!(polled, Poll::Ready(Ok(()))) && buf.filled().len() > before
+        {
+            self.leg.stamp(&self.leg.read_at);
+        }
+        polled
+    }
+}
+
+/// What every leg of a session reads and writes into.
+pub(super) struct Shared {
     pub(super) shared: Arc<ViewerShared>,
     pub(super) sink: Arc<VideoSink>,
-    pub(super) connection: Option<Arc<Connection>>,
     pub(super) cancel: CancellationToken,
     pub(super) codec: VideoCodec,
     pub(super) limits: VideoLimits,
@@ -160,41 +345,33 @@ pub(super) struct Session {
     /// Both ends listed `peer_cursors`.
     pub(super) peer_cursors: bool,
 }
-impl Drop for Session {
-    fn drop(&mut self) {
-        // Each step is idempotent and the first stop wins, so after `run`'s
-        // own end this changes nothing; otherwise the consumer exits and the
-        // status says stopped. A drop with the runtime reads as a local stop,
-        // with no reason; a panic as a transport failure, which a supervisor
-        // retries as it did the stall the panic used to leave.
-        self.cancel.cancel();
-        self.sink.close();
-        if std::thread::panicking() {
-            self.shared
-                .mark_stopped(Some(ViewerReason::Transport), SESSION_PANICKED.into());
-        } else {
-            self.shared.mark_stopped(None, String::new());
-        }
-    }
-}
 
-/// Races the reader against the writer; the first to end ends the session.
-pub(super) async fn run<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, session: Session) {
-    let started = Instant::now();
-    let Session {
+/// Race one leg's reader against its writer; the first to end ends the leg.
+/// A leg this end closed keeps its read side until the host consumed the
+/// close and closed its own, or the grace expires.
+pub(super) async fn run_leg<S: AsyncRead + AsyncWrite + Send + 'static>(
+    stream: S,
+    leg: Arc<Leg>,
+    session: Arc<Shared>,
+) -> Ended {
+    let Shared {
         shared,
         sink,
-        connection,
         cancel,
         codec,
         limits,
         cursor_shapes,
         peer_cursors,
-    } = &session;
-    let (mut read, mut write) = tokio::io::split(stream);
+    } = &*session;
+    let (read, mut write) = tokio::io::split(stream);
+    let mut read = Stamped {
+        inner: read,
+        leg: &leg,
+    };
     let mut reader = Reader {
         shared,
         sink,
+        leg: &leg,
         codec: *codec,
         limits: *limits,
         cursor_shapes: *cursor_shapes,
@@ -205,7 +382,7 @@ pub(super) async fn run<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, s
     let mut writer = Writer {
         shared,
         sink,
-        connection: connection.as_deref(),
+        leg: &leg,
         ticks: 0,
     };
     let ended = tokio::select! {
@@ -213,52 +390,29 @@ pub(super) async fn run<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, s
         ended = writer.run(&mut write, cancel) => ended,
         ended = reader.run(&mut read) => ended,
     };
-    let (reason, message) = match ended {
-        Ended::Local(failure) => {
-            // A failure shows at once; the drain below may take a while.
-            if let Some((reason, message)) = failure {
-                sink.close();
-                shared.mark_stopped(Some(reason), message);
-            }
-            // Keep the tunnel until the host consumes our close_notify and
-            // closes its side, or the grace expires; discard remaining video.
-            let _ = tokio::time::timeout(
-                wire::IO_TIMEOUT,
-                tokio::io::copy(&mut read, &mut tokio::io::sink()),
-            )
-            .await;
-            (None, String::new())
+    if let Ended::Local(failure) = &ended {
+        // A failure shows at once; the drain below may take a while.
+        if let Some((reason, message)) = failure.clone()
+            && leg.is_live()
+        {
+            sink.close();
+            shared.mark_stopped(Some(reason), message);
         }
-        // The host's close after a local stop is not a failure.
-        Ended::Stopped(..) if cancel.is_cancelled() => (None, String::new()),
-        Ended::Stopped(reason, message) => (Some(reason), message),
-    };
-    cancel.cancel();
-    sink.close();
-    shared.mark_stopped(reason, message);
-    // The first stop recorded, not this one: a local stop after a failure
-    // keeps the failure. No reason: stopped here.
-    let Stopped {
-        reason,
-        message: detail,
-    } = shared.state.lock().stopped.clone().unwrap_or_default();
-    let keyframes = shared.stats.lock().host.map_or(0, |host| host.keyframes);
-    let local = sink.snapshot(Instant::now());
-    tracing::info!(
-        target: "pb_mapper_desktop::session",
-        event = "desktop_viewer_ended",
-        reason = ?reason,
-        detail = ?detail,
-        seconds = started.elapsed().as_secs(),
-        keyframes,
-        keyframes_requested = local.keyframes_requested,
-        backlog_drops = local.backlog_drops,
-    );
+        // Keep the tunnel until the host consumes our close_notify and
+        // closes its side, or the grace expires; discard remaining video.
+        let _ = tokio::time::timeout(
+            wire::IO_TIMEOUT,
+            tokio::io::copy(&mut read, &mut tokio::io::sink()),
+        )
+        .await;
+    }
+    ended
 }
 
 struct Reader<'a> {
     shared: &'a ViewerShared,
     sink: &'a VideoSink,
+    leg: &'a Leg,
     codec: VideoCodec,
     limits: VideoLimits,
     /// Both ends listed `cursor_shape`: shapes may come, and no other host
@@ -279,7 +433,7 @@ impl Reader<'_> {
                 match wire::read_header_with(read, &mut record, VIEWER_HEADER_TIMEOUT).await {
                     Ok(Some(message)) => message,
                     Ok(None) => {
-                        return Ended::Stopped(
+                        return Ended::Transport(
                             ViewerReason::Transport,
                             "the remote computer closed the connection".into(),
                         );
@@ -289,10 +443,79 @@ impl Reader<'_> {
             // The header is read, or, when the reader came late to it, the
             // previous message is done: a probe's arrival time.
             let at = Instant::now();
-            if let Err(ended) = self.handle(message, read, at).await {
+            let handled = match self.leg.role() {
+                Role::Live => self.handle(message, read, at).await,
+                Role::Standby => self.stand_by(message, at),
+                Role::Retired => Self::retired(message, read).await,
+            };
+            if let Err(ended) = handled {
                 return ended;
             }
+            if self.leg.watched {
+                self.leg.stamp(&self.leg.message_at);
+            }
         }
+    }
+
+    /// A standby's message, read while it stands by: its host session is
+    /// paused and holds no slot, so it sends no picture and no pointer.
+    /// Probes are answered on the leg's own outbound; the rest only shows
+    /// the connection lives.
+    fn stand_by(&mut self, message: HostMessage, at: Instant) -> std::result::Result<(), Ended> {
+        match message {
+            HostMessage::Probe { nonce } => {
+                self.leg.outbound.probe(nonce, at);
+                // The leg went live meanwhile: the session's outbound answers.
+                if self.leg.is_live() {
+                    self.shared.outbound.adopt_probe(&self.leg.outbound);
+                }
+            }
+            HostMessage::State(host) => self.generation = host.generation,
+            HostMessage::Stats(_) | HostMessage::Notice { .. } => {}
+            HostMessage::Stopped { reason, message } => {
+                return Err(Ended::Host(reason.into(), message));
+            }
+            HostMessage::Video { .. }
+            | HostMessage::Cursor { .. }
+            | HostMessage::CursorShape(_)
+            | HostMessage::PeerCursor { .. } => {
+                return Err(Ended::protocol("a picture or pointer on a standby"));
+            }
+            HostMessage::Accepted { .. } | HostMessage::Rejected { .. } => {
+                return Err(Ended::protocol("a handshake answer after the handshake"));
+            }
+        }
+        Ok(())
+    }
+
+    /// A retired leg's message: its payload read and dropped. Its host
+    /// session ends it, with or without a word.
+    async fn retired<R: AsyncRead + Unpin>(
+        message: HostMessage,
+        read: &mut R,
+    ) -> std::result::Result<(), Ended> {
+        match message {
+            HostMessage::Video { .. } => {
+                wire::read_payload(read).await.map_err(Ended::failed)?;
+            }
+            HostMessage::CursorShape(record) => {
+                wire::read_payload_of(read, record.payload_len())
+                    .await
+                    .map_err(Ended::failed)?;
+            }
+            HostMessage::Stopped { reason, message } => {
+                return Err(Ended::Host(reason.into(), message));
+            }
+            HostMessage::State(_)
+            | HostMessage::Cursor { .. }
+            | HostMessage::PeerCursor { .. }
+            | HostMessage::Probe { .. }
+            | HostMessage::Stats(_)
+            | HostMessage::Notice { .. }
+            | HostMessage::Accepted { .. }
+            | HostMessage::Rejected { .. } => {}
+        }
+        Ok(())
     }
 
     /// `at`: when `message`'s header was read. A unit's arrival time is
@@ -321,6 +544,9 @@ impl Reader<'_> {
                     self.sink.idr_arriving();
                 }
                 let bytes = wire::read_payload(read).await.map_err(Ended::failed)?;
+                if !self.leg.is_live() {
+                    return Ok(());
+                }
                 let now = Instant::now();
                 // Transport credit first: it covers every unit read, including
                 // the ones the sink drops. Its arrival time is now, the unit
@@ -442,6 +668,9 @@ impl Reader<'_> {
                 let rgba = wire::read_payload_of(read, record.payload_len())
                     .await
                     .map_err(Ended::failed)?;
+                if !self.leg.is_live() {
+                    return Ok(());
+                }
                 let shape = record
                     .shape(&rgba)
                     .map_err(|_| Ended::protocol("cursor shape out of bounds"))?;
@@ -486,7 +715,7 @@ impl Reader<'_> {
                 });
             }
             HostMessage::Stopped { reason, message } => {
-                return Err(Ended::Stopped(reason.into(), message));
+                return Err(Ended::Host(reason.into(), message));
             }
             HostMessage::Accepted { .. } | HostMessage::Rejected { .. } => {
                 return Err(Ended::protocol("a handshake answer after the handshake"));
@@ -499,7 +728,7 @@ impl Reader<'_> {
 struct Writer<'a> {
     shared: &'a ViewerShared,
     sink: &'a VideoSink,
-    connection: Option<&'a Connection>,
+    leg: &'a Leg,
     ticks: u64,
 }
 impl Writer<'_> {
@@ -514,6 +743,19 @@ impl Writer<'_> {
         loop {
             let now = Instant::now();
             let mut failure = None;
+            // A standby writes its own outbound until it goes live.
+            let live = self.leg.is_live();
+            let outbound = if live {
+                &self.shared.outbound
+            } else {
+                &self.leg.outbound
+            };
+            if now >= next_tick && !live {
+                if self.leg.role() == Role::Standby {
+                    self.stand_by();
+                }
+                next_tick = now + VIEWER_TICK;
+            }
             if now >= next_tick {
                 if let Some(error) = self.tick(now) {
                     let message = if error.is_empty() {
@@ -531,7 +773,7 @@ impl Writer<'_> {
                 let _ = tokio::time::timeout(wire::IO_TIMEOUT, write.shutdown()).await;
                 return Ended::Local(failure);
             }
-            match self.shared.outbound.next(now, last_write) {
+            match outbound.next(now, last_write) {
                 Next::Send(message) => {
                     // Out of the queue, no barrier drops it: it reaches the
                     // host, or the session ends.
@@ -552,11 +794,32 @@ impl Writer<'_> {
                     tokio::select! {
                         biased;
                         () = cancel.cancelled() => {}
-                        () = self.shared.outbound.notified() => {}
+                        // Going live wakes a standby's writer here.
+                        () = outbound.notified() => {}
                         () = tokio::time::sleep_until(wake) => {}
                     }
                 }
             }
+        }
+    }
+
+    /// A standby's tick: once a second, its own path, reported when it
+    /// changes, as the live leg's tick does.
+    fn stand_by(&mut self) {
+        let second = self.ticks.is_multiple_of(TICKS_PER_SECOND);
+        self.ticks += 1;
+        let Some(metrics) = self
+            .leg
+            .connection
+            .as_deref()
+            .filter(|_| second)
+            .map(Connection::metrics)
+        else {
+            return;
+        };
+        let (route, _) = route(&metrics);
+        if self.leg.route.lock().replace(route) != Some(route) {
+            self.leg.outbound.route(route);
         }
     }
 
@@ -567,11 +830,14 @@ impl Writer<'_> {
         let second = self.ticks.is_multiple_of(TICKS_PER_SECOND);
         self.ticks += 1;
         let tunnel = self
+            .leg
             .connection
+            .as_deref()
             .filter(|_| second)
-            .map(|connection| connection.metrics());
+            .map(Connection::metrics);
         if let Some(metrics) = &tunnel {
             let (route, link) = route(metrics);
+            *self.leg.route.lock() = Some(route);
             let changed = {
                 let mut state = self.shared.state.lock();
                 state.link = link;
@@ -619,12 +885,147 @@ fn traffic(metrics: &TunnelMetrics) -> Traffic {
 
 /// The path this viewer's tunnel carries the session on, and on a direct
 /// one, its link. A viewer's tunnel carries this one session.
-fn route(metrics: &TunnelMetrics) -> (Route, Option<ViewerLink>) {
+pub(super) fn route(metrics: &TunnelMetrics) -> (Route, Option<ViewerLink>) {
     if metrics.sessions.active_direct > 0 {
         (Route::Direct, metrics.link.as_ref().map(ViewerLink::from))
     } else if metrics.relay.transport == RelayTransport::Quic {
         (Route::RelayQuic, None)
     } else {
         (Route::RelayTcp, None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        CursorKind, Pull,
+        protocol::{ShapeRecord, ShapeSlot},
+        viewer::{PeerCursorsSlot, ShapeTable, ViewerStateSlot, stats::ViewerStatsAcc},
+    };
+
+    /// A live leg retired while awaiting a video or cursor-shape payload drops
+    /// the completed payload instead of writing its receipt or picture into the
+    /// promoted session's outbound, sink or shape table.
+    #[tokio::test]
+    async fn retiring_a_leg_mid_payload_leaves_the_promoted_session_untouched() {
+        for shape_case in [false, true] {
+            let now = Instant::now();
+            let shared = Arc::new(ViewerShared {
+                state: Mutex::new(ViewerStateSlot {
+                    codec: VideoCodec::H264,
+                    capabilities: Vec::new(),
+                    quality: QualityPreset::Balanced,
+                    host: None,
+                    route: None,
+                    link: None,
+                    paused: false,
+                    control_requested: false,
+                    control_wanted: None,
+                    local_reason: None,
+                    notice: None,
+                    stopped: None,
+                    entered_streaming: now,
+                }),
+                stats: Mutex::new(ViewerStatsAcc::new(now, 60)),
+                cursor: Mutex::new(CursorSlot::default()),
+                peer_cursors: Mutex::new(PeerCursorsSlot::default()),
+                shapes: Mutex::new(ShapeTable::default()),
+                outbound: Outbound::new(None, false),
+            });
+            let sink = VideoSink::for_session(Arc::downgrade(&shared), 60, false);
+            sink.on_state(1, true);
+            let consumer = sink.attach().unwrap();
+            let leg = Leg::live(None, true);
+            let (client, mut host) = tokio::io::duplex(4096);
+            let run_shared = shared.clone();
+            let run_sink = sink.clone();
+            let run_leg = leg.clone();
+            let reading = tokio::spawn(async move {
+                let mut read = Stamped {
+                    inner: client,
+                    leg: &run_leg,
+                };
+                let mut reader = Reader {
+                    shared: &run_shared,
+                    sink: &run_sink,
+                    leg: &run_leg,
+                    codec: VideoCodec::H264,
+                    limits: VideoLimits::for_viewer(60.0),
+                    cursor_shapes: true,
+                    peer_cursors: false,
+                    last_seq: 9,
+                    generation: 1,
+                };
+                reader.run(&mut read).await
+            });
+
+            let mut framed = Vec::new();
+            if shape_case {
+                let header = HostMessage::CursorShape(ShapeRecord {
+                    id: ShapeSlot::new(0).unwrap(),
+                    kind: CursorKind::Arrow,
+                    hot_x: 0,
+                    hot_y: 0,
+                    width: 2,
+                    height: 2,
+                });
+                wire::write_message(&mut framed, &header, Some(&[255; 16]))
+                    .await
+                    .unwrap();
+            } else {
+                let header = HostMessage::Video {
+                    seq: 10,
+                    generation: 1,
+                    frame_id: 10,
+                    keyframe: true,
+                    duplicate: false,
+                    width: 64,
+                    height: 64,
+                    pts_us: 0,
+                    host_us: 1_000,
+                };
+                wire::write_message(&mut framed, &header, Some(&[7; 32]))
+                    .await
+                    .unwrap();
+            }
+            // Hold back the final payload byte until after the leg retires.
+            let split = framed.len() - 1;
+            host.write_all(&framed[..split]).await.unwrap();
+            host.flush().await.unwrap();
+            crate::test_util::until_within(Duration::from_secs(2), || {
+                leg.silent_for(Instant::now()) < Duration::from_secs(1)
+            })
+            .await;
+            tokio::task::yield_now().await;
+
+            leg.retire();
+            sink.switch();
+            shared.outbound.restart(None, false);
+            shared.shapes.lock().forget_slots();
+
+            host.write_all(&framed[split..]).await.unwrap();
+            drop(host);
+            let ended = reading.await.unwrap();
+            assert!(matches!(ended, Ended::Transport(..)));
+
+            let check_at = Instant::now();
+            assert!(matches!(
+                shared.outbound.next(check_at, check_at),
+                Next::Send(ViewerMessage::Resume {})
+            ));
+            assert!(matches!(
+                shared.outbound.next(check_at, check_at),
+                Next::Idle(_)
+            ));
+            assert!(matches!(consumer.next(Duration::ZERO, 4096), Pull::Timeout));
+            assert!(
+                shared
+                    .shapes
+                    .lock()
+                    .number(ShapeSlot::new(0).unwrap())
+                    .is_none()
+            );
+        }
     }
 }

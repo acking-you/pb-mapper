@@ -3,6 +3,7 @@
 //! of each kind and wake the write task; the write task takes one message per
 //! pick, so a flood of one kind never delays a more urgent one:
 //!
+//! 0. a standby's `Resume`, which promotes it, before anything else;
 //! 1. control barriers: revoke, then release, then grant;
 //! 2. the latest probe echo;
 //! 3. the latest transport receipt (cumulative);
@@ -29,7 +30,7 @@ use crate::{
 };
 use std::{
     collections::VecDeque,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -118,6 +119,11 @@ impl Controls {
 
 #[derive(Default)]
 struct Slots {
+    /// The session's start, which arrival times count from; `None` unless
+    /// the host listed `arrival_time`.
+    arrival_epoch: Option<Instant>,
+    /// The host listed `keyframe_seq`.
+    keyframe_seq: bool,
     /// The newest probe's nonce, and when it was read.
     probe: Option<(u64, Instant)>,
     /// The newest seq read, and when it was read whole.
@@ -170,13 +176,12 @@ pub(crate) struct Outbound {
     slots: parking_lot::Mutex<Slots>,
     notify: tokio::sync::Notify,
     inputs: parking_lot::Mutex<InputQueue>,
-    /// Per session, stamped here; the embedding app owns none.
+    /// Per viewer, stamped here; the embedding app owns none. A session
+    /// that takes another's place goes on from where it stood: the host
+    /// counts nothing below it.
     sequence: AtomicU64,
-    /// The session's start, which arrival times count from; `None` unless
-    /// the host listed `arrival_time`.
-    arrival_epoch: Option<Instant>,
-    /// The host listed `keyframe_seq`.
-    keyframe_seq: bool,
+    /// A standby's `Resume`, which promotes it: written before anything else.
+    promote: AtomicBool,
 }
 impl Outbound {
     /// `arrival_epoch`: stamp receipts and probe echoes with arrival times
@@ -184,18 +189,65 @@ impl Outbound {
     pub fn new(arrival_epoch: Option<Instant>, keyframe_seq: bool) -> Self {
         Self {
             controls: parking_lot::Mutex::default(),
-            slots: parking_lot::Mutex::default(),
+            slots: parking_lot::Mutex::new(Slots {
+                arrival_epoch,
+                keyframe_seq,
+                ..Slots::default()
+            }),
             notify: tokio::sync::Notify::new(),
             inputs: parking_lot::Mutex::default(),
             sequence: AtomicU64::new(1),
+            promote: AtomicBool::new(false),
+        }
+    }
+
+    /// The session moved to a standby's connection, whose host session
+    /// knows nothing this one queued: every message not yet written is
+    /// dropped, queued input included, and the next one written is the
+    /// `Resume` that promotes it. The terms are its session's.
+    pub fn restart(&self, arrival_epoch: Option<Instant>, keyframe_seq: bool) {
+        {
+            let mut queue = self.inputs.lock();
+            queue.events.clear();
+            queue.bytes = 0;
+        }
+        *self.controls.lock() = Controls {
+            obsolete_below: self.sequence.load(Ordering::Relaxed),
+            ..Controls::default()
+        };
+        *self.slots.lock() = Slots {
             arrival_epoch,
             keyframe_seq,
+            ..Slots::default()
+        };
+        self.promote.store(true, Ordering::Release);
+        self.notify.notify_one();
+    }
+
+    /// Wake the writer: its connection changed role.
+    pub fn wake(&self) {
+        self.notify.notify_one();
+    }
+
+    /// Wake every writer waiting here now, storing nothing: one whose
+    /// connection was retired then waits elsewhere, and no later wake is
+    /// spent on it.
+    pub fn wake_all(&self) {
+        self.notify.notify_waiters();
+    }
+
+    /// Answer here the probe `other` took and has not answered: the host
+    /// sends no other until it hears this one.
+    pub fn adopt_probe(&self, other: &Outbound) {
+        let probe = other.slots.lock().probe.take();
+        if let Some(probe) = probe {
+            self.update(|slots| slots.probe = Some(probe));
         }
     }
 
     /// `at` in microseconds since the session began, for a host that reads it.
-    fn stamp(&self, at: Instant) -> Option<u64> {
-        self.arrival_epoch.map(|epoch| {
+    fn stamp(slots: &Slots, at: Instant) -> Option<u64> {
+        slots.arrival_epoch.map(|epoch| {
             pb_mapper_core::time::saturating_micros(at.saturating_duration_since(epoch))
         })
     }
@@ -247,9 +299,8 @@ impl Outbound {
     /// not yet written keeps its seq when it names none: the frames are still
     /// of no use.
     pub fn keyframe(&self, reason: KeyframeReason, discarding: bool) {
-        let keyframe_seq = self.keyframe_seq;
         self.update(|slots| {
-            let after = (keyframe_seq && discarding).then_some(slots.read_seq);
+            let after = (slots.keyframe_seq && discarding).then_some(slots.read_seq);
             let kept = slots.keyframe.and_then(|(_, after)| after);
             slots.keyframe = Some((reason, after.or(kept)));
         });
@@ -367,6 +418,9 @@ impl Outbound {
     /// The next message to write, in priority order, or when something will
     /// next be due. `last_write` is when the writer last wrote anything.
     pub fn next(&self, now: Instant, last_write: Instant) -> Next {
+        if self.promote.load(Ordering::Relaxed) && self.promote.swap(false, Ordering::AcqRel) {
+            return Next::Send(ViewerMessage::Resume {});
+        }
         // Never hold `controls` while taking `inputs`: `submit` takes them in
         // the other order.
         let (barrier, obsolete_below) = {
@@ -392,13 +446,13 @@ impl Outbound {
             if let Some((nonce, at)) = slots.probe.take() {
                 return Next::Send(ViewerMessage::ProbeEcho {
                     nonce,
-                    at_us: self.stamp(at),
+                    at_us: Self::stamp(&slots, at),
                 });
             }
             if let Some((seq, at)) = slots.receipt.take() {
                 return Next::Send(ViewerMessage::Received {
                     seq,
-                    at_us: self.stamp(at),
+                    at_us: Self::stamp(&slots, at),
                 });
             }
         }

@@ -1,0 +1,12 @@
+test slow_link::standby_takes_a_dead_paths_place ... standby run=0 picture_after_block_ms=1585 input_after_block_ms=1590 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=1 picture_after_block_ms=1568 input_after_block_ms=1570 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=2 picture_after_block_ms=1583 input_after_block_ms=1585 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=3 picture_after_block_ms=1568 input_after_block_ms=1574 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=4 picture_after_block_ms=1568 input_after_block_ms=1572 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=5 picture_after_block_ms=1568 input_after_block_ms=1572 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=6 picture_after_block_ms=1585 input_after_block_ms=1591 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=7 picture_after_block_ms=1567 input_after_block_ms=1568 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=8 picture_after_block_ms=1568 input_after_block_ms=1571 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby run=9 picture_after_block_ms=1568 input_after_block_ms=1570 keyframes_in_outage=1 keyframes_at_switch=1 state=Streaming host_viewers=1
+standby summary runs=10 picture_after_block_ms p50=1568 p90=1585 max=1585 input_after_block_ms p50=1572 p90=1590 max=1591 keyframes_in_outage min=1 max=1 keyframes_at_switch min=1 max=1
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 415 filtered out; finished in 85.96s

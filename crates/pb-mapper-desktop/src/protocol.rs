@@ -52,6 +52,10 @@ pub(crate) const CAPABILITY_KEYFRAME_SEQ: &str = "keyframe_seq";
 /// From a host: it injects `Input::Scroll`, 1/120 of a notch at a time. A
 /// viewer sends that input to no other host.
 pub(crate) const CAPABILITY_WHEEL_HIRES: &str = "wheel_hires";
+/// Both ways: this end speaks standby sessions. Only when both listed it
+/// does the host write `Accepted::ticket`, and only to a host whose
+/// `Accepted` listed it does the viewer write `Authenticate::standby_for`.
+pub(crate) const CAPABILITY_STANDBY: &str = "standby";
 pub(crate) const MAX_CAPABILITIES: usize = 16;
 
 /// Viewers a host serves at once.
@@ -175,6 +179,12 @@ pub(crate) enum ViewerMessage {
         quality: QualityPreset,
         /// The v2.0 viewer sends none.
         capabilities: Vec<String>,
+        /// The `Accepted::ticket` of this viewer's live session: this one
+        /// is its standby, which starts paused, holds no slot of its own
+        /// and takes that session's place when the viewer resumes it. Only
+        /// to a host that listed `standby`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        standby_for: Option<String>,
     },
     /// Cumulative transport receipt: every `Video` with `seq` up to this one was
     /// fully read. Send credit only; it grants, renews or proves nothing about
@@ -214,7 +224,9 @@ pub(crate) enum ViewerMessage {
     Quality { preset: QualityPreset },
     /// The viewer is hidden: the host ends control and stops capture.
     Pause {},
-    /// The host forces an IDR and restarts its QoS startup.
+    /// The host forces an IDR and restarts its QoS startup. On a standby
+    /// session it is the promotion: the standby takes its live session's
+    /// place, which ends.
     Resume {},
     /// Sent on change: resets the host's RTT baseline.
     Path { route: Route },
@@ -251,6 +263,13 @@ pub(crate) enum HostMessage {
         nominal_fps: u32,
         quality: QualityPreset,
         capabilities: Vec<String>,
+        /// What a standby of this session presents in
+        /// `Authenticate::standby_for`: the base64url form of 32 random
+        /// bytes, the same for the session and every standby that takes its
+        /// place. Only to a viewer that listed `standby`, and never to a
+        /// standby.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ticket: Option<String>,
     },
     /// Written only after the token check, within a 1 s timeout, then close.
     Rejected {
@@ -598,6 +617,7 @@ mod tests {
                 limits,
                 quality: QualityPreset::Balanced,
                 capabilities: vec![],
+                standby_for: None,
             },
             ViewerMessage::Received {
                 seq: 3,
@@ -677,6 +697,7 @@ mod tests {
                 nominal_fps: 60,
                 quality: QualityPreset::Quality,
                 capabilities: vec![CAPABILITY_LOCK.into(), "secure_desktop".into()],
+                ticket: None,
             },
             HostMessage::Rejected {
                 reason: RejectReason::Busy,
@@ -897,6 +918,48 @@ mod tests {
         ]));
         assert!(!valid_capabilities(&["Lock".into()]));
         assert!(!valid_capabilities(&vec!["a".into(); MAX_CAPABILITIES + 1]));
+    }
+
+    /// A ticket and a standby's claim are left out when absent, so a peer
+    /// that never listed `standby` reads `Accepted` and `Authenticate` as it
+    /// always did, and absent means none. Present, each round-trips, and
+    /// the messages still refuse a field they do not know.
+    #[test]
+    fn standby_fields_are_left_out_unless_set() {
+        let limits = VideoLimits::for_viewer(60.0);
+        let authenticate = |standby_for| ViewerMessage::Authenticate {
+            token: "t".repeat(43),
+            codecs: vec![VideoCodec::H264],
+            limits,
+            quality: QualityPreset::Balanced,
+            capabilities: vec![CAPABILITY_STANDBY.into()],
+            standby_for,
+        };
+        let accepted = |ticket| HostMessage::Accepted {
+            codec: VideoCodec::H264,
+            limits,
+            nominal_fps: 60,
+            quality: QualityPreset::Balanced,
+            capabilities: vec![CAPABILITY_STANDBY.into()],
+            ticket,
+        };
+        let plain = serde_json::to_value(authenticate(None)).unwrap();
+        assert!(plain.get("standby_for").is_none(), "{plain}");
+        let plain = serde_json::to_value(accepted(None)).unwrap();
+        assert!(plain.get("ticket").is_none(), "{plain}");
+        let ticket = "k".repeat(43);
+        let claim = round_trip(&authenticate(Some(ticket.clone())));
+        assert_eq!(claim["standby_for"], json!(ticket));
+        rejects_extra_field::<ViewerMessage>(claim);
+        let granted = round_trip(&accepted(Some(ticket.clone())));
+        assert_eq!(granted["ticket"], json!(ticket));
+        rejects_extra_field::<HostMessage>(granted);
+        let mut old = serde_json::to_value(accepted(None)).unwrap();
+        old.as_object_mut().unwrap().remove("ticket");
+        assert!(matches!(
+            serde_json::from_value(old).unwrap(),
+            HostMessage::Accepted { ticket: None, .. }
+        ));
     }
 
     /// `Stats` as peers of every v2 version read it: the tag first, the

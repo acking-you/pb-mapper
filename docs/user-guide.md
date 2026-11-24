@@ -243,6 +243,14 @@ The relay listens on `7666/tcp` and, for direct connections, on `7666/udp`.
 Open both in the firewall and the cloud security group; without the UDP port,
 every connection still works through the relay.
 
+A remote desktop viewer whose picture comes directly across the internet
+keeps a paused standby session through the relay (see
+[Remote desktop in the app](#remote-desktop-in-the-app)): one more relay
+stream for each such viewer, counted like any other, that carries the
+host's statistics once a second, timing probes and pings, 6.8 kbit/s both
+ways in a loopback test where the probes run every 250 ms, and the whole
+picture once the direct path fails.
+
 Optional flags:
 
 - `--relay-only` (alias `--disable-direct`): serve the relay alone, with no UDP port
@@ -480,6 +488,8 @@ When an install would give a better picture, the top of the connection-quality p
 **Full screen** (the app on Windows): while the picture has the keyboard and you control, your own system's shortcuts go to the remote computer alone — the Windows key and Alt with whatever you press while holding them (Alt+Tab, Alt+F4, Win+D, Win+Space), Ctrl+Esc, Ctrl+Shift+Esc, F10 and Print Screen — and a lone Windows key opens the remote computer's Start menu. Your input method still composes. Leave full screen from the toolbar at the top, or switch to another app with the mouse, and they are this computer's again. Ctrl+Alt+Del and Win+L act on this computer too: Windows takes them before any app.
 
 **Scrolling** (not yet tried on a device; checked in the app's tests). One notch of your mouse wheel scrolls the remote computer one notch, as far as a notch scrolls there, on Windows, macOS and Linux alike. A quick swipe on a touchpad keeps the remote computer scrolling after your fingers lift, slowing as the app's own lists do (on a Mac as an iPhone's do, elsewhere as Android's do), until you touch the touchpad again, click or turn the wheel. A Windows or Mac computer on this version takes a touchpad's scrolling as smoothly as your fingers move; an older one scrolls a notch at a time.
+
+**Staying connected.** When the picture comes directly across the internet, the viewer keeps a second, paused connection to the same computer through the relay. If the direct path stops carrying anything while the relay still works (a firewall that starts dropping UDP, a router that changes the computer's address), the viewer switches to it after about 1.5 s without a byte, longer on a slow path, instead of waiting 4 s for the session to end and reconnecting; the computer keeps you in its viewer list, and keeps your control and its changed resolution. The picture comes back from a fresh keyframe. The other way round, a session that had to start on the relay because a direct path failed for a moment keeps trying a direct connection beside it (no sooner than direct connections are paused after such a failure, 10 s at first) and moves onto it as soon as it connects. Neither helps when this computer's own network changes, from Wi-Fi to mobile data say: both connections end and the viewer reconnects as before. A session within one local network, a relay-only session, and a computer on an older pb-mapper have no second connection.
 
 **The pointer** takes the remote computer's shape (a text beam over text, a hand over links, resize arrows at window edges). While you control from a desktop, your own pointer changes shape over the picture, to the remote computer's own picture of it where your system has no such pointer (an app's own cursor, or a busy pointer on a Mac), and still moves as quickly as your mouse; a phone draws it. A remote computer on an older pb-mapper shows a plain arrow.
 
