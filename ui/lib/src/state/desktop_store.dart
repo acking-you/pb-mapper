@@ -2156,6 +2156,20 @@ class DesktopStore {
     unawaited(jpeg?.cancel());
   }
 
+  /// Greys the picture where the runner presents it itself
+  /// ([DesktopPicture.platformViewType]), which no Flutter filter reaches:
+  /// the viewer's grey still asks. Nothing for a texture, a JPEG picture or
+  /// none.
+  Future<void> greyPicture(bool on) async {
+    final texture = _texture;
+    if (texture == null || texture.platformViewType == null) return;
+    try {
+      await texture.grey(on);
+    } catch (_) {
+      // A disposed or failed presenter has no picture to grey.
+    }
+  }
+
   /// Drops the texture and picture: the next picture is another target's.
   void _releaseMedia() {
     _mediaSerial++;
@@ -2180,6 +2194,7 @@ class DesktopStore {
       final height = geometry?.videoHeight ?? 9;
       _picture.value = DesktopPicture(
         textureId: texture.textureId,
+        platformViewType: texture.platformViewType,
         aspectRatio: width > 1 && height > 1 ? width / height : 16 / 9,
         // Between sessions, the last one's.
         codec: _media?.codec ?? _picture.value?.codec ?? 'h264',

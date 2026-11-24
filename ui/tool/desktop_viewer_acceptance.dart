@@ -200,6 +200,8 @@ Future<void> main() async {
       'relay_only': relayOnly,
       'lan_first': lanFirst,
       'decoder_hints': decoderHints,
+      // `layer` on macOS unless built with --dart-define=presenter=texture.
+      'presenter': desktopVideoPresenter,
       'transport': config['transport'],
       'seconds': seconds,
       'warmup_seconds': _warmup.inSeconds,

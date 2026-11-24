@@ -385,11 +385,24 @@ class ViewerScrim extends StatelessWidget {
 /// Greys the last picture while a reconnect is awaited, as a sibling over
 /// the picture's rect — never its parent, so the texture is not rebuilt.
 /// A colour filter, not a blur.
-class GreyStill extends StatelessWidget {
-  const GreyStill({super.key, required this.session, required this.viewport});
+///
+/// A picture the runner presents itself ([DesktopPicture.platformViewType],
+/// the macOS layer) is beyond any Flutter filter: [greyPicture] has the
+/// runner grey it instead, and takes the grey back when the wait ends or the
+/// stage goes.
+class GreyStill extends StatefulWidget {
+  const GreyStill({
+    super.key,
+    required this.session,
+    required this.viewport,
+    this.picture,
+    this.greyPicture,
+  });
 
   final ValueListenable<DesktopSessionView> session;
   final RemoteViewport viewport;
+  final ValueListenable<DesktopPicture?>? picture;
+  final Future<void> Function(bool on)? greyPicture;
 
   /// Luminance at half brightness.
   static const _grey = ColorFilter.matrix(<double>[
@@ -400,10 +413,71 @@ class GreyStill extends StatelessWidget {
   ]);
 
   @override
-  Widget build(BuildContext context) => ValueListenableBuilder(
-    valueListenable: session,
-    builder: (context, s, _) {
-      if (!viewerOverlayFor(s).greyStill) return const SizedBox.shrink();
+  State<GreyStill> createState() => _GreyStillState();
+}
+
+class _GreyStillState extends State<GreyStill> {
+  /// The native picture the runner was last asked to grey, by its texture
+  /// id; null when none is greyed.
+  int? _greyed;
+
+  late Listenable _listening;
+
+  Listenable get _sources => Listenable.merge([
+    widget.session,
+    if (widget.picture != null) widget.picture,
+  ]);
+
+  @override
+  void initState() {
+    super.initState();
+    _listening = _sources..addListener(_sync);
+    _sync();
+  }
+
+  @override
+  void didUpdateWidget(covariant GreyStill oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.session, widget.session) ||
+        !identical(oldWidget.picture, widget.picture)) {
+      _listening.removeListener(_sync);
+      _listening = _sources..addListener(_sync);
+    }
+    _sync();
+  }
+
+  @override
+  void dispose() {
+    _listening.removeListener(_sync);
+    if (_greyed != null) unawaited(widget.greyPicture?.call(false));
+    super.dispose();
+  }
+
+  /// The native picture's id, while the runner presents it itself and can
+  /// grey it.
+  int? get _native {
+    final picture = widget.picture?.value;
+    return picture?.platformViewType != null && widget.greyPicture != null
+        ? picture?.textureId
+        : null;
+  }
+
+  bool get _wanted => viewerOverlayFor(widget.session.value).greyStill;
+
+  void _sync() {
+    final native = _native;
+    final want = _wanted && native != null ? native : null;
+    if (want == _greyed) return;
+    _greyed = want;
+    unawaited(widget.greyPicture?.call(want != null));
+  }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: _listening,
+    builder: (context, _) {
+      if (!_wanted || _native != null) return const SizedBox.shrink();
+      final viewport = widget.viewport;
       // A backdrop filter reaches as far as the nearest clip: the inner one
       // keeps it to the picture, the outer one to the stage.
       return IgnorePointer(
@@ -416,7 +490,7 @@ class GreyStill extends StatelessWidget {
                   rect: viewport.offset & viewport.scene * viewport.scale,
                   child: const ClipRect(
                     child: BackdropFilter(
-                      filter: _grey,
+                      filter: GreyStill._grey,
                       child: SizedBox.expand(),
                     ),
                   ),

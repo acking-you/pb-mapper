@@ -4,16 +4,28 @@ import 'package:flutter/services.dart';
 
 import '../state/desktop_models.dart';
 
-/// The native decoder (H.264 or H.265, as each unit says) and its Flutter
-/// texture. The decoder pulls video from Rust itself and receipts
-/// presentations there; Dart only binds it to a source, snapshots it, and
-/// disposes it.
+/// The native decoder (H.264 or H.265, as each unit says) and how its
+/// pictures reach the screen: a Flutter texture, or, where the runner
+/// presents them itself, a platform view. The decoder pulls video from Rust
+/// itself and receipts presentations there; Dart only binds it to a source,
+/// snapshots it, greys it, and disposes it.
 abstract interface class DesktopVideoTexture {
+  /// The texture's id, which a presenting runner gives its platform view in
+  /// the `textureId` creation parameter.
   int get textureId;
+
+  /// The platform view that shows the pictures where the runner presents
+  /// them itself (the macOS layer presenter); null for a Flutter texture.
+  String? get platformViewType;
 
   /// Binds the decoder to a viewer's video source. A reconnect binds the new
   /// source; the texture and its last picture persist.
   Future<void> attach(int videoSource);
+
+  /// Greys the picture a runner presents itself, which no Flutter filter
+  /// reaches (the viewer's grey still while it reconnects); nothing for a
+  /// texture.
+  Future<void> grey(bool on);
 
   /// Writes the last presented picture as a JPEG at most [maxWidth] wide
   /// (D23). False when there is none. The caller bounds the wait.
@@ -86,6 +98,24 @@ DesktopDecoders decodersFromProbe(
   );
 }
 
+/// The platform view a macOS runner shows its layer presenter in.
+const desktopVideoViewType = 'pb_mapper/desktop_video_view';
+
+/// How a macOS viewer presents: `layer`, unless the build says
+/// `--dart-define=presenter=texture`, which keeps Flutter's texture (for A/B
+/// runs, and as a way back).
+const _macPresenter = String.fromEnvironment(
+  'presenter',
+  defaultValue: 'layer',
+);
+
+/// What `create` asks of this platform's runner: the macOS runner commits
+/// each decoded picture to its own Core Animation layer, which a platform
+/// view shows; every other runner, and macOS with the texture define, hands
+/// Flutter a texture.
+String get desktopVideoPresenter =>
+    Platform.isMacOS && _macPresenter != 'texture' ? 'layer' : 'texture';
+
 /// The channel-backed texture (`pb_mapper/desktop_video` v2). [decoderHints]
 /// false configures Android's decoder without any of its decoder hints (low
 /// latency, realtime priority, operating rate, frame rate); only the
@@ -97,22 +127,30 @@ Future<DesktopVideoTexture> createDesktopVideoTexture({
   if (!nativeDesktopVideo) {
     throw UnsupportedError('Native desktop video unavailable');
   }
+  final presenter = desktopVideoPresenter;
   final id = await _ChannelVideoTexture._channel.invokeMethod<int>('create', {
     'instance': instanceToken,
     'decoderHints': decoderHints,
+    // Only the macOS runner reads it.
+    if (Platform.isMacOS) 'presenter': presenter,
   });
   if (id == null || id < 0) {
     throw StateError('Native texture creation failed');
   }
-  return _ChannelVideoTexture(id);
+  return _ChannelVideoTexture(
+    id,
+    platformViewType: presenter == 'layer' ? desktopVideoViewType : null,
+  );
 }
 
 class _ChannelVideoTexture implements DesktopVideoTexture {
-  _ChannelVideoTexture(this.textureId);
+  _ChannelVideoTexture(this.textureId, {this.platformViewType});
   static const _channel = MethodChannel('pb_mapper/desktop_video');
 
   @override
   final int textureId;
+  @override
+  final String? platformViewType;
   bool _disposed = false;
 
   @override
@@ -121,6 +159,15 @@ class _ChannelVideoTexture implements DesktopVideoTexture {
     await _channel.invokeMethod<void>('attach', {
       'textureId': textureId,
       'source': videoSource,
+    });
+  }
+
+  @override
+  Future<void> grey(bool on) async {
+    if (_disposed || platformViewType == null) return;
+    await _channel.invokeMethod<void>('grey', {
+      'textureId': textureId,
+      'on': on,
     });
   }
 
