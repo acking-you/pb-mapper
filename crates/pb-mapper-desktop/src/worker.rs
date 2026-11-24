@@ -16,6 +16,9 @@ mod modes;
 mod tests;
 mod window;
 
+// The privileged helper's worker samples and looks at the pointer as thread
+// C does.
+pub(crate) use self::cursor::{CURSOR_INTERVAL, CURSOR_MIN, SHAPE_LATE, SHAPE_LOOK};
 use self::{
     capture::unavailable_reason,
     cursor::{CursorEcho, ShapeLook},

@@ -101,8 +101,10 @@ pub trait Backend: 'static {
         }))
     }
     /// Retrieve already submitted asynchronous encoder output without capturing
-    /// or submitting another image. `wait` bounds a long-poll (the helper); the
-    /// ordinary backend never blocks. Synchronous backends have nothing to drain.
+    /// or submitting another image. Thread C passes a zero `wait` and expects
+    /// no backend to block: one whose output arrives on its own (a push
+    /// encoder, the privileged helper's worker) wakes thread C for it.
+    /// Synchronous backends have nothing to drain.
     fn drain_video(
         &mut self,
         expected: &DesktopContext,

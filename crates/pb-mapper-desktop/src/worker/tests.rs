@@ -2524,6 +2524,104 @@ fn a_present_a_millisecond_before_the_tick_is_captured_as_it_lands() {
     assert!(waits.iter().all(|wait| wait.is_zero()), "{waits:?}");
 }
 
+/// Thread C over the privileged helper's pipe to the worker's loop
+/// (protocol 12), on a display whose source dates its pictures, in real
+/// time: each present reaches the viewer as the worker tells thread C of
+/// it, with no drain request and no poll, and its capture is dated by the
+/// present; once the display stands still, thread C asks the worker for
+/// little more than the liveness repeats.
+#[test]
+fn thread_c_over_the_helper_takes_each_present_without_polling() {
+    use crate::oop::{client::tests::synthetic, proto::Request};
+    /// Iterate thread C at its deadlines, its wakes and, while `presenting`,
+    /// at each present, until `end`: the units B-send took, and the
+    /// presents the captures were dated by, as the helper's answers dated
+    /// them.
+    fn drive(
+        engine: &mut Engine<crate::oop::client::RemoteBackend, Monotonic>,
+        waiter: &Waiter,
+        probe: &Probe,
+        shared: &SessionShared,
+        end: Instant,
+        presenting: bool,
+    ) -> (usize, Vec<Instant>) {
+        let (mut units, mut dated) = (0, Vec::new());
+        while Instant::now() < end {
+            if presenting {
+                probe.land(Instant::now());
+            }
+            let deadline = match engine.iterate() {
+                Step::Wait(deadline) => deadline,
+                Step::Exit(exit) => panic!("thread C exited: {exit:?}"),
+            };
+            units += std::iter::from_fn(|| shared.outgoing.pop()).count();
+            if let Some(picture) = engine.backend.submitted_picture()
+                && dated.last() != Some(&picture.at)
+            {
+                dated.push(picture.at);
+            }
+            let present = presenting
+                .then(|| probe.next_present(Instant::now()))
+                .flatten();
+            let next = present.map_or(deadline, |present| present.min(deadline));
+            waiter.wait(next.min(end)).unwrap();
+        }
+        (units, dated)
+    }
+    let probe = Probe::default();
+    probe.date(60.0, Instant::now(), Arc::new(Instant::now));
+    let journal = pb_mapper_core::test_support::TempPath::new("desktop-helper-thread-c");
+    let captures = Arc::new(Mutex::new(Vec::new()));
+    let asked = captures.clone();
+    let (backend, helper) = synthetic::<true>(
+        &probe,
+        journal.to_path_buf(),
+        |_| None,
+        move |request| {
+            if matches!(request, Request::Video { .. }) {
+                asked.lock().push(Instant::now());
+            }
+        },
+    );
+    let shared = session(true);
+    let mut engine = Engine::start(&shared, backend, config(None), Monotonic).unwrap();
+    let waiter = Waiter::new(&engine.room.wake).unwrap();
+    let start = Instant::now();
+    let presenting = start + Duration::from_millis(500);
+    let (sent, dated) = drive(&mut engine, &waiter, &probe, &shared, presenting, true);
+    // About 30 presents in half a second; a loaded machine may miss some.
+    assert!(sent >= 15, "{sent} units");
+    let takes = probe.takes();
+    assert!(takes.len() >= 15, "{} pictures", takes.len());
+    // Each picture dated by its present, a little after it as the answer's
+    // way through the pipe puts it, which anchors thread C's pacing there.
+    assert!(dated.len() >= 15, "{} dated", dated.len());
+    for (present, _) in &takes {
+        assert!(
+            dated
+                .iter()
+                .any(|at| *at >= *present && *at < *present + Duration::from_millis(50)),
+            "a present at {present:?} undated"
+        );
+    }
+    let still = Instant::now();
+    let end = still + Duration::from_millis(600);
+    drive(&mut engine, &waiter, &probe, &shared, end, false);
+    let asked_still = captures
+        .lock()
+        .iter()
+        .filter(|at| **at >= still + Duration::from_millis(50))
+        .count();
+    // Two captures per liveness repeat (the repeat, then the tick that
+    // finds nothing new), every 250 ms: a poll would ask hundreds of times.
+    assert!(
+        asked_still <= 12,
+        "{asked_still} captures of a still display"
+    );
+    drop(engine);
+    helper.join().unwrap();
+}
+
 /// A viewer joining, pausing or resuming that changes only the frame-rate
 /// limit keeps the capture source, with an IDR for each change; a smaller
 /// size builds another.
