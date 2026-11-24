@@ -4,7 +4,9 @@
 //! VideoToolbox's thread, turns each length-prefixed sample into Annex B,
 //! a keyframe's parameter sets in front, queues it and wakes thread C.
 //! Low-latency rate control may use QP up to 51, so that it codes a picture
-//! coarser rather than drop it; a picture it drops anyway is counted.
+//! coarser rather than drop it; a picture it drops anyway is counted, and
+//! when it was the newest handed over, thread C is woken to submit it again
+//! (`codec::resubmit`).
 //!
 //! Once the session is prepared, every call on it is made by the encoder's
 //! own submit thread, one at a time: thread C only hands it a picture, or a
@@ -21,6 +23,7 @@ use crate::{
     codec::{
         avcc::annex_b,
         pipeline::{LATE_OUTPUT, OUTPUT_WAIT, codec_error, late},
+        resubmit::{Resubmit, Unit},
     },
     error,
 };
@@ -62,7 +65,7 @@ use std::{
 struct Pending {
     token: u64,
     at: Instant,
-    duplicate: bool,
+    unit: Unit,
     keyframe: bool,
     pts_us: u64,
 }
@@ -82,6 +85,8 @@ struct State {
     keyframe_due: bool,
     /// Outputs VideoToolbox flagged `FrameDropped`, ever.
     dropped: u64,
+    /// The last picture is due again: the newest unit was dropped.
+    resubmit: Resubmit,
     /// What the output callback converts into, reused.
     sample: Vec<u8>,
     /// The picture handed over and not yet taken by the submit thread; its
@@ -721,15 +726,24 @@ impl Encoder {
         self.shared.state.lock().keyframe_due
     }
 
-    /// Hand `picture` to the submit thread to encode; `duplicate` when it is
-    /// the last one again. Never waits; a picture the thread has yet to take
-    /// refuses it (`admit` says `Busy` first). A failure of the encode
-    /// itself reaches `drain`.
+    /// The newest unit was dropped: the next submit sends the last picture
+    /// again, as a new one, unless a new picture came.
+    pub(crate) fn take_resubmit(&self) -> bool {
+        self.shared.state.lock().resubmit.take()
+    }
+
+    pub(crate) fn wants_resubmit(&self) -> bool {
+        self.shared.state.lock().resubmit.due()
+    }
+
+    /// Hand `picture`, a `unit`, to the submit thread to encode. Never
+    /// waits; a picture the thread has yet to take refuses it (`admit` says
+    /// `Busy` first). A failure of the encode itself reaches `drain`.
     pub(crate) fn encode(
         &mut self,
         picture: &CVPixelBuffer,
         keyframe: bool,
-        duplicate: bool,
+        unit: Unit,
     ) -> Result<()> {
         let now = Instant::now();
         let mut state = self.shared.state.lock();
@@ -745,10 +759,11 @@ impl Encoder {
         state.pending.push_back(Pending {
             token,
             at: now,
-            duplicate,
+            unit,
             keyframe,
             pts_us,
         });
+        state.resubmit.submitted(unit);
         state.gate.peak_in_flight = state.gate.peak_in_flight.max(state.in_flight());
         state.job = Some(Job {
             picture: picture.retain(),
@@ -1313,9 +1328,14 @@ fn receive(
     let previous = state.last_output.replace(now);
     let Some(sample) = sample.filter(|_| !flags.contains(VTEncodeInfoFlags::FrameDropped)) else {
         // Dropped: what follows still decodes; a keyframe asked for is
-        // asked for again.
+        // asked for again, and the newest picture is sent again, as a later
+        // unit in flight would have replaced it (the mailbox's unit is
+        // pending too).
         state.dropped += 1;
-        return pending.keyframe && !std::mem::replace(&mut state.keyframe_due, true);
+        let newest = state.pending.is_empty();
+        let resubmit = state.resubmit.dropped(pending.unit, newest);
+        let keyframe = pending.keyframe && !std::mem::replace(&mut state.keyframe_due, true);
+        return keyframe || resubmit;
     };
     let keyframe = sync(sample);
     if late(pending.at, previous, now) {
@@ -1341,6 +1361,7 @@ fn receive(
     match converted {
         Ok(bytes) => {
             state.wait_independent = false;
+            state.resubmit.kept(pending.unit);
             #[cfg(test)]
             if shared.quality
                 && let Some(error) = luma_error(sample)
@@ -1355,7 +1376,7 @@ fn receive(
                     height: shared.size.1,
                     keyframe,
                     pts_us: pending.pts_us,
-                    duplicate: pending.duplicate,
+                    duplicate: pending.unit.duplicate(),
                     encode_us: u32::try_from(encode_us).unwrap_or(u32::MAX),
                     gop: shared.gop,
                 },

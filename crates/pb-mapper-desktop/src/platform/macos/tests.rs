@@ -19,6 +19,7 @@ use crate::{
         annexb::{AccessUnit, ParameterSets},
         pipeline::LATE_OUTPUT,
         rate_fit::Fit,
+        resubmit::Unit,
     },
     platform::DisplayModes,
     scheduler::{Waiter, Wake},
@@ -78,10 +79,11 @@ fn keyframes_come_only_when_asked_and_carry_their_parameter_sets() {
     .expect("VideoToolbox makes an H.264 session on every Mac, in software if need be");
     let picture = picture(640, 360);
     let asked = [true, false, false, false, true, false];
+    let unit = |frame| if frame > 0 { Unit::Repeat } else { Unit::Fresh };
     for (frame, asked) in asked.into_iter().enumerate() {
         let mut keyframe = asked;
         let mut submitted = Instant::now();
-        encoder.encode(&picture, keyframe, frame > 0).unwrap();
+        encoder.encode(&picture, keyframe, unit(frame)).unwrap();
         let deadline = submitted + Duration::from_secs(3);
         let mut retries = 0;
         let unit = loop {
@@ -105,7 +107,7 @@ fn keyframes_come_only_when_asked_and_carry_their_parameter_sets() {
                 );
                 keyframe = true;
                 submitted = Instant::now();
-                encoder.encode(&picture, keyframe, frame > 0).unwrap();
+                encoder.encode(&picture, keyframe, unit(frame)).unwrap();
                 continue;
             }
             assert!(Instant::now() < deadline, "no output for frame {frame}");
@@ -162,7 +164,7 @@ fn a_busy_submit_thread_leaves_the_tick_armed() {
     .expect("VideoToolbox makes an H.264 session on every Mac, in software if need be");
     let picture = picture(640, 360);
     encoder.hold(true);
-    encoder.encode(&picture, true, false).unwrap();
+    encoder.encode(&picture, true, Unit::Fresh).unwrap();
     assert!(encoder.full(1));
     assert_eq!(encoder.admit(1), Admit::Full);
     assert!(!encoder.waiting());
@@ -170,7 +172,7 @@ fn a_busy_submit_thread_leaves_the_tick_armed() {
     assert!(!encoder.full(VT_IN_FLIGHT));
     assert_eq!(encoder.admit(VT_IN_FLIGHT), Admit::Busy);
     assert!(encoder.waiting());
-    assert!(encoder.encode(&picture, false, false).is_err());
+    assert!(encoder.encode(&picture, false, Unit::Fresh).is_err());
     assert_eq!(encoder.pending(), 1);
     encoder.hold(false);
     // The wake that ends the wait is the next test's.
@@ -265,7 +267,7 @@ fn an_encoder_dropped_mid_encode_neither_hangs_nor_calls_back() {
         // Warm: a cold software encoder, on a runner without a hardware
         // one, may take longer than `LATE_OUTPUT` over its first picture.
         // VideoToolbox may hold on to that picture until the session goes.
-        encoder.encode(&warm, true, false).unwrap();
+        encoder.encode(&warm, true, Unit::Fresh).unwrap();
         // Out, or discarded as late.
         wait_for(&waiter, Duration::from_secs(10), || {
             encoder.drain().unwrap().is_some() || (encoder.idle() && encoder.pending() == 0)
@@ -273,7 +275,7 @@ fn an_encoder_dropped_mid_encode_neither_hangs_nor_calls_back() {
         while encoder.drain().unwrap().is_some() {}
         let alone = picture.retain_count();
         encoder.hold(held);
-        encoder.encode(&picture, false, false).unwrap();
+        encoder.encode(&picture, false, Unit::Fresh).unwrap();
         if held {
             assert!(picture.retain_count() > alone);
         } else {
@@ -336,7 +338,7 @@ fn an_encode_refused_on_the_submit_thread_surfaces_from_drain() {
             Encoder::new(codec, 640, 360, 30, 2_000_000, &Waker(wake.clone())).unwrap();
         let picture = picture(640, 360);
         encoder.tear_down();
-        encoder.encode(&picture, true, false).unwrap();
+        encoder.encode(&picture, true, Unit::Fresh).unwrap();
         assert!(
             waiter
                 .wait(Instant::now() + Duration::from_secs(3))
@@ -355,7 +357,7 @@ fn an_encode_refused_on_the_submit_thread_surfaces_from_drain() {
         );
         // The failure alone: the unit is forgotten.
         assert_eq!(encoder.pending(), 1, "{codec:?}");
-        encoder.encode(&picture, false, false).unwrap();
+        encoder.encode(&picture, false, Unit::Fresh).unwrap();
         wait_for(&waiter, Duration::from_secs(3), || encoder.idle());
         assert_eq!(encoder.pending(), 1, "{codec:?}");
         assert!(encoder.drain().is_err());
@@ -383,7 +385,7 @@ fn a_bitrate_set_during_an_encode_returns_at_once_and_reaches_the_session() {
     .expect("VideoToolbox makes an H.264 session on every Mac, in software if need be");
     let picture = surface(3840, 2160);
     paint(&picture, 0);
-    encoder.encode(&picture, true, false).unwrap();
+    encoder.encode(&picture, true, Unit::Fresh).unwrap();
     let started = Instant::now();
     while !encoder.in_call() && started.elapsed() < Duration::from_secs(1) {
         std::thread::yield_now();
@@ -1056,7 +1058,7 @@ impl Pacer {
                         let keyframe = self.frame == 0
                             || std::mem::take(&mut self.force)
                             || self.encoder.keyframe_due();
-                        self.encoder.encode(picture, keyframe, false).unwrap();
+                        self.encoder.encode(picture, keyframe, Unit::Fresh).unwrap();
                         self.frame += 1;
                         next_tick = (next_tick + period).max(now + period * 3 / 4);
                     }
@@ -1359,7 +1361,7 @@ fn paced_case(codec: VideoCodec, ring: &[CFRetained<CVPixelBuffer>], pace: u32, 
                 Admit::Free => {
                     let called = Instant::now();
                     encoder
-                        .encode(&ring[frame % ring.len()], keyframe, false)
+                        .encode(&ring[frame % ring.len()], keyframe, Unit::Fresh)
                         .unwrap();
                     let call = called.elapsed();
                     if measuring {

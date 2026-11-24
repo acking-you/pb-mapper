@@ -15,7 +15,10 @@ use super::{
 };
 use crate::{
     VideoCodec, Waker,
-    codec::pipeline::{LATE_OUTPUT, LIVENESS_INTERVAL},
+    codec::{
+        pipeline::{LATE_OUTPUT, LIVENESS_INTERVAL},
+        resubmit::Unit,
+    },
     pacer::Pacer,
     scheduler::{Waiter, Wake},
 };
@@ -195,8 +198,9 @@ struct Rig {
     submitted: u64,
     skipped: u64,
     armed: u64,
-    /// Each picture handed over: its presentation time and ring index.
-    sent: Vec<(u64, usize)>,
+    /// Each picture handed over: its presentation time, ring index and
+    /// kind.
+    sent: Vec<(u64, usize, Unit)>,
     out: Vec<Out>,
 }
 
@@ -269,12 +273,12 @@ impl Rig {
 
     /// Hand the encoder ring picture `index`; the next tick's due time is the
     /// pacer's to say.
-    fn hand(&mut self, index: usize, duplicate: bool) {
+    fn hand(&mut self, index: usize, unit: Unit) {
         let keyframe = std::mem::take(&mut self.keyframe);
         self.encoder
-            .encode(&self.ring[index % self.ring.len()], keyframe, duplicate)
+            .encode(&self.ring[index % self.ring.len()], keyframe, unit)
             .unwrap();
-        self.sent.push((self.encoder.last_pts(), index));
+        self.sent.push((self.encoder.last_pts(), index, unit));
         self.submitted += 1;
     }
 
@@ -298,7 +302,7 @@ impl Rig {
                     Admit::Free => {
                         let index = self.next;
                         self.next += 1;
-                        self.hand(index, false);
+                        self.hand(index, Unit::Fresh);
                         pacer.consume(now, None);
                     }
                 }
@@ -467,7 +471,8 @@ fn drops_case(
 /// a control grant does, hands over `k` new pictures of scrolling text, one
 /// a tick, and stops. It prints, for each `k` from 1 to 12, the time from
 /// the last new picture's submit to the first unit kept that carries it,
-/// as `MacVideo` would send it, and then a summary of each bitrate.
+/// as `MacVideo` would send it, and which unit that was (the picture itself,
+/// a resubmit or a liveness repeat); then a summary of each bitrate.
 #[test]
 #[ignore = "a measurement: about 3 minutes of encoding, in release mode"]
 fn video_toolbox_resubmit() {
@@ -498,31 +503,47 @@ fn resubmit_case(codec: VideoCodec, painted: &[CFRetained<CVPixelBuffer>], bitra
     };
     // The session's own IDR and a second of motion before the first trial.
     rig.run(RESUBMIT_PACE, Instant::now() + Duration::from_secs(1));
-    let mut delays = Vec::new();
+    let mut trials = Vec::new();
     for k in 1..=12 {
         let mut host = Emulated::new(&rig);
         host.still(&mut rig, Instant::now() + Duration::from_secs(2));
         rig.keyframe = true;
-        let delay = host.trial(&mut rig, k);
+        let carried = host.trial(&mut rig, k);
         report(format_args!(
-            "{label} k={k} delay_ms={} dropped_total={}",
-            delay.map_or_else(
+            "{label} k={k} delay_ms={} carried_by={} dropped_total={}",
+            carried.map_or_else(
                 || "none".to_owned(),
-                |delay| format!("{:.1}", delay.as_secs_f64() * 1e3)
+                |(delay, _)| format!("{:.1}", delay.as_secs_f64() * 1e3)
             ),
+            carried.map_or("none", |(_, unit)| kind(unit)),
             rig.dropped(),
         ));
-        delays.push(delay.unwrap_or(RESUBMIT_WAIT));
+        trials.push(carried);
     }
-    let tick = Duration::from_secs(1) / RESUBMIT_PACE;
+    let delays: Vec<Duration> = trials
+        .iter()
+        .map(|carried| carried.map_or(RESUBMIT_WAIT, |(delay, _)| delay))
+        .collect();
+    let by = |unit| {
+        trials
+            .iter()
+            .filter(|carried| carried.is_some_and(|(_, carrier)| carrier == unit))
+            .count()
+    };
     report(format_args!(
-        "{label} summary trials={} at_least_250ms={} within_2_ticks={} max_ms={:.1}",
+        "{label} summary trials={} under_250ms={} at_least_250ms_or_none={} by_picture={} by_resubmit={} by_repeat={} max_ms={:.1}",
         delays.len(),
+        delays
+            .iter()
+            .filter(|delay| **delay < LIVENESS_INTERVAL)
+            .count(),
         delays
             .iter()
             .filter(|delay| **delay >= LIVENESS_INTERVAL)
             .count(),
-        delays.iter().filter(|delay| **delay <= tick * 2).count(),
+        by(Unit::Fresh),
+        by(Unit::Resubmit),
+        by(Unit::Repeat),
         delays
             .iter()
             .max()
@@ -533,11 +554,21 @@ fn resubmit_case(codec: VideoCodec, painted: &[CFRetained<CVPixelBuffer>], bitra
     ));
 }
 
+fn kind(unit: Unit) -> &'static str {
+    match unit {
+        Unit::Fresh => "picture",
+        Unit::Resubmit => "resubmit",
+        Unit::Repeat => "repeat",
+    }
+}
+
 /// `MacVideo::submit`'s policy over the rig's encoder, as a still screen
 /// with `fresh` new pictures waiting meets it: a new picture each due tick
-/// while there are any, else the last again for a keyframe or after
-/// `LIVENESS_INTERVAL`, marked a duplicate.
+/// while there are any, else the last again for a keyframe, a resubmit or
+/// after `LIVENESS_INTERVAL`, marked a duplicate unless it is a resubmit.
 struct Emulated {
+    /// A resubmit taken from the encoder and not yet submitted.
+    resubmit: bool,
     last_submit: Instant,
     /// The ring index of the last picture handed over.
     last: usize,
@@ -549,6 +580,7 @@ impl Emulated {
     fn new(rig: &Rig) -> Self {
         let now = Instant::now();
         Self {
+            resubmit: false,
             last_submit: now,
             last: rig.next.saturating_sub(1),
             fresh: 0,
@@ -565,20 +597,23 @@ impl Emulated {
         }
         if self.pacer.due(now) && !rig.encoder.waiting() {
             rig.keyframe |= rig.encoder.keyframe_due();
+            self.resubmit |= rig.encoder.take_resubmit();
             match rig.encoder.admit(VT_IN_FLIGHT) {
                 Admit::Full => self.pacer.consume(now, None),
                 Admit::Busy => {}
                 Admit::Free => {
-                    let repeat = rig.keyframe || now >= self.last_submit + LIVENESS_INTERVAL;
-                    if self.fresh > 0 {
-                        self.fresh -= 1;
-                        self.last = rig.next;
-                        rig.next += 1;
-                        rig.hand(self.last, false);
-                        self.last_submit = now;
-                        self.pacer.consume(now, None);
-                    } else if repeat {
-                        rig.hand(self.last, true);
+                    let repeat = rig.keyframe
+                        || self.resubmit
+                        || now >= self.last_submit + LIVENESS_INTERVAL;
+                    if self.fresh > 0 || repeat {
+                        let fresh = self.fresh > 0;
+                        if fresh {
+                            self.fresh -= 1;
+                            self.last = rig.next;
+                            rig.next += 1;
+                        }
+                        rig.hand(self.last, Unit::of(fresh, self.resubmit));
+                        self.resubmit = false;
                         self.last_submit = now;
                         self.pacer.consume(now, None);
                     }
@@ -586,8 +621,12 @@ impl Emulated {
             }
         }
         // `MacVideo::idle_until`: nothing new is due before the liveness
-        // repeat unless a keyframe is.
-        let idle = self.fresh == 0 && !rig.keyframe && !rig.encoder.wants_keyframe();
+        // repeat unless a keyframe or a resubmit is.
+        let idle = self.fresh == 0
+            && !rig.keyframe
+            && !self.resubmit
+            && !rig.encoder.wants_keyframe()
+            && !rig.encoder.wants_resubmit();
         let wait = if rig.encoder.waiting() {
             now + LATE_OUTPUT
         } else if idle {
@@ -607,8 +646,9 @@ impl Emulated {
 
     /// `k` new pictures after the IDR the rig asks for, then a still
     /// screen: the time from the last new picture's submit to the first
-    /// unit kept that carries it, if one came within `RESUBMIT_WAIT`.
-    fn trial(&mut self, rig: &mut Rig, k: usize) -> Option<Duration> {
+    /// unit kept that carries it, and that unit's kind, if one came within
+    /// `RESUBMIT_WAIT`.
+    fn trial(&mut self, rig: &mut Rig, k: usize) -> Option<(Duration, Unit)> {
         // The IDR of the still picture, then the new pictures.
         let start = Instant::now();
         while rig.keyframe {
@@ -622,15 +662,15 @@ impl Emulated {
         let last = self.last;
         let deadline = submitted + RESUBMIT_WAIT;
         loop {
-            let carried = rig.out.iter().find(|out| {
-                out.at >= submitted
-                    && rig
-                        .sent
-                        .iter()
-                        .any(|(pts, index)| *pts == out.pts && *index == last)
+            let carried = rig.out.iter().find_map(|out| {
+                let (_, _, unit) = rig
+                    .sent
+                    .iter()
+                    .find(|(pts, index, _)| *pts == out.pts && *index == last)?;
+                (out.at >= submitted).then(|| (out.at.saturating_duration_since(submitted), *unit))
             });
-            if let Some(out) = carried {
-                return Some(out.at.saturating_duration_since(submitted));
+            if carried.is_some() {
+                return carried;
             }
             if Instant::now() >= deadline {
                 return None;
@@ -817,7 +857,7 @@ fn rate_step_case(codec: VideoCodec, painted: &[CFRetained<CVPixelBuffer>]) {
                     drops_at[frame] = rig.dropped();
                     let index = rig.next;
                     rig.next += 1;
-                    rig.hand(index, false);
+                    rig.hand(index, Unit::Fresh);
                     pacer.consume(now, None);
                 }
             }
@@ -839,7 +879,7 @@ fn rate_step_case(codec: VideoCodec, painted: &[CFRetained<CVPixelBuffer>]) {
     let sizes: Vec<Option<u64>> = rig
         .sent
         .iter()
-        .map(|(pts, _)| {
+        .map(|(pts, _, _)| {
             rig.out
                 .iter()
                 .find(|out| out.pts == *pts)
