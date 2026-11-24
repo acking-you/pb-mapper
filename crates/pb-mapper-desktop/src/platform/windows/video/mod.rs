@@ -136,9 +136,26 @@ pub struct Statistics {
     /// The GOP size the encoder reads back: a `GOP_CANDIDATES` entry, or what
     /// it clamped them to. 0 when it reports none.
     pub gop: u32,
-    /// Presents DXGI folded into the acquires that found a new picture,
-    /// beyond one each (`AccumulatedFrames - 1`): presents no capture took.
+    /// The presents no submitted picture showed: for each dated new picture
+    /// submitted, those it covers beyond one (`Presented::presents - 1`),
+    /// whether DXGI accumulated them into one acquire or a newer acquire
+    /// replaced a picture still waiting for the encoder. Thread C's
+    /// `coalesced_per_s` counts the same.
     pub coalesced_presents: u64,
+    /// This encoder's first acquire, once there was one.
+    pub first_acquire: Option<FirstAcquire>,
+}
+
+/// What a duplication's first frame reported: whether a still desktop's
+/// first frame carries a present, which only a device shows.
+#[derive(Clone, Copy, Debug)]
+pub struct FirstAcquire {
+    /// `LastPresentTime`: 0 when only the pointer changed.
+    pub last_present_time: i64,
+    /// `AccumulatedFrames`: the desktop updates folded into it.
+    pub accumulated_frames: u32,
+    /// Whether a desktop image came with it.
+    pub resource: bool,
 }
 
 struct Runtime {
@@ -200,8 +217,6 @@ pub struct Encoder {
     presented: Option<Presented>,
     /// The last sample time, in microseconds since `created`.
     last_pts_us: Option<u64>,
-    /// The first acquire was logged.
-    first_logged: bool,
     pending: VecDeque<(u64, Instant, bool)>,
     /// When the last output was collected, discarded or not.
     last_output: Option<Instant>,
@@ -377,7 +392,6 @@ impl Encoder {
             latest_presents: 0,
             presented: None,
             last_pts_us: None,
-            first_logged: false,
             pending: VecDeque::with_capacity(MAX_IN_FLIGHT),
             last_output: None,
             width,
@@ -597,6 +611,9 @@ impl Encoder {
         self.pending.push_back((pts_us, now, !fresh));
         if fresh {
             self.presented = presented.map(|at| Presented::new(at, self.latest_presents));
+            if let Some(presented) = self.presented {
+                self.stats.coalesced_presents += u64::from(presented.presents.saturating_sub(1));
+            }
             self.latest_at = None;
             self.latest_presents = 0;
         }
@@ -624,16 +641,19 @@ impl Encoder {
             Err(e) => return Err(error(e)),
         }
         let first = self.latest.is_none();
-        if !self.first_logged {
-            // Whether a new duplication's first frame on a still desktop
-            // reports a present, which only a device shows.
-            self.first_logged = true;
+        if self.stats.first_acquire.is_none() {
+            let acquired = FirstAcquire {
+                last_present_time: info.LastPresentTime,
+                accumulated_frames: info.AccumulatedFrames,
+                resource: resource.is_some(),
+            };
+            self.stats.first_acquire = Some(acquired);
             tracing::debug!(
                 target: "pb_mapper_desktop::session",
                 event = "windows_capture_first_acquire",
-                last_present_time = info.LastPresentTime,
-                accumulated_frames = info.AccumulatedFrames,
-                resource = resource.is_some(),
+                last_present_time = acquired.last_present_time,
+                accumulated_frames = acquired.accumulated_frames,
+                resource = acquired.resource,
             );
         }
         let copied = (|| {
@@ -672,7 +692,6 @@ impl Encoder {
                 self.last_present = present;
             }
             self.stats.unique_captures += 1;
-            self.stats.coalesced_presents += u64::from(info.AccumulatedFrames.saturating_sub(1));
             // A picture left waiting keeps its presents, and takes the newer
             // one's time.
             self.latest_at = if first {
@@ -796,18 +815,22 @@ mod tests {
         let mut frequency: i64 = 0;
         // SAFETY: out parameters the calls fill.
         unsafe { QueryPerformanceFrequency(&mut frequency) }.unwrap();
+        // Bracketed by two clock reads, so a preemption anywhere between
+        // them widens the bracket instead of failing the test; the slack
+        // covers only rounding.
+        let before = Instant::now();
         let mut now: i64 = 0;
+        // SAFETY: as above.
         unsafe { QueryPerformanceCounter(&mut now) }.unwrap();
-        let near = |at: Instant, target: Instant| {
-            at.max(target) - at.min(target) < Duration::from_millis(1)
-        };
-        assert!(near(present_instant(now).unwrap(), Instant::now()));
+        let read = present_instant(now).unwrap();
         let earlier = present_instant(now - frequency / 10).unwrap();
-        assert!(near(earlier + Duration::from_millis(100), Instant::now()));
-        assert!(near(
-            present_instant(now + frequency).unwrap(),
-            Instant::now()
-        ));
+        let ahead = present_instant(now + frequency).unwrap();
+        let after = Instant::now();
+        let slack = Duration::from_millis(1);
+        let within = |at: Instant| at + slack >= before && at <= after + slack;
+        assert!(within(read), "{read:?} not in {before:?}..{after:?}");
+        assert!(within(earlier + Duration::from_millis(100)));
+        assert!(within(ahead));
         assert_eq!(present_instant(now - frequency * 2), None);
 
         let at = Instant::now();
