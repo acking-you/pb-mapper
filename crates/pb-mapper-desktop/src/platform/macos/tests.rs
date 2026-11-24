@@ -1915,9 +1915,12 @@ const CADENCE_SETTLE: Duration = Duration::from_secs(1);
 /// (`floor(refresh × 1.01 / 60) - 0.5` refreshes), the cadence at 60, and
 /// zero. Each prints its complete and idle pictures a second, WindowServer's
 /// CPU a second, and how many refresh periods apart consecutive pictures'
-/// display times were (`SCStreamFrameInfoDisplayTime`). If ScreenCaptureKit
-/// gates each picture strictly, a 144 Hz display gives about 48, 72, 144 and
-/// 144 pictures a second at 15, 10.4, 3.5 and 0 ms.
+/// display times were (`SCStreamFrameInfoDisplayTime`). A gate that holds
+/// each picture to the interval strictly puts consecutive pictures a whole
+/// number of periods apart, the interval rounded up, so on a display whose
+/// refresh is not a multiple of 60 the arms before the cadence pass fewer
+/// pictures than the frame rate; a gate that only keeps the long-run rate
+/// to the interval passes about one picture an interval at each.
 ///
 /// The main display must be awake and unlocked, and show an animation that
 /// changes the whole screen every refresh, such as a browser's frame-rate
@@ -2003,6 +2006,106 @@ fn sck_cadence() {
             per(server, server_after, seconds),
         );
     }
+}
+
+/// Trials of `sck_held_back_change` per interval.
+const HELD_TRIALS: u32 = 10;
+
+/// The stream's complete pictures once there are more than `seen`, waited
+/// for up to `within`.
+fn complete_after(stream: &super::capture::Stream, seen: u64, within: Duration) -> Option<u64> {
+    let until = Instant::now() + within;
+    loop {
+        let complete = stream.counts().complete;
+        if complete > seen {
+            return Some(complete);
+        }
+        if Instant::now() >= until {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Whether ScreenCaptureKit delivers a change it held back for the minimum
+/// interval once the interval allows, or drops it, which decides whether a
+/// stream may run at an interval longer than the frame-rate limit's
+/// `cadence::window`: a slower pace's, or a pause's. A stream of the main
+/// display with the pointer drawn in, at each interval: the pointer moves,
+/// and a quarter of an interval after that picture arrives it moves again,
+/// inside the interval, and then stays still. A gate that defers the
+/// change delivers the second position about an interval after the first
+/// picture; one that drops it delivers nothing more while the screen stays
+/// still. Each interval prints how many of `HELD_TRIALS` second moves
+/// arrived, and the longest any took. The pointer goes back where it was.
+///
+/// The main display must be awake and unlocked, with nothing else on it
+/// moving and nobody using the pointer; the test says why when it cannot
+/// run:
+/// `cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture
+/// --test-threads=1 sck_held_back_change`.
+#[test]
+#[ignore = "a measurement: moves the pointer, with Screen Recording and a still screen"]
+fn sck_held_back_change() {
+    use super::capture::Stream;
+    use crate::qos::scaled_size;
+    use objc2_core_foundation::CGPoint;
+    use objc2_core_graphics::{
+        CGDisplayBounds, CGEvent, CGMainDisplayID, CGWarpMouseCursorPosition,
+    };
+
+    if let Some(why) = capture_unavailable() {
+        let _ = writeln!(std::io::stderr(), "skipped sck_held_back_change: {why}");
+        return;
+    }
+    let id = CGMainDisplayID();
+    let display = desktop::displays()
+        .unwrap()
+        .into_iter()
+        .find(|display| display.id == id)
+        .unwrap();
+    let (width, height) = scaled_size(display.width, display.height, 1920, 1080);
+    let bounds = CGDisplayBounds(id);
+    let point = |dx: f64| CGPoint {
+        x: bounds.origin.x + bounds.size.width / 2.0 + dx,
+        y: bounds.origin.y + bounds.size.height / 2.0,
+    };
+    let home = CGEvent::location(CGEvent::new(None).as_deref());
+    let wake = Wake::new();
+    let waker = Waker(wake.clone());
+    for interval in [15, 25, 100, 500].map(Duration::from_millis) {
+        let stream = Stream::start_with_pointer(id, width, height, interval, &waker).unwrap();
+        std::thread::sleep(CADENCE_SETTLE);
+        let (mut arrived, mut longest, mut unseen) = (0, Duration::ZERO, 0);
+        for trial in 0..HELD_TRIALS {
+            let step = f64::from(trial) * 4.0;
+            let seen = stream.counts().complete;
+            let _ = CGWarpMouseCursorPosition(point(-100.0 - step));
+            if complete_after(&stream, seen, Duration::from_secs(1)).is_none() {
+                unseen += 1;
+                continue;
+            }
+            std::thread::sleep(interval / 4);
+            let seen = stream.counts().complete;
+            let moved = Instant::now();
+            let _ = CGWarpMouseCursorPosition(point(100.0 + step));
+            let within = interval * 2 + Duration::from_millis(250);
+            if complete_after(&stream, seen, within).is_some() {
+                arrived += 1;
+                longest = longest.max(moved.elapsed());
+            }
+            // Still, so that the next first move starts a new interval.
+            std::thread::sleep(interval + Duration::from_millis(50));
+        }
+        drop(stream);
+        let _ = writeln!(
+            std::io::stderr(),
+            "{:>4} ms: held-back move arrived in {arrived} of {} trials, the longest after {longest:?}; first move unseen in {unseen}",
+            interval.as_millis(),
+            HELD_TRIALS - unseen,
+        );
+    }
+    let _ = CGWarpMouseCursorPosition(home);
 }
 
 /// Lookups of `sck_display_lookup` per arm.

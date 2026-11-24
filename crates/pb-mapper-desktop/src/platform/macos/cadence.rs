@@ -4,12 +4,12 @@
 //! The window server composes at the display's refreshes, so a picture can
 //! only come at one. A minimum interval that is not a whole number of
 //! refresh periods, if ScreenCaptureKit holds each picture to it strictly,
-//! rounds every delivered interval up to the next whole number: 15 ms on a
-//! 144 Hz display (6.9 ms a refresh) would pass every third refresh, 48
-//! pictures a second for a 60 FPS session. The interval here is half a
-//! refresh short of the refreshes it spans, `(n - 0.5) / refresh`, which
-//! passes every n-th refresh with half a period to spare either way. `n` is
-//! the pace's own multiple where the refresh is one (within 1%), so that
+//! rounds every delivered interval up to the next whole number of them, and
+//! where the refresh is not a multiple of the frame rate that passes fewer
+//! pictures than the frame rate. The interval here is half a refresh short
+//! of the refreshes it spans, `(n - 0.5) / refresh`, which passes every
+//! n-th refresh with half a period to spare either way. `n` is the pace's
+//! own multiple where the refresh is one (within 1%), so that
 //! ScreenCaptureKit delivers at the pace and thread C's anchored pacing
 //! takes each picture as it arrives; otherwise it is every refresh while
 //! the refresh is below eight times the pace, the freshest pictures for
@@ -19,17 +19,21 @@
 //! strictly is what the ignored measurement `sck_cadence` shows on a
 //! display.
 //!
+//! No interval is longer than that one before, the limit's [`window`]: a
+//! change on screen that ScreenCaptureKit holds back for the interval must
+//! still arrive at the next refresh it allows, and until a display has
+//! shown that it does (the ignored measurement `sck_held_back_change`), no
+//! change waits for its picture longer than it did before. So `n` is at
+//! most the largest whole number of refreshes that fits in the window, and
+//! a slower pace, or every viewer pausing, slows the stream only that far.
+//!
 //! [`Follow`] decides the interval a stream runs at: a faster pace applies
 //! at once, a slower one once it has held for [`SLOWER_HOLD`], a new
-//! refresh or frame-rate limit at once, and while every viewer is paused,
-//! [`PAUSED_INTERVAL`]. [`Updates`] hands the stream one change at a time.
-//! Pure: built and tested on every platform.
+//! refresh, frame-rate limit or pause at once. [`Updates`] hands the stream
+//! one change at a time. Pure: built and tested on every platform.
 
 use std::time::{Duration, Instant};
 
-/// The interval while every viewer is paused: two pictures a second of a
-/// screen that keeps changing, which nobody takes until a viewer resumes.
-pub(crate) const PAUSED_INTERVAL: Duration = Duration::from_millis(500);
 /// How long a slower pace must hold before the stream slows to it, so that
 /// a pace that dips and comes back does not change the stream twice.
 pub(crate) const SLOWER_HOLD: Duration = Duration::from_secs(1);
@@ -45,6 +49,9 @@ pub(crate) struct Cadence {
     /// Every how many refreshes a picture may come; `None` with no refresh.
     pub every: Option<u32>,
     pub interval: Duration,
+    /// `every` is the pace's own multiple of refreshes, so that pictures
+    /// come at the pace.
+    pub paced: bool,
 }
 
 /// A display's refresh rate: its mode's when that reports one above 1 Hz,
@@ -63,35 +70,76 @@ fn believed(hz: f64) -> Option<f64> {
     (hz.is_finite() && hz > 1.0 && hz <= REFRESH_MAX).then_some(hz)
 }
 
+/// The longest interval a stream runs at under a frame-rate limit of
+/// `max_fps`: the one it ran at before the interval followed the refresh, a
+/// tenth short of the limit's period, in whole nanoseconds.
+pub(crate) fn window(max_fps: u32) -> Duration {
+    Duration::from_nanos(900_000_000 / u64::from(max_fps.clamp(1, 1_000)))
+}
+
+/// The most refreshes an interval may span on a display at `refresh` Hz
+/// under a limit of `max_fps`: the largest `n` whose `(n - 0.5) / refresh`
+/// is within the [`window`], and at least 1, half a refresh, which holds no
+/// picture back from the refresh after the last.
+fn most(refresh: f64, max_fps: u32) -> f64 {
+    // A nanosecond's slack, so that an interval equal to the window fits.
+    (window(max_fps).as_secs_f64() * refresh + 0.5 + 1e-9)
+        .floor()
+        .max(1.0)
+}
+
+/// A picture every `every` refreshes of a display at `refresh` Hz.
+fn spanning(refresh: f64, every: f64, paced: bool) -> Cadence {
+    Cadence {
+        // At most `refresh`, itself at most `REFRESH_MAX`.
+        every: Some(every as u32),
+        interval: Duration::from_secs_f64((every - 0.5) / refresh),
+        paced,
+    }
+}
+
+/// With no refresh known: the window, whatever the pace.
+fn unknown(max_fps: u32) -> Cadence {
+    Cadence {
+        every: None,
+        interval: window(max_fps),
+        paced: false,
+    }
+}
+
 /// The interval for a session paced at `target_fps` on a display refreshing
 /// at `refresh_hz`, or, with none, for one whose frame-rate limit is
-/// `max_fps`.
+/// `max_fps`; never longer than that limit's [`window`].
 pub(crate) fn cadence(refresh_hz: Option<f64>, target_fps: u32, max_fps: u32) -> Cadence {
     let Some(refresh) = refresh_hz.and_then(believed) else {
-        // A tenth short of the limit's period, in whole nanoseconds.
-        return Cadence {
-            every: None,
-            interval: Duration::from_nanos(900_000_000 / u64::from(max_fps.clamp(1, 1_000))),
-        };
+        return unknown(max_fps);
     };
     let multiple = refresh / f64::from(target_fps.max(1));
     let nearest = multiple.round();
-    let every = if nearest >= 1.0 && (multiple - nearest).abs() <= MULTIPLE_TOLERANCE * nearest {
+    let exact = nearest >= 1.0 && (multiple - nearest).abs() <= MULTIPLE_TOLERANCE * nearest;
+    let wanted = if exact {
         nearest
     } else {
         (multiple / 4.0).floor().max(1.0)
     };
-    Cadence {
-        // Below `refresh / target`, itself at most `REFRESH_MAX`.
-        every: Some(every as u32),
-        interval: Duration::from_secs_f64((every - 0.5) / refresh),
+    let every = wanted.min(most(refresh, max_fps));
+    spanning(refresh, every, exact && every == wanted)
+}
+
+/// The longest interval allowed under a limit of `max_fps`, which a stream
+/// runs at while every viewer is paused.
+pub(crate) fn slowest(refresh_hz: Option<f64>, max_fps: u32) -> Cadence {
+    match refresh_hz.and_then(believed) {
+        Some(refresh) => spanning(refresh, most(refresh, max_fps), false),
+        None => unknown(max_fps),
     }
 }
 
 /// How much faster than thread C's grid at `target_fps` a picture every
 /// `every` periods of a display link comes, in parts per million: positive
 /// where such a display drifted ahead of an even grid, each picture waiting
-/// longer for its tick until one was replaced.
+/// longer for its tick until one was replaced. It means something only
+/// where `every` is the pace's multiple ([`Cadence::paced`]).
 pub(crate) fn drift_ppm(every: u32, link_period: Duration, target_fps: u32) -> Option<i64> {
     let delivered = link_period.as_secs_f64() * f64::from(every);
     (delivered > 0.0 && target_fps > 0).then(|| {
@@ -130,9 +178,14 @@ impl Follow {
         follow
     }
 
-    /// What the stream should run at now, paused or not.
+    /// What the stream should run at now: the pace's cadence, or, while
+    /// every viewer is paused, the slowest allowed.
     pub(crate) fn wanted(&self) -> Cadence {
-        cadence(self.refresh, self.pace.min(self.max_fps), self.max_fps)
+        if self.paused {
+            slowest(self.refresh, self.max_fps)
+        } else {
+            cadence(self.refresh, self.pace.min(self.max_fps), self.max_fps)
+        }
     }
 
     /// The interval last handed to the stream.
@@ -185,25 +238,18 @@ impl Follow {
         self.settle()
     }
 
-    /// Every viewer paused (`PAUSED_INTERVAL` at once), or one resumed (the
-    /// pace's interval at once).
+    /// Every viewer paused (the slowest interval allowed), or one resumed
+    /// (the pace's), at once.
     pub(crate) fn paused(&mut self, paused: bool) -> Option<Duration> {
         if paused == self.paused {
             return None;
         }
         self.paused = paused;
-        if paused {
-            self.apply(PAUSED_INTERVAL)
-        } else {
-            self.settle()
-        }
+        self.settle()
     }
 
-    /// What is wanted now, at once, unless paused.
+    /// What is wanted now, at once.
     fn settle(&mut self) -> Option<Duration> {
-        if self.paused {
-            return None;
-        }
         self.apply(self.wanted().interval)
     }
 
@@ -274,41 +320,49 @@ mod tests {
         48.0, 59.94, 60.0, 75.0, 90.0, 100.0, 119.88, 120.0, 144.0, 165.0, 240.0,
     ];
 
-    fn every(refresh: f64, target: u32) -> Option<u32> {
-        cadence(Some(refresh), target, 120).every
-    }
-
     /// The pace's exact multiple where the refresh is one, within 1%; every
-    /// refresh otherwise, below eight times the pace; with no refresh, the
-    /// interval before this rule, whatever the pace.
+    /// refresh otherwise, below eight times the pace; neither beyond the
+    /// limit's window; with no refresh, the interval before this rule,
+    /// whatever the pace.
     #[test]
     fn the_interval_passes_the_pace_multiple_or_every_refresh() {
-        for (refresh, target, n) in [
-            (144.0, 60, 1),
-            (120.0, 60, 2),
-            (119.88, 60, 2),
-            (59.94, 60, 1),
-            (240.0, 60, 4),
-            (60.0, 25, 1),
-            (60.0, 30, 2),
-            (60.0, 20, 3),
-            (144.0, 72, 2),
-            (165.0, 120, 1),
-            (48.0, 60, 1),
-            (240.0, 25, 2),
-            (60.0, 2, 30),
+        // Refresh, pace, frame-rate limit, every how many refreshes, at the
+        // pace.
+        for (refresh, target, max_fps, n, paced) in [
+            (144.0, 60, 60, 1, false),
+            (120.0, 60, 60, 2, true),
+            (119.88, 60, 60, 2, true),
+            (59.94, 60, 60, 1, true),
+            (240.0, 60, 60, 4, true),
+            (60.0, 25, 30, 1, false),
+            (60.0, 30, 30, 2, true),
+            (60.0, 20, 20, 3, true),
+            (144.0, 72, 72, 2, true),
+            (165.0, 120, 120, 1, false),
+            (48.0, 60, 60, 1, false),
+            (240.0, 25, 30, 2, false),
+            // The pace's multiple beyond the window: as many refreshes as
+            // fit in it.
+            (60.0, 30, 60, 1, false),
+            (144.0, 72, 120, 1, false),
+            (240.0, 30, 30, 7, false),
+            (60.0, 2, 60, 1, false),
+            (240.0, 2, 30, 7, false),
         ] {
-            assert_eq!(every(refresh, target), Some(n), "{refresh} Hz at {target}");
-            let interval = cadence(Some(refresh), target, 120).interval.as_secs_f64();
+            let cadence = cadence(Some(refresh), target, max_fps);
+            let at = format!("{refresh} Hz at {target} of {max_fps}");
+            assert_eq!(cadence.every, Some(n), "{at}");
+            assert_eq!(cadence.paced, paced, "{at}");
             let expected = (f64::from(n) - 0.5) / refresh;
             assert!(
-                (interval - expected).abs() < 2e-9,
-                "{refresh} Hz at {target}"
+                (cadence.interval.as_secs_f64() - expected).abs() < 2e-9,
+                "{at}"
             );
         }
-        for target in [15, 30, 60, 120] {
+        for target in [2, 15, 30, 60, 120] {
             let fallback = cadence(None, target, 60);
             assert_eq!(fallback.every, None);
+            assert!(!fallback.paced);
             assert_eq!(fallback.interval, Duration::from_micros(15_000));
         }
         assert_eq!(
@@ -370,23 +424,26 @@ mod tests {
         passed
     }
 
-    /// On every refresh common on Macs and their displays, at every pace
-    /// from 20 to 120, a strict gate passes at least the pace (or the
-    /// refresh, if slower) and, at the pace's exact multiples, the pace
-    /// itself, with each refresh up to a fifth of a period early or late.
-    /// The interval before this rule passes 48 a second on a 144 Hz display
-    /// at a pace of 60, under the same gate with even refreshes.
+    /// On every refresh common on Macs and their displays, for a session
+    /// paced at its limit, at every pace from 20 to 120, a strict gate
+    /// passes at least the pace (or the refresh, if slower) and, where the
+    /// pace's exact multiple fits in the window, the pace itself, with each
+    /// refresh up to a fifth of a period early or late. The interval before
+    /// this rule passes only every third refresh of 144 Hz there, at 60.
     #[test]
     fn a_strict_gate_passes_the_pace_on_every_refresh() {
         const SECONDS: u32 = 10;
         for refresh in REFRESHES {
             for target in 20..=120u32 {
-                let cadence = cadence(Some(refresh), target, 120);
+                let cadence = cadence(Some(refresh), target, target);
                 let passed = strict_gate(refresh, cadence.interval, SECONDS, 0.2);
                 let rate = passed as f64 / f64::from(SECONDS);
                 let floor = f64::from(target).min(refresh) * 0.99;
                 assert!(rate >= floor, "{refresh} Hz at {target}: {rate}/s");
-                if refresh.fract() == 0.0 && (refresh as u32).is_multiple_of(target) {
+                if cadence.paced
+                    && refresh.fract() == 0.0
+                    && (refresh as u32).is_multiple_of(target)
+                {
                     let exact = u64::from(target * SECONDS);
                     assert!(
                         (exact..=exact + 1).contains(&passed),
@@ -395,8 +452,33 @@ mod tests {
                 }
             }
         }
-        let before = strict_gate(144.0, Duration::from_micros(15_000), SECONDS, 0.0);
-        assert_eq!(before / u64::from(SECONDS), 48);
+        let before = strict_gate(144.0, window(60), SECONDS, 0.0);
+        assert_eq!(before, 144 / 3 * u64::from(SECONDS));
+    }
+
+    /// Whatever the pace, unresponsive (2) included, paused or not, no
+    /// interval is longer than the limit's window, or half a refresh where
+    /// that is longer, and a strict gate passes no fewer pictures than at
+    /// the window, so a change waits no longer for its picture than before.
+    #[test]
+    fn no_interval_holds_a_change_back_longer_than_before() {
+        const SECONDS: u32 = 5;
+        for refresh in REFRESHES {
+            let half = Duration::from_secs_f64(0.5 / refresh);
+            for max_fps in [30, 60, 120] {
+                let longest = window(max_fps).max(half) + Duration::from_nanos(1);
+                let before = strict_gate(refresh, window(max_fps), SECONDS, 0.2);
+                let slowest = slowest(Some(refresh), max_fps);
+                assert!(slowest.interval <= longest, "{refresh} Hz of {max_fps}");
+                for target in std::iter::once(2).chain(10..=max_fps) {
+                    let cadence = cadence(Some(refresh), target, max_fps);
+                    let at = format!("{refresh} Hz at {target} of {max_fps}");
+                    assert!(cadence.interval <= slowest.interval, "{at}");
+                    let passed = strict_gate(refresh, cadence.interval, SECONDS, 0.2);
+                    assert!(passed >= before, "{at}: {passed} against {before}");
+                }
+            }
+        }
     }
 
     fn follow(refresh: Option<f64>, pace: u32, max_fps: u32) -> Follow {
@@ -407,55 +489,71 @@ mod tests {
         Duration::from_secs_f64((f64::from(every) - 0.5) / refresh)
     }
 
-    /// A faster pace applies at once; a slower one only once it has been
-    /// wanted for a second without a break, so that a pace that dips and
-    /// comes back changes nothing.
+    /// A faster interval applies at once; a slower one only once it has
+    /// been wanted for a second without a break, so that a pace that
+    /// changes and comes back changes nothing. On 240 Hz under a limit of
+    /// 60, a pace of 60 is every fourth refresh and one of 50 every
+    /// refresh.
     #[test]
     fn a_slower_pace_waits_a_second_and_a_faster_one_does_not() {
         let start = Instant::now();
         let at = |ms: u64| start + Duration::from_millis(ms);
-        let mut follow = follow(Some(120.0), 60, 120);
-        assert_eq!(follow.applied(), interval(120.0, 2));
+        let (every_fourth, every_one) = (interval(240.0, 4), interval(240.0, 1));
+        let mut follow = follow(Some(240.0), 60, 60);
+        assert_eq!(follow.applied(), every_fourth);
         assert_eq!(follow.pace(60, at(0)), None);
-        assert_eq!(follow.pace(120, at(0)), Some(interval(120.0, 1)));
+        assert_eq!(follow.pace(50, at(0)), Some(every_one));
         assert_eq!(follow.pace(60, at(10)), None);
         assert_eq!(follow.pace(60, at(500)), None);
         assert_eq!(follow.pace(60, at(1_009)), None);
-        assert_eq!(follow.pace(60, at(1_010)), Some(interval(120.0, 2)));
-        // A dip under a second, and back: nothing.
-        assert_eq!(follow.pace(30, at(2_000)), None);
-        assert_eq!(follow.pace(60, at(2_500)), None);
-        assert_eq!(follow.pace(30, at(2_900)), None);
-        assert_eq!(follow.pace(30, at(3_800)), None);
-        assert_eq!(follow.pace(30, at(3_900)), Some(interval(120.0, 4)));
-        // A pace that keeps falling slows once, to the latest.
-        assert_eq!(follow.pace(120, at(4_000)), Some(interval(120.0, 1)));
-        assert_eq!(follow.pace(60, at(4_100)), None);
-        assert_eq!(follow.pace(40, at(4_600)), None);
-        assert_eq!(follow.pace(30, at(5_100)), Some(interval(120.0, 4)));
+        assert_eq!(follow.pace(60, at(1_010)), Some(every_fourth));
+        // A slower interval wanted for under a second, and back: nothing.
+        assert_eq!(follow.pace(50, at(2_000)), Some(every_one));
+        assert_eq!(follow.pace(60, at(2_100)), None);
+        assert_eq!(follow.pace(50, at(2_600)), None);
+        assert_eq!(follow.pace(60, at(2_900)), None);
+        assert_eq!(follow.pace(60, at(3_800)), None);
+        assert_eq!(follow.pace(60, at(3_900)), Some(every_fourth));
+        // A pace that keeps falling slows once, to the latest, and no
+        // further than the window.
+        assert_eq!(follow.pace(50, at(4_000)), Some(every_one));
+        assert_eq!(follow.pace(40, at(4_100)), None);
+        assert_eq!(follow.pace(30, at(4_600)), None);
+        assert_eq!(follow.pace(2, at(5_100)), Some(every_fourth));
         // Above the frame-rate limit, the limit.
-        assert_eq!(follow.pace(240, at(6_000)), Some(interval(120.0, 1)));
+        assert_eq!(follow.pace(240, at(6_000)), None);
+        assert_eq!(follow.wanted().every, Some(4));
     }
 
-    /// Every viewer paused gives two pictures a second at once, whatever the
-    /// pace does meanwhile; a resume gives the pace's interval at once.
+    /// Every viewer paused gives the slowest interval the window allows at
+    /// once, which a new limit or refresh meanwhile changes at once, and a
+    /// pace does not; a resume gives the pace's interval at once.
     #[test]
-    fn a_pause_slows_to_two_a_second_and_a_resume_restores_the_pace() {
+    fn a_pause_slows_to_the_window_and_a_resume_restores_the_pace() {
         let now = Instant::now();
-        let mut follow = follow(Some(60.0), 60, 60);
+        let mut follow = follow(Some(144.0), 60, 60);
+        assert_eq!(follow.applied(), interval(144.0, 1));
         assert_eq!(follow.paused(false), None);
-        assert_eq!(follow.paused(true), Some(PAUSED_INTERVAL));
+        assert_eq!(follow.paused(true), Some(interval(144.0, 2)));
+        assert!(follow.is_paused());
         assert_eq!(follow.paused(true), None);
         assert_eq!(follow.pace(30, now), None);
-        assert_eq!(follow.max_fps(30), None);
-        assert_eq!(follow.refresh(Some(120.0)), None);
-        assert_eq!(follow.applied(), PAUSED_INTERVAL);
-        assert_eq!(follow.paused(false), Some(interval(120.0, 4)));
+        assert_eq!(follow.max_fps(30), Some(interval(144.0, 4)));
+        assert_eq!(follow.refresh(Some(120.0)), Some(interval(120.0, 4)));
+        // At 120 Hz a pace of 30 under a limit of 30 is the same.
+        assert_eq!(follow.paused(false), None);
+        assert_eq!(follow.applied(), interval(120.0, 4));
+        assert_eq!(follow.max_fps(60), Some(interval(120.0, 2)));
         // A resume mid-way through a slower pace's hold applies the pace.
-        let mut follow = self::follow(Some(60.0), 60, 60);
-        assert_eq!(follow.pace(20, now), None);
-        assert_eq!(follow.paused(true), Some(PAUSED_INTERVAL));
-        assert_eq!(follow.paused(false), Some(interval(60.0, 3)));
+        let mut follow = self::follow(Some(240.0), 50, 60);
+        assert_eq!(follow.pace(60, now), None);
+        assert_eq!(follow.paused(true), Some(interval(240.0, 4)));
+        assert_eq!(follow.paused(false), None);
+        assert_eq!(follow.pace(50, now), Some(interval(240.0, 1)));
+        // With no refresh, the window, paused or not.
+        let mut follow = self::follow(None, 60, 60);
+        assert_eq!(follow.paused(true), None);
+        assert_eq!(follow.applied(), Duration::from_micros(15_000));
     }
 
     /// A new refresh or frame-rate limit applies at once, either way; with

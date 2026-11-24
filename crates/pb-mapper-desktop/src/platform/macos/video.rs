@@ -12,8 +12,9 @@
 //! queue, which thread C anchors its pacing on.
 //! The stream's minimum interval between pictures follows the display's
 //! refresh, read again at most once a second, and the session's pace
-//! (`cadence.rs`): a faster pace at once, a slower one once it has held
-//! for a second, two pictures a second while every viewer is paused. New
+//! (`cadence.rs`), never longer than the interval before for the
+//! frame-rate limit: a faster pace at once, a slower one once it has held
+//! for a second, the longest allowed while every viewer is paused. New
 //! limits of the same encode size, a frame-rate change, keep the stream and
 //! the encoder (`retune`): the encoder takes the new expected frame rate
 //! live.
@@ -303,8 +304,11 @@ impl VideoSource for MacVideo {
             max_fps = limits.max_fps,
             n = opened.every,
             interval_us = opened.interval.as_micros() as u64,
+            paced = opened.paced,
+            // A drift means something only where pictures come at the pace.
             drift_ppm = opened
                 .every
+                .filter(|_| opened.paced)
                 .zip(link_period)
                 .and_then(|(every, period)| cadence::drift_ppm(every, period, pace_fps)),
         );
@@ -470,8 +474,8 @@ impl VideoSource for MacVideo {
     }
     /// The display may sleep while every viewer is paused, which releases
     /// the session's activity: the next submit looks. Meanwhile the stream
-    /// delivers two pictures a second, and a resume restores the pace's
-    /// interval before thread C takes the resume's keyframe.
+    /// runs at the longest interval allowed, and a resume asks for the
+    /// pace's again before thread C takes the resume's keyframe.
     fn paused(&mut self, paused: bool) {
         self.resumed = !paused;
         let changed = self.follow.paused(paused);
@@ -504,13 +508,12 @@ impl MacVideo {
             return;
         };
         self.stream.set_interval(interval);
-        let paused = self.follow.is_paused();
         tracing::debug!(
             target: SESSION_TARGET,
             event = "macos_capture_interval",
             interval_us = interval.as_micros() as u64,
-            n = (!paused).then(|| self.follow.wanted().every).flatten(),
-            paused,
+            n = self.follow.wanted().every,
+            paused = self.follow.is_paused(),
         );
     }
 

@@ -7,16 +7,17 @@
 //!
 //! From macOS 14 the display's picture fills the frame, stretched by the
 //! pixel or two by which the encoder's size, rounded down to even pixels,
-//! may miss the display's shape. Before, it keeps its shape, and what it does not cover
-//! takes the background colour, clear unless set, which NV12 has no alpha
-//! to show: the background is opaque black, which the configuration does
-//! not retain.
+//! may miss the display's shape. Before, it keeps its shape, and what it
+//! does not cover takes the background colour, clear unless set, which
+//! NV12 has no alpha to show: the background is opaque black, which the
+//! configuration does not retain.
 //!
 //! The stream starts at a minimum interval between pictures from the
 //! display's refresh and the session's pace (`cadence.rs`), and changes it
-//! live (`Stream::set_interval`), one change at a time. A display is found
-//! among the displays and on-screen windows only, which is all a display's
-//! filter needs.
+//! live (`Stream::set_interval`), one change at a time; a change
+//! ScreenCaptureKit refuses fails the stream, as a stop does. A display is
+//! found among the displays and on-screen windows only, which is all a
+//! display's filter needs.
 //!
 //! Each picture keeps when it arrived, which thread C anchors its pacing
 //! on, and how long after the window server displayed it that was
@@ -579,10 +580,13 @@ pub(crate) struct Startup {
 }
 
 /// What a stream's interval changes and their completion handlers share:
-/// the stream, the size and background colour each new configuration
-/// repeats, and the changes in flight.
+/// the stream with its output, the size and background colour each new
+/// configuration repeats, and the changes in flight.
 struct Retune {
+    /// Released before `output`, the stream's delegate, so that no
+    /// reference to the stream held here outlives it.
     stream: Retained<SCStream>,
+    output: Retained<Output>,
     width: u32,
     height: u32,
     /// The stream's own background colour, which every configuration it is
@@ -591,16 +595,17 @@ struct Retune {
     updates: Mutex<Updates>,
 }
 // SAFETY: thread C and ScreenCaptureKit's completion queue share this. The
-// stream and the colour are Objective-C and Core Foundation objects,
-// retained and released atomically from any thread, and never mutated here.
-// The stream is only sent asynchronous requests, each answered on
-// ScreenCaptureKit's own queue: one configuration update at a time, from
-// thread C or from the completion of the last, which `updates` serialises
-// under its lock, and none once the stream is stopping. The rest is plain
-// data.
+// stream, its output and the colour are Objective-C and Core Foundation
+// objects, retained and released atomically from any thread, and never
+// mutated here; the output's state is behind its own lock. The stream is
+// only sent asynchronous requests, each answered on ScreenCaptureKit's own
+// queue: one configuration update at a time, from thread C or from the
+// completion of the last, which `updates` serialises under its lock, and
+// none once the stream is stopping. The rest is plain data.
 unsafe impl Send for Retune {}
-// SAFETY: as for `Send`: shared references only read the retained objects
-// and send the stream the requests `updates` allows.
+// SAFETY: as for `Send`: shared references only read the retained objects,
+// lock the output's state and send the stream the requests `updates`
+// allows.
 unsafe impl Sync for Retune {}
 
 /// An interval change ScreenCaptureKit has yet to complete: the
@@ -610,16 +615,11 @@ struct Update {
     _prepared: PreparedCapture,
     retune: Arc<Retune>,
 }
-// SAFETY: the configuration, the colours and the stream are Objective-C and
-// Core Foundation objects, retained and released atomically from any thread;
-// the completion handler, on ScreenCaptureKit's queue, takes this once, and
-// makes the next update only through `Updates`, which keeps one in flight.
-unsafe impl Send for Update {}
 
 impl Retune {
     /// Hand ScreenCaptureKit `interval`, in a configuration otherwise the
-    /// stream's own, without waiting. Its completion logs a failure and
-    /// hands over the change asked for meanwhile, if any.
+    /// stream's own, without waiting. Its completion hands over the change
+    /// asked for meanwhile, if any; a refused change fails the stream.
     fn issue(self: Arc<Self>, interval: Duration) {
         objc2::rc::autoreleasepool(|_| {
             let prepared = with_background(self.width, self.height, true, self.background.clone());
@@ -631,10 +631,9 @@ impl Retune {
                 prepared.config.setQueueDepth(QUEUE_DEPTH);
             }
             let config = prepared.config.clone();
-            let stream = self.stream.clone();
             let held = Mutex::new(Some(Update {
                 _prepared: prepared,
-                retune: self,
+                retune: self.clone(),
             }));
             let handler = RcBlock::new(move |err: *mut NSError| {
                 let Some(Update { _prepared, retune }) = held.lock().take() else {
@@ -642,29 +641,45 @@ impl Retune {
                 };
                 // SAFETY: the error is null on success or valid for this call.
                 let refused = unsafe { err.as_ref() }.map(|err| failure(Some(err)));
-                let next = {
+                let (next, failed) = {
                     let mut updates = retune.updates.lock();
-                    if let Some(refused) = &refused
-                        && !updates.stopped()
-                    {
-                        tracing::warn!(
-                            target: "pb_mapper_desktop::session",
-                            event = "macos_capture_interval_refused",
-                            interval_us = interval.as_micros() as u64,
-                            detail = %refused,
-                        );
+                    let failed = refused.filter(|_| !updates.stopped());
+                    if failed.is_some() {
+                        updates.stop();
                     }
-                    updates.completed()
+                    (updates.completed(), failed)
                 };
+                if let Some(refused) = failed {
+                    tracing::warn!(
+                        target: "pb_mapper_desktop::session",
+                        event = "macos_capture_interval_refused",
+                        interval_us = interval.as_micros() as u64,
+                        detail = %refused,
+                    );
+                    retune.fail(refused);
+                }
                 if let Some(next) = next {
                     retune.issue(next);
                 }
             });
             // SAFETY: a configuration like the stream's, which the handler
             // keeps, with its colour, until ScreenCaptureKit completes the
-            // update; ScreenCaptureKit copies the handler.
-            unsafe { stream.updateConfiguration_completionHandler(&config, Some(&handler)) };
+            // update; `self` keeps the stream and its delegate through the
+            // call; ScreenCaptureKit copies the handler.
+            unsafe {
+                self.stream
+                    .updateConfiguration_completionHandler(&config, Some(&handler))
+            };
         });
+    }
+
+    /// The stream runs at an interval other than the one its owner thinks:
+    /// fail it at thread C's next take, as the system stopping it would, so
+    /// that thread C opens another at the interval it wants.
+    fn fail(&self, failure: BackendError) {
+        let shared = self.output.ivars();
+        shared.latest.lock().stopped.get_or_insert(failure);
+        shared.waker.wake();
     }
 }
 
@@ -708,7 +723,20 @@ impl Stream {
         interval: Duration,
         waker: &Waker,
     ) -> Result<Self> {
-        objc2::rc::autoreleasepool(|_| Self::started(id, width, height, interval, waker))
+        objc2::rc::autoreleasepool(|_| Self::started(id, width, height, interval, false, waker))
+    }
+
+    /// `start`, with the pointer drawn into the pictures, which a
+    /// measurement moves to change the screen at a known time.
+    #[cfg(test)]
+    pub(super) fn start_with_pointer(
+        id: u32,
+        width: u32,
+        height: u32,
+        interval: Duration,
+        waker: &Waker,
+    ) -> Result<Self> {
+        objc2::rc::autoreleasepool(|_| Self::started(id, width, height, interval, true, waker))
     }
 
     fn started(
@@ -716,6 +744,7 @@ impl Stream {
         width: u32,
         height: u32,
         interval: Duration,
+        pointer: bool,
         waker: &Waker,
     ) -> Result<Self> {
         let began = Instant::now();
@@ -729,6 +758,9 @@ impl Stream {
                 .config
                 .setMinimumFrameInterval(frame_time(interval));
             prepared.config.setQueueDepth(QUEUE_DEPTH);
+            if pointer {
+                prepared.config.setShowsCursor(true);
+            }
         }
         let shared = Arc::new(Shared {
             latest: Mutex::default(),
@@ -772,6 +804,7 @@ impl Stream {
         unsafe { stream.startCaptureWithCompletionHandler(Some(&handler)) };
         let retune = Arc::new(Retune {
             stream: stream.clone(),
+            output: output.clone(),
             width,
             height,
             background: prepared.background(),
@@ -801,7 +834,8 @@ impl Stream {
 
     /// Run at least `interval` between pictures from ScreenCaptureKit's next
     /// on, without waiting. A change asked for while another is in flight
-    /// follows it, the newest only.
+    /// follows it, the newest only; one ScreenCaptureKit refuses fails the
+    /// stream at the next take.
     pub(crate) fn set_interval(&self, interval: Duration) {
         let now = self.retune.updates.lock().ask(interval);
         if let Some(interval) = now {
@@ -826,7 +860,8 @@ impl Stream {
         std::mem::take(&mut self.shared.latest.lock().display_times)
     }
 
-    /// Fails once the system stopped the stream.
+    /// Fails once the system stopped the stream, or refused to change its
+    /// interval.
     pub(crate) fn check(&self) -> Result<()> {
         match &self.shared.latest.lock().stopped {
             Some(stopped) => Err(stopped.clone().into()),
