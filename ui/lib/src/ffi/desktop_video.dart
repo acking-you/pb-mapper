@@ -69,8 +69,18 @@ Future<DesktopDecoders> probeDesktopDecoders() async {
   } catch (_) {
     reply = null;
   }
-  return decodersFromProbe(reply, android: Platform.isAndroid);
+  return decodersFromProbe(
+    reply,
+    android: Platform.isAndroid,
+    linux: Platform.isLinux && !_linuxSoftwareRenderer,
+  );
 }
+
+/// Flutter's software renderer on Linux, which draws no external texture:
+/// the runner then decodes nothing natively, whatever is installed
+/// (`SoftwareRenderer` in desktop_video.cc).
+bool get _linuxSoftwareRenderer =>
+    Platform.environment['FLUTTER_LINUX_RENDERER'] == 'software';
 
 /// What a probe that failed, or has not answered yet, stands for on this
 /// device ([decodersFromProbe]).
@@ -83,19 +93,33 @@ DesktopDecoders get unprobedDesktopDecoders =>
 /// in software, at 1080p, as before the probe. Anywhere else a failed probe
 /// offers no decoder and the picture is JPEG, which Dart decodes: a runner
 /// that cannot answer may have no decoder at all.
+///
+/// [linux]: a Linux runner's answer, whose missing decoders a package
+/// install may add ([DesktopDecoders.missing]): no H.264 is GStreamer's
+/// decoders missing, no H.265 a hardware decoder. A probe that failed says
+/// nothing of what is installed.
 DesktopDecoders decodersFromProbe(
   Map<String, Object?>? reply, {
   required bool android,
+  bool linux = false,
 }) {
   final probed = reply == null
       ? const DesktopDecoders()
       : DesktopDecoders.fromJson(reply);
-  if (!android || probed.h264 != null) return probed;
+  final missing = {
+    if (linux && reply != null) ...{
+      if (probed.h264 == null) 'h264',
+      if (probed.h265 == null) 'h265',
+    },
+  };
+  if (missing.isEmpty && (!android || probed.h264 != null)) return probed;
   return DesktopDecoders(
-    h264: DesktopDecoderLimit.p1080,
+    h264: android ? probed.h264 ?? DesktopDecoderLimit.p1080 : probed.h264,
     h265: probed.h265,
     displayMaxHz: probed.displayMaxHz,
     windowRefresh: probed.windowRefresh,
+    installable: probed.installable,
+    missing: missing,
   );
 }
 

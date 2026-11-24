@@ -12,6 +12,7 @@ import '../../../state/viewer_prefs.dart';
 import '../../../theme/app_icons.dart';
 import '../../../theme/fonts.dart';
 import '../../../theme/viewer_palette.dart';
+import 'decoder_hint.dart';
 import 'quality_panel.dart';
 import 'remote_input.dart';
 import 'remote_keys.dart';
@@ -350,7 +351,44 @@ List<ViewerMenuEntry> _sessionChoices(AppLocalizations l10n, ViewerActions a) {
               a.desktop.setCodec(choice);
             },
           ),
+        ..._decoderHint(l10n, a),
       ],
+    ),
+  ];
+}
+
+/// Under the codec choices, while the session goes without a decoder an
+/// install would add here ([ViewerPrefs.decoderHint]): the hint, which
+/// opens where to get it, the install command where this distribution's is
+/// known, and Don't show again, which hides it on this device.
+List<ViewerMenuEntry> _decoderHint(AppLocalizations l10n, ViewerActions a) {
+  final hint = a.prefs.decoderHint(
+    a.desktop.decoders.value,
+    a.desktop.picture.value?.codec,
+  );
+  if (hint == null) return const [];
+  final command = decoderHintCommand(hint);
+  return [
+    const ViewerMenuDivider(),
+    ViewerMenuItem(
+      key: const Key('codec-hint-open'),
+      label: decoderHintAction(l10n, hint),
+      detail: '${decoderHintText(l10n, hint)}\n${l10n.decoderHintRestart}',
+      icon: decoderHintIcon(hint),
+      onSelected: () => openDecoderHint(hint, l10n.localeName),
+    ),
+    if (command != null)
+      ViewerMenuItem(
+        key: const Key('codec-hint-copy'),
+        label: l10n.decoderHintCopy,
+        icon: AppIcons.copy,
+        onSelected: () => copyDecoderHintCommand(null, l10n, command),
+      ),
+    ViewerMenuItem(
+      key: const Key('codec-hint-dismiss'),
+      label: l10n.decoderHintDismiss,
+      icon: AppIcons.close,
+      onSelected: () => a.prefs.dismissDecoderHint(hint),
     ),
   ];
 }

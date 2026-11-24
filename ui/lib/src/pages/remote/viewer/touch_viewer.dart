@@ -518,6 +518,8 @@ class _TouchViewerState extends State<TouchViewer> {
                 session: _desktop.session,
                 stats: _desktop.stats,
                 decoder: _desktop.decoderStats,
+                decoders: _desktop.decoders,
+                prefs: prefs,
               ),
             ),
           ),
