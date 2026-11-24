@@ -1510,17 +1510,29 @@ read again at most once a second. With neither, the interval stays what it
 was before for every display, 0.9 / `max_fps`, and does not follow the pace.
 That interval is not a whole number of refreshes on a 75, 100, 144 or
 165 Hz display, and a gate that holds each picture to it rounds it up to the
-next whole number: 15 ms on a 144 Hz display would pass every third refresh,
-48 pictures a second for a 60 FPS viewer. Whether ScreenCaptureKit gates
-that strictly, and so what frame rate the new interval gains on such a
-display, is still to be measured on one (the ignored test `sck_cadence`
-measures it). The interval follows the pace live, through
-`updateConfiguration` with one change in flight and only the newest
-waiting for it: a faster pace applies at once, a slower one once it has
-held for a second, a new refresh or frame-rate limit at once. While every
-viewer is paused the stream delivers two pictures a second (500 ms), and a
-resume restores the pace's interval before thread C takes the resume's
-keyframe, which still comes from the last picture at once. A change of the
+next whole number of refreshes, which passes fewer pictures than the frame
+rate there. Whether ScreenCaptureKit gates that strictly, and so what frame
+rate the new interval gains on such a display, is still to be measured on
+one (the ignored test `sck_cadence` measures it). On such a display the new
+interval lets every refresh through, where the old one let fewer through if
+the gate is strict; what that costs the window server and the GPU is
+unmeasured too.
+No interval is longer than that one before, 0.9 / `max_fps`: n is at most
+the largest whole number of refreshes whose (n − 0.5) / refresh fits in it,
+and at least 1. A change on screen that ScreenCaptureKit holds back for the
+interval must still arrive at the next refresh it allows; until a display
+shows that it does (the ignored test `sck_held_back_change`), no change
+waits longer for its picture than it did before, so a slower pace, the
+unresponsive pace of 2 included, slows the stream only that far. The
+interval follows the pace live, through `updateConfiguration` with one
+change in flight and only the newest waiting for it: a faster pace applies
+at once, a slower one once it has held for a second, a new refresh or
+frame-rate limit at once. A change ScreenCaptureKit refuses fails the
+stream at thread C's next take, as a stop does, and thread C opens another
+at the interval it wants. While every viewer is paused the stream runs at
+the longest interval allowed, and a resume asks for the pace's interval
+before thread C takes the resume's keyframe, which still comes from the
+last picture at once. A change of the
 viewers' limits that leaves the encode size as it is (a viewer at another
 refresh joining, pausing, resuming or leaving) keeps the stream and the
 VideoToolbox session: the stream takes the interval for the new frame-rate
@@ -2453,7 +2465,7 @@ shape is painted as before.
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
 | Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder (2 in flight in a Mac host's VideoToolbox) |
 | Mac encoder | low latency with QP up to 51; a dropped newest picture sent again at the next tick, at most twice a picture; dropped pictures traced at most once a second |
-| Mac capture interval | (n − 0.5) / refresh: n the pace's multiple where the refresh is one within 1%, else 1 below eight times the pace and floor(refresh / pace / 4) above; 0.9 / `max_fps` with no refresh; a slower pace after 1 s, a faster one, a new refresh (read each second) or frame-rate limit at once; 500 ms while every viewer is paused; one change in flight |
+| Mac capture interval | (n − 0.5) / refresh: n the pace's multiple where the refresh is one within 1%, else 1 below eight times the pace and floor(refresh / pace / 4) above, at most the most refreshes that fit in 0.9 / `max_fps`, at least 1; 0.9 / `max_fps` with no refresh; a slower pace after 1 s, a faster one, a new refresh (read each second), frame-rate limit or pause at once; the longest allowed while every viewer is paused; one change in flight, a refused one failing the stream |
 | Armed tick | a tick with no new picture stays armed; ScreenCaptureKit wakes thread C; DXGI, in process or through the helper, is asked again every 2 ms for 250 ms after an injected input or a new picture (an input brings a pending poll in to 2 ms), and once a period otherwise |
 | Capture pacing | after a dated picture, the next tick a period after its present, up to ¼ period early and, for a picture of a single present, at most 1/64 period earlier than a period after the last tick (long-run rate ≤ 64/63 × pace); a picture of several presents that waited keeps the tick a period after the last; ¾ period floor after a stall; a present over a period old counts as undated, and DXGI dates no picture presented over 1 s ago |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
@@ -2525,12 +2537,15 @@ stream it opens as `macos_capture_opened` on `pb_mapper_desktop::session`
 (info): its `width` and `height`, the display's `refresh_hz` (the mode's
 `mode_hz`, else the display link's `link_period_us`), the `pace_fps` and
 `max_fps` it opened at, and the interval it started at: `n` refreshes
-(none with no refresh), `interval_us`, and `drift_ppm`, how much faster
-`n` display-link periods are than thread C's period at that pace, in parts
-per million (positive: a display that drifted ahead of an even grid). Each
-change of the interval is `macos_capture_interval` there (debug), with
-`interval_us`, `n` and `paused`, and a change ScreenCaptureKit refuses is
-`macos_capture_interval_refused` (warn). Its first picture gives
+(none with no refresh), `interval_us`, `paced` (whether `n` is the pace's
+own multiple, so that pictures come at the pace), and, only then,
+`drift_ppm`, how much faster `n` display-link periods are than thread C's
+period at that pace, in parts per million (positive: a display that
+drifted ahead of an even grid). Each change of the interval is
+`macos_capture_interval` there (debug), with `interval_us`, `n` and
+`paused`, and a change ScreenCaptureKit refuses is
+`macos_capture_interval_refused` (warn, with `interval_us` and `detail`),
+after which the stream fails and thread C opens another. Its first picture gives
 `macos_capture_started` there (debug): `lookup_us`, finding the display;
 `start_us`, the rest of the start; and `first_picture_us`, from the
 start's beginning to the first complete picture. It also logs the
@@ -2601,7 +2616,10 @@ height, fps, hardware, gop, `data_rate_limits`: whether VideoToolbox took
 the cap of 1.5 × the mean over 1 s, and `max_qp`: whether a low-latency
 session took the QP bound of 51), after
 `macos_encoder_low_latency_refused` when it retried without low-latency rate
-control. It traces the pictures VideoToolbox dropped as
+control. A new frame-rate limit the encoder keeps running for, which the
+session refuses as its expected frame rate, is
+`macos_encoder_fps_refused` (debug: fps, detail), and the session keeps the
+rate it had. It traces the pictures VideoToolbox dropped as
 `macos_encoder_dropped` (debug): `dropped` since the last line, over
 `seconds`, and the encoder's `total`, at most once a second and only when
 there were any. It warns `macos_encoder_left_running` (`waited_ms`) when an
@@ -3428,7 +3446,7 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | Remembered app-owned host policy | Current-user DPAPI; requires signed-in user and running app |
 | Windows service-owned background host | Final build 922 passed upgrade restart, live direct/relay delivery with its UI exited, and persistent Stop/Enable with the same invitation; OS boot, standalone SCM restart and sleep/resume acceptance pending |
 | Mac display lit when it sleeps | The wake limiter, the closed-lid rule and the 1 s left to a display that turns off under capture are unit-tested on every platform, and the online display list, the lid read and finding the shared display run in the macOS CI job; a session that starts on a sleeping display, a resume after the display slept, a display put to sleep during a session (H.264 and JPEG), `pmset -g assertions`, a locked Mac staying dark (whether the lock is reported within 1 s of the display turning off) and a MacBook with its lid closed, outstanding on a device |
-| Mac capture interval, pause, start, kept capture and filled frame | The interval rule, a strict gate over every common refresh, when it changes and the one change in flight are unit-tested on every platform; the filled-frame flag and the live expected frame rate in the macOS CI job; the kept source for a frame-rate change in the worker tests; on an M6 with its screen locked, the display lookup took a p50 of 13.6 to 13.7 ms with the on-screen windows only against 33.1 ms with every window ([measurements](benchmarks/2026-11-24-mac-capture-cadence/README.md)). ScreenCaptureKit's gate (`sck_cadence`), the frame rate, GPU and WindowServer cost before and after, a last picture arriving within one interval, the pause, the start with many windows on screen, two viewers with one pausing, and the filled edge outstanding on a device |
+| Mac capture interval, pause, start, kept capture and filled frame | The interval rule, a strict gate over every common refresh, that no interval outlasts the one before, when it changes and the one change in flight are unit-tested on every platform; the filled-frame flag and the live expected frame rate in the macOS CI job; the kept source for a frame-rate change in the worker tests; on an M6 with its screen locked, the display lookup took a p50 of 13.6 to 13.7 ms with the on-screen windows only against 33.1 ms with every window ([measurements](benchmarks/2026-11-24-mac-capture-cadence/README.md)). ScreenCaptureKit's gate (`sck_cadence`), whether it delivers a change it held back (`sck_held_back_change`, which decides whether a slower pace and a pause may slow the stream further), the frame rate, GPU and WindowServer cost before and after, a last picture arriving within one interval, the start with many windows on screen, two viewers with one pausing, and the filled edge outstanding on a device |
 | Windows display and system kept awake while capturing | The keeper's timing and the watchdog's loop are unit-tested on every platform and its power request is created in the Windows CI job; a viewer past the display-off timeout, `powercfg /requests` during capture, a network stall and a pause, and waking a dark display, in the app and through the service, outstanding on a device |
 | Same owner's locked login / password entry | Session identity and desktop transition handling implemented; actual password-entry acceptance pending |
 | Pre-login boot, SAS, control across user switching | Unsupported; service waits for its approved owner's login |

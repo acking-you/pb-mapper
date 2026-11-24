@@ -1,10 +1,11 @@
 # Mac capture cadence: measurements
 
 A Mac host now sets ScreenCaptureKit's minimum interval between pictures from
-the display's refresh and the session's pace, follows the pace live, slows to
-two pictures a second while every viewer is paused, finds its display among
-the displays and on-screen windows only, fills the frame from macOS 14, and
-keeps its stream and encoder for a change of the frame-rate limit alone (see
+the display's refresh and the session's pace, follows the pace live, never
+longer than the interval before (0.9 / `max_fps`), runs at the longest such
+interval while every viewer is paused, finds its display among the displays
+and on-screen windows only, fills the frame from macOS 14, and keeps its
+stream and encoder for a change of the frame-rate limit alone (see
 [Host: capture and encoding](../../remote-desktop.md#host-capture-and-encoding)).
 This records what could be measured on this Mac, and what still needs a Mac
 whose screen is awake and unlocked.
@@ -75,8 +76,19 @@ test platform::macos::tests::sck_cadence ... skipped sck_cadence: the main displ
 ```
 
 Until it runs, nothing here says whether ScreenCaptureKit holds each picture
-to the interval strictly (then 15 ms passes every third refresh of a 144 Hz
-display) or otherwise, so no frame-rate gain is claimed.
+to the interval strictly (then an interval that is not a whole number of
+refreshes is rounded up to the next whole number) or otherwise, so no
+frame-rate gain is claimed.
+
+### A change held back (the correctness gate)
+
+`sck_held_back_change` runs a stream of the main display with the pointer
+drawn in at 15, 25, 100 and 500 ms, moves the pointer, and, a quarter of an
+interval after that picture arrives, moves it again and leaves it still; it
+counts the second moves that arrive. It decides whether a slower pace or a
+pause may lengthen the interval beyond 0.9 / `max_fps`: until it shows on a
+display that every held-back move arrives about an interval later, the
+stream never runs longer than that. It skipped here for the same reason.
 
 ## Still to measure on a Mac whose screen is awake and unlocked
 
@@ -93,12 +105,17 @@ display) or otherwise, so no frame-rate gain is claimed.
    WindowServer's CPU (`top -l 30 -pid $(pgrep -x WindowServer)`) and
    `sudo powermetrics --samplers gpu_power -i 1000 -n 30`; `drift_ppm` from
    `macos_capture_opened` on each display.
-3. The gate: scroll, then stop, at a pace of 30 on a 60 Hz display; the last
-   picture must reach the viewer within one interval.
-4. The pause: hide the viewer over a moving source; `macos_capture_timing`'s
-   `complete_per_s`, GPU power and WindowServer's CPU before and after; change
-   the content during the pause and resume within 2 s: the last content must
-   arrive within one interval.
+3. The gate: `sck_held_back_change`; then scroll, then stop, at a pace and
+   limit of 30 on a 60 Hz display (25 ms, every second refresh, as 0.9 / 30
+   passed before) and at 60 on a 120 Hz one (12.5 ms); the last picture
+   must reach the viewer within one interval. If every held-back change arrives, a follow-up may
+   let a slower pace and a pause (two pictures a second, as planned) slow
+   the stream beyond 0.9 / `max_fps`, measured as in 4.
+4. The pause: hide the viewer over a moving source on a display where the
+   pause slows the stream (a 144 Hz display at a limit of 60);
+   `macos_capture_timing`'s `complete_per_s`, GPU power and WindowServer's
+   CPU before and after; change the content during the pause and resume
+   within 2 s: the last content must arrive within one interval.
 5. The start: 30 or more windows open, minimized ones among them, 10 connects
    an arm: `macos_capture_started`'s `lookup_us` and `first_picture_us`, and
    the selftest's time to its first presented picture.

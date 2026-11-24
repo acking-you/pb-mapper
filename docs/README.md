@@ -53,7 +53,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [Mac desktop check reuse](benchmarks/2026-11-24-mac-session-check/README.md) | what the session and geometry check around each Mac capture and pointer read costs thread C and WindowServer, back to back and paced at 60 FPS, before and after reusing a passing one for 16 ms |
 | [Mac VideoToolbox submit thread](benchmarks/2026-11-24-macos-vt-submit/README.md) | what a VideoToolbox submit costs a Mac host's thread C and an input queued meanwhile, and VideoToolbox's dwell with four and two units in flight, before and after the encoder's own submit thread |
 | [Mac VideoToolbox rate control](benchmarks/2026-11-24-macos-rate-model/README.md) | what low-latency VideoToolbox drops with and without a QP bound of 51, how soon a dropped last picture after an IDR arrives with and without sending it again, its rate model under a pace that follows QoS, low latency against standard rate control at 120 FPS, and a bitrate cut |
-| [Mac capture cadence](benchmarks/2026-11-24-mac-capture-cadence/README.md) | what finding a display costs ScreenCaptureKit with every window and with the on-screen windows only, and reading a display's refresh, on a Mac whose screen was locked, and the device runs the capture cadence, the pause, the start, the kept capture and the filled frame still need |
+| [Mac capture cadence](benchmarks/2026-11-24-mac-capture-cadence/README.md) | what finding a display costs ScreenCaptureKit with every window and with the on-screen windows only, and reading a display's refresh, on a Mac whose screen was locked, and the device runs the capture cadence, a held-back change, the pause, the start, the kept capture and the filled frame still need |
 
 ## Security
 

@@ -431,7 +431,8 @@ Nothing in the SDK crates knows it exists.
     `video_toolbox_rate_model_*` measure VideoToolbox's rate model, and
     `video_toolbox_submit_blocking` and `video_toolbox_in_flight` what a
     submit costs thread C and what VideoToolbox's queue costs a unit,
-    `sck_cadence` how ScreenCaptureKit gates pictures by the interval, and
+    `sck_cadence` how ScreenCaptureKit gates pictures by the interval,
+    `sck_held_back_change` whether it delivers a change it held back, and
     `sck_display_lookup` what finding a display and reading its refresh
     cost;
     `vt_measure.rs`, test-only too, holds the ignored measurements of its
