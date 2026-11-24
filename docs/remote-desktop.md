@@ -1191,7 +1191,7 @@ crates/pb-mapper-desktop/src/
 | Part | Windows | macOS |
 | --- | --- | --- |
 | `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope | `CGDirectDisplayID` from `CGGetActiveDisplayList`, named by its UUID, which finds it again; `CGDisplayBounds` × the current mode's pixels per point; a session that is not on the console, or a locked screen, is the secure desktop; capture and the pointer reuse a check that passed within 16 ms until the session's own mode change, input never |
-| `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`) that thread C polls: drained every 2 ms while it holds units, and, after a capture with no new present, asked again every 2 ms for 250 ms after an injected input or a new picture, and once a period otherwise | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
+| `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`) that thread C polls: drained every 2 ms while it holds units, and, after a capture with no new present, asked again every 2 ms for 250 ms after an injected input or a new picture, and once a period otherwise | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6, its minimum interval between pictures from the display's refresh and the pace) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
 | `Input` | enigo; `SendInput` with `KEYEVENTF_SCANCODE` for physical keys (a HID usage to its set-1 scancode); absolute moves as one `SendInput` event each (see [Pointer moves on Windows](#pointer-moves-on-windows)); `LockWorkStation` | `CGEvent` at the HID tap: pointer and wheel in the bound display's points, click counts for double clicks, named letters and digits at the key the Mac's layout types them with, other keys and physical keys by `kVK_*` place, modifiers as flag changes with left and right apart, text as Unicode string events of at most 20 UTF-16 units; no lock (`LOCK = false`) |
 | `Cursor` | `GetCursorInfo`, separate, the injected pixel until it shows a move; the shape once per new `HCURSOR`: its kind from the `LoadCursorW` standard handles, its bitmap from `GetIconInfo` and `GetDIBits` (colour, alpha or AND mask; monochrome AND/XOR, an inverting pixel drawn black outlined in white) | `CGEventGetLocation`, separate, the injected pixel until it shows a move; the shape when the window server's cursor seed moves (a private `CGSCurrentCursorSeed`, looked up with `dlsym`; without it at most every 500 ms): `NSCursor.currentSystemCursor` drawn at the display's scale, a kind only where it equals a standard cursor pixel for pixel, else `custom` |
 | `Modes` / `Still` | `WinModes` (dynamic changes only; see [Remote resolution](#remote-resolution)) / xcap JPEG | Core Graphics modes for this app only (`kCGConfigureForAppOnly`) / `SCScreenshotManager` and ImageIO JPEG, macOS 14 and later |
@@ -1403,8 +1403,9 @@ display's own rate mostly found a present already waiting at its tick.
 `desktop_capture_pacing`'s `empty_polls_per_s` and `video_bench`'s
 `polls_per_s` count them. A change of the viewers' limits that changes only
 the frame rate keeps the capture source where it can serve the new limits as
-it is (the synthetic test platform's can; the Windows and Mac sources are
-still built again), and asks for an IDR either way. Thread C passes each
+it is (a Mac host's can while the encode size stays the same, and the
+synthetic test platform's; the Windows source is still built again), and
+asks for an IDR either way. Thread C passes each
 change of limits to the backend as it happens, during an outage too, so a
 recovery, which repeats the current limits, always builds a fresh source.
 A capture that finds
@@ -1494,7 +1495,47 @@ ScreenCaptureKit, which scales the
 display to the encoder's size and delivers NV12 (BT.709) without the cursor;
 its output queue keeps the newest complete picture, with when it arrived,
 and wakes thread C when one becomes available; that arrival dates the
-picture for thread C's pacing. Thread C submits that IOSurface at the
+picture for thread C's pacing. ScreenCaptureKit delivers a picture only at
+one of the display's refreshes, and at most once per minimum interval
+(`minimumFrameInterval`). The host sets that interval from the display's
+refresh and the session's pace (`platform/macos/cadence.rs`): half a
+refresh short of every n-th refresh, (n − 0.5) / refresh, where n is the
+pace's own multiple when the refresh is one within 1% (2 at a pace of 60 on
+a 120 or 119.88 Hz display), so that pictures come at the pace and thread C
+takes each as it arrives, and otherwise 1, every refresh, while the refresh
+is below eight times the pace, and floor(refresh / pace / 4) above. The
+refresh is the display mode's rate, or, where the mode reports none (a
+built-in panel may), the nominal period of a display link on the display,
+read again at most once a second. With neither, the interval stays what it
+was before for every display, 0.9 / `max_fps`, and does not follow the pace.
+That interval is not a whole number of refreshes on a 75, 100, 144 or
+165 Hz display, and a gate that holds each picture to it rounds it up to the
+next whole number: 15 ms on a 144 Hz display would pass every third refresh,
+48 pictures a second for a 60 FPS viewer. Whether ScreenCaptureKit gates
+that strictly, and so what frame rate the new interval gains on such a
+display, is still to be measured on one (the ignored test `sck_cadence`
+measures it). The interval follows the pace live, through
+`updateConfiguration` with one change in flight and only the newest
+waiting for it: a faster pace applies at once, a slower one once it has
+held for a second, a new refresh or frame-rate limit at once. While every
+viewer is paused the stream delivers two pictures a second (500 ms), and a
+resume restores the pace's interval before thread C takes the resume's
+keyframe, which still comes from the last picture at once. A change of the
+viewers' limits that leaves the encode size as it is (a viewer at another
+refresh joining, pausing, resuming or leaving) keeps the stream and the
+VideoToolbox session: the stream takes the interval for the new frame-rate
+limit, the session the limit as its expected frame rate, best effort, and
+thread C still asks for the IDR the change needs. A start, or a retry,
+finds the display among ScreenCaptureKit's displays and on-screen windows
+only, without the desktop's, rather than every window of every app: the
+filter of a whole display excludes no window, so the picture is the same.
+From macOS 14 the display fills the encoder's frame (`preservesAspectRatio`
+off): the encoder's size, rounded down to even pixels, may miss the
+display's shape by up to two pixels, which a picture keeping its shape left
+as a dark row or column along an edge while viewers map the pointer across
+the whole frame. Before macOS 14 the picture keeps its shape on the black
+background. Stills share the configuration. Thread C submits the newest
+picture's IOSurface at the
 negotiated pace without a copy. On a still screen it can reuse the last
 picture for a requested keyframe or the 250 ms liveness repeat. Thread C
 only hands the picture over: each encoder has its own submit thread, at the
@@ -2302,7 +2343,10 @@ pointer still hidden, reaches the viewer with the move behind it.
 share one capture and encode loop. A viewer can join with the current codec
 whenever it can decode it. The shared encoder uses the lowest frame-rate target
 among unpaused viewers, including decoder-backlog caps. Pausing or leaving
-removes that viewer's limit. Capture continues while any viewer has send capacity.
+removes that viewer's limit. On a Mac host, a join, pause, resume or leave
+that changes only the frame-rate limit keeps the capture and the encoder
+running, and the other viewers' picture with them; a Windows host builds
+them again. Capture continues while any viewer has send capacity.
 A slow viewer can drain its queued pictures and resumes at a keyframe after a
 gap. A single viewer receives the owned frame buffer directly, and two or more
 share the same encoded bytes. Each viewer has its own input lane,
@@ -2409,6 +2453,7 @@ shape is painted as before.
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
 | Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder (2 in flight in a Mac host's VideoToolbox) |
 | Mac encoder | low latency with QP up to 51; a dropped newest picture sent again at the next tick, at most twice a picture; dropped pictures traced at most once a second |
+| Mac capture interval | (n − 0.5) / refresh: n the pace's multiple where the refresh is one within 1%, else 1 below eight times the pace and floor(refresh / pace / 4) above; 0.9 / `max_fps` with no refresh; a slower pace after 1 s, a faster one, a new refresh (read each second) or frame-rate limit at once; 500 ms while every viewer is paused; one change in flight |
 | Armed tick | a tick with no new picture stays armed; ScreenCaptureKit wakes thread C; DXGI, in process or through the helper, is asked again every 2 ms for 250 ms after an injected input or a new picture (an input brings a pending poll in to 2 ms), and once a period otherwise |
 | Capture pacing | after a dated picture, the next tick a period after its present, up to ¼ period early and, for a picture of a single present, at most 1/64 period earlier than a period after the last tick (long-run rate ≤ 64/63 × pace); a picture of several presents that waited keeps the tick a period after the last; ¾ period floor after a stall; a present over a period old counts as undated, and DXGI dates no picture presented over 1 s ago |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
@@ -2475,7 +2520,20 @@ calls, which thread C waited out before the thread took them), `units`
 (the encodes it made), and from thread C's ticks `gate_ticks` (ticks
 skipped for two units in flight, which `skipped_ticks` counts too),
 `armed_refusals` (submits that found the thread
-busy and left their tick armed) and `peak_in_flight`. A Mac host logs the
+busy and left their tick armed) and `peak_in_flight`. A Mac host logs each
+stream it opens as `macos_capture_opened` on `pb_mapper_desktop::session`
+(info): its `width` and `height`, the display's `refresh_hz` (the mode's
+`mode_hz`, else the display link's `link_period_us`), the `pace_fps` and
+`max_fps` it opened at, and the interval it started at: `n` refreshes
+(none with no refresh), `interval_us`, and `drift_ppm`, how much faster
+`n` display-link periods are than thread C's period at that pace, in parts
+per million (positive: a display that drifted ahead of an even grid). Each
+change of the interval is `macos_capture_interval` there (debug), with
+`interval_us`, `n` and `paused`, and a change ScreenCaptureKit refuses is
+`macos_capture_interval_refused` (warn). Its first picture gives
+`macos_capture_started` there (debug): `lookup_us`, finding the display;
+`start_us`, the rest of the start; and `first_picture_us`, from the
+start's beginning to the first complete picture. It also logs the
 first picture of each stream as `macos_capture_layout` on
 `pb_mapper_desktop::session` (debug): its width and height, the pixels it
 says it extends by on each side (`extended_left`, `extended_right`,
@@ -3370,6 +3428,7 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | Remembered app-owned host policy | Current-user DPAPI; requires signed-in user and running app |
 | Windows service-owned background host | Final build 922 passed upgrade restart, live direct/relay delivery with its UI exited, and persistent Stop/Enable with the same invitation; OS boot, standalone SCM restart and sleep/resume acceptance pending |
 | Mac display lit when it sleeps | The wake limiter, the closed-lid rule and the 1 s left to a display that turns off under capture are unit-tested on every platform, and the online display list, the lid read and finding the shared display run in the macOS CI job; a session that starts on a sleeping display, a resume after the display slept, a display put to sleep during a session (H.264 and JPEG), `pmset -g assertions`, a locked Mac staying dark (whether the lock is reported within 1 s of the display turning off) and a MacBook with its lid closed, outstanding on a device |
+| Mac capture interval, pause, start, kept capture and filled frame | The interval rule, a strict gate over every common refresh, when it changes and the one change in flight are unit-tested on every platform; the filled-frame flag and the live expected frame rate in the macOS CI job; the kept source for a frame-rate change in the worker tests; on an M6 with its screen locked, the display lookup took a p50 of 13.6 to 13.7 ms with the on-screen windows only against 33.1 ms with every window ([measurements](benchmarks/2026-11-24-mac-capture-cadence/README.md)). ScreenCaptureKit's gate (`sck_cadence`), the frame rate, GPU and WindowServer cost before and after, a last picture arriving within one interval, the pause, the start with many windows on screen, two viewers with one pausing, and the filled edge outstanding on a device |
 | Windows display and system kept awake while capturing | The keeper's timing and the watchdog's loop are unit-tested on every platform and its power request is created in the Windows CI job; a viewer past the display-off timeout, `powercfg /requests` during capture, a network stall and a pause, and waking a dark display, in the app and through the service, outstanding on a device |
 | Same owner's locked login / password entry | Session identity and desktop transition handling implemented; actual password-entry acceptance pending |
 | Pre-login boot, SAS, control across user switching | Unsupported; service waits for its approved owner's login |

@@ -402,13 +402,17 @@ Nothing in the SDK crates knows it exists.
   - `platform/macos/` (macOS 12.3 or later; compiled, linked and
     unit-tested in CI, with capture and streaming verified on an M3 Pro): `mod.rs`
     (`Macos`, its `support()` and the Screen Recording and Accessibility
-    permissions), `capture.rs` (ScreenCaptureKit) and `encoder.rs`
+    permissions), `capture.rs` (ScreenCaptureKit, its minimum interval
+    changed live, and the display's refresh) and `encoder.rs`
     (`VTCompressionSession`, every call on its own submit thread, which
-    thread C hands pictures and bitrates through a one-slot mailbox;
+    thread C hands pictures, bitrates and expected frame rates through a
+    one-slot mailbox;
     low-latency rate control with QP up to 51, and its dropped pictures
     counted) fused
-    in `video.rs`, which pushes and holds VideoToolbox to two units in
-    flight; `desktop.rs`
+    in `video.rs`, which pushes, holds VideoToolbox to two units in
+    flight and keeps both for a new frame-rate limit; `cadence.rs` (the
+    interval between pictures from the refresh and the pace, and when it
+    changes); `desktop.rs`
     (displays by UUID, the lock and console check), `geometry.rs` (points
     and pixels), `input.rs` (`CGEvent`), `clicks.rs`, `keys.rs` (`Key` and
     HID usages to `kVK_*`), `cursor.rs` (position, and the shape when the
@@ -426,7 +430,10 @@ Nothing in the SDK crates knows it exists.
     tested everywhere; `tests.rs` runs only on macOS, and its ignored
     `video_toolbox_rate_model_*` measure VideoToolbox's rate model, and
     `video_toolbox_submit_blocking` and `video_toolbox_in_flight` what a
-    submit costs thread C and what VideoToolbox's queue costs a unit;
+    submit costs thread C and what VideoToolbox's queue costs a unit,
+    `sck_cadence` how ScreenCaptureKit gates pictures by the interval, and
+    `sck_display_lookup` what finding a display and reading its refresh
+    cost;
     `vt_measure.rs`, test-only too, holds the ignored measurements of its
     rate control (drops, resubmits, 120 FPS, a bitrate cut)
   - `platform/windows/helper/`: The opt-in UAC/Winlogon service —
