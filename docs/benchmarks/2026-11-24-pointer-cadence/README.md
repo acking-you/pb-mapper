@@ -5,6 +5,8 @@ Rust 1.99.1 and Flutter 3.50.1 (CI builds with 3.44.9), the display at 144 Hz
 and a device pixel ratio of 2. Other agents' builds ran on the machine
 meanwhile; each run's one-minute load average is in the raw output. Before and
 after took turns, in the order before, after, after, before, before, after.
+After review, the final code (`fffe60c`) was run three more times on its own
+([Final code](#final-code)).
 
 ## Host: `host_send_bench`
 
@@ -116,6 +118,45 @@ open -W -n -a build/macos/Build/Products/Release/pb-mapper.app --args "$PWD/hove
   sent at this rate. Both add the 16 ms timer's 62.5 reads a second. A shape
   the host sends for the move is therefore picked up no later than before.
 - None of the six runs saw the app's lifecycle state change.
+
+## Final code
+
+Review changed two things after the runs above, both in `fffe60c`: a new
+shape no longer cancels the shape looks still owed, so the newest move keeps
+its own looks 2 ms and 8 ms after it (one more pointer read after a look that
+found the shape), and the cursor layer's painter reads what to draw as it
+paints, asked to repaint only when that differs from what it last drew. Three
+runs of each tool on that commit, the same commands, one after another.
+
+`host_send_bench` ([raw output](host_send_bench-final.txt)), in ms:
+
+| Case | Run | p50 | p90 | p99 | max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `shape` (60 FPS) | 1 | 2.47 | 2.61 | 2.66 | 2.70 |
+| | 2 | 2.47 | 2.54 | 2.71 | 2.75 |
+| | 3 | 2.47 | 2.54 | 2.65 | 2.67 |
+| `host_pointer`, 60 FPS | 1 | 7.31 | 14.13 | 16.24 | 16.25 |
+| | 2 | 7.78 | 14.99 | 16.16 | 16.17 |
+| | 3 | 8.21 | 14.98 | 16.32 | 17.19 |
+| `host_pointer`, 120 FPS | 1 | 4.56 | 7.89 | 8.60 | 8.64 |
+| | 2 | 4.43 | 7.47 | 8.32 | 8.62 |
+| | 3 | 4.12 | 7.51 | 8.64 | 8.67 |
+
+Allocations per unit, medians of the three runs: video 18.88 (40,184 bytes),
+one moving pointer 58.67 at 249.9 to 250.0 inputs a second (47,081 bytes), two
+moving pointers 167.35 at 499.8 to 499.9 (100,446 bytes), against the before
+and after medians above of 18.84 and 18.85, 58.63 and 58.77, and 167.22 and
+167.27: each within 0.15 of an allocation a unit. `peer_cursor`'s medians were
+157 to 158 µs.
+
+`ui/tool/hover_frames.dart` ([7](hover_7-final.json), [8](hover_8-final.json),
+[9](hover_9-final.json), load averages in [hover_runs.txt](hover_runs.txt)):
+no frame drawn and no FrameTiming report in any window; while sweeping, 187.1
+to 187.4 view leaf reads and 124.5 to 124.8 moves sent a second; at rest, 62.6
+reads a second. A control run with the base's viewer files in the same
+session, its window in front the same way
+([10](hover_10-control-before.json)), drew 123.3 and 124.0 frames a second
+while sweeping, as the before runs above did.
 
 ## Not measured here
 

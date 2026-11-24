@@ -1,0 +1,27 @@
+=== final 1 { 7.16 4.84 4.51 }
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1130 allocs_per_unit=18.85 alloc_bytes_per_unit=40183
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3519 allocs_per_unit=58.67 alloc_bytes_per_unit=47082
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.9 allocs_per_s=10036 allocs_per_unit=167.31 alloc_bytes_per_unit=100442
+case=peer_cursor samples=256 p50_us=157 p95_us=333 p99_us=499
+case=shape samples=128 p50_us=2469 p90_us=2608 p99_us=2663 max_us=2702
+case=host_pointer pace=60 units_per_s=59.8 samples=128 p50_us=7305 p90_us=14126 p99_us=16238 max_us=16246
+case=host_pointer pace=120 units_per_s=119.8 samples=128 p50_us=4558 p90_us=7894 p99_us=8599 max_us=8635
+=== end { 5.03 4.69 4.47 }
+=== final 2 { 5.03 4.69 4.47 }
+case=video units_per_s=60.2 inputs_per_s=0.0 allocs_per_s=1136 allocs_per_unit=18.88 alloc_bytes_per_unit=40184
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=3522 allocs_per_unit=58.71 alloc_bytes_per_unit=47057
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.8 allocs_per_s=10038 allocs_per_unit=167.38 alloc_bytes_per_unit=100446
+case=peer_cursor samples=256 p50_us=157 p95_us=337 p99_us=502
+case=shape samples=128 p50_us=2469 p90_us=2539 p99_us=2711 max_us=2750
+case=host_pointer pace=60 units_per_s=60.0 samples=128 p50_us=7778 p90_us=14988 p99_us=16161 max_us=16167
+case=host_pointer pace=120 units_per_s=119.9 samples=128 p50_us=4430 p90_us=7472 p99_us=8318 max_us=8621
+=== end { 3.23 4.27 4.33 }
+=== final 3 { 3.23 4.27 4.33 }
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1132 allocs_per_unit=18.88 alloc_bytes_per_unit=40185
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3514 allocs_per_unit=58.57 alloc_bytes_per_unit=47081
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.9 allocs_per_s=10038 allocs_per_unit=167.35 alloc_bytes_per_unit=100446
+case=peer_cursor samples=256 p50_us=158 p95_us=337 p99_us=501
+case=shape samples=128 p50_us=2467 p90_us=2541 p99_us=2650 max_us=2665
+case=host_pointer pace=60 units_per_s=61.0 samples=128 p50_us=8205 p90_us=14982 p99_us=16320 max_us=17185
+case=host_pointer pace=120 units_per_s=119.9 samples=128 p50_us=4122 p90_us=7508 p99_us=8636 max_us=8666
+=== end { 3.91 4.25 4.31 }
