@@ -620,6 +620,55 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('the quality panel names the decoder the viewer reported, '
+      'with the GPU it runs on, under the codec', (tester) async {
+    _size(tester, const Size(1280, 800));
+    const name = 'nvh264dec (NVDEC H.264 Decoder) on renderD129, another GPU';
+    final session = ValueNotifier(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.live,
+        path: 'direct',
+      ),
+    );
+    final stats = ValueNotifier(
+      DesktopStats.fromJson(
+        {'codec': 'h264'},
+        decoder: {'name': name, 'hardware': true},
+      ),
+    );
+    await tester.pumpWidget(_app(QualityPanel(session: session, stats: stats)));
+    final l10n = AppLocalizations.of(
+      tester.element(find.byType(QualityPanel)),
+    )!;
+    Finder codec(String text) => find.descendant(
+      of: find.byKey(const Key('quality-codec')),
+      matching: find.text(text),
+    );
+    expect(codec(l10n.qualityHardware('H.264')), findsOneWidget);
+    expect(codec(name), findsOneWidget);
+
+    // Before the decoder reports, and while the connection is down, there
+    // is no name to show.
+    stats.value = DesktopStats.fromJson(
+      {'codec': 'h264'},
+      decoder: {'name': ''},
+    );
+    await tester.pump();
+    expect(codec(name), findsNothing);
+    expect(codec(''), findsNothing);
+    stats.value = DesktopStats.fromJson(
+      {'codec': 'h264'},
+      decoder: {'name': name, 'hardware': true},
+    );
+    session.value = const DesktopSessionView(
+      target: _target,
+      phase: DesktopPhase.reconnecting,
+    );
+    await tester.pump();
+    expect(codec(name), findsNothing);
+  });
+
   test("two decoder reads give each timing's mean over the samples between "
       "them (the second read's own when the first has none), the decoder "
       "thread's CPU a second, and the hardware flag; a CPU time missing from "

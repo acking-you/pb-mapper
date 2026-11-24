@@ -24,6 +24,13 @@ namespace pb_video {
 // R8 and GR88 textures, linear or with a modifier it lists for both.
 void ReadPresenter(EGLDisplay display, PbVideoPresenter* out);
 
+// The DRM device file of the GPU `display` (initialized) renders on, as
+// EGL_EXT_device_query names it: the render node where the device lists
+// EGL_EXT_device_drm_render_node, else the primary node
+// (EGL_EXT_device_drm). Empty when EGL does not say, as for a software
+// renderer, which has no DRM device.
+std::string PresentingDevice(EGLDisplay display);
+
 // Converts one texture's pictures. Every call but the destructor runs on
 // the thread whose GL ES context draws the texture (Flutter's raster
 // thread), with that context current.

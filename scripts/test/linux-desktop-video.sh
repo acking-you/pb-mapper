@@ -5,6 +5,8 @@
 # Flutter's raster thread in a GL ES context with no surface
 # (ui/linux/test/desktop_video_test.cc). It ends with each clip size's
 # decoded and presented pictures a second and every thread's CPU per picture.
+# Before the clips, ui/linux/test/desktop_video_device_test.cc checks the
+# order the module tries decoders in for made-up GPUs.
 #
 # Needs: the GStreamer development files (libgstreamer1.0-dev,
 # libgstreamer-plugins-base1.0-dev), an H.264 decoder element (gst-libav's
@@ -66,4 +68,5 @@ fi
 
 cmake -S "${ROOT_DIR}/ui/linux/test" -B "${OUT}/build" -DCMAKE_BUILD_TYPE=Release > /dev/null
 cmake --build "${OUT}/build"
+"${OUT}/build/desktop_video_device_test"
 "${OUT}/build/desktop_video_test" "${FFI}" "${CLIPS}" "${mode[@]}"

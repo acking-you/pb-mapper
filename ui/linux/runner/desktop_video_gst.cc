@@ -46,6 +46,8 @@
 #include <utility>
 #include <vector>
 
+#include "desktop_video_device.h"
+
 static_assert(sizeof(PbDesktopVideoMetaV1) == 56, "PbDesktopVideoMetaV1 is 56 bytes");
 static_assert(offsetof(PbDesktopVideoMetaV1, generation) == 0 && offsetof(PbDesktopVideoMetaV1, frame_id) == 8 &&
                   offsetof(PbDesktopVideoMetaV1, seq) == 16 && offsetof(PbDesktopVideoMetaV1, pts_us) == 24 &&
@@ -167,14 +169,30 @@ uint32_t Largest(const GValue* value) {
   return UINT32_MAX;
 }
 
-// "vah264dec (VA-API H.264 Decoder in Intel(R) Gen Graphics)", which names
-// the device, or the element alone when that is longer than the 63 bytes
-// report_v1 takes.
-std::string DecoderName(GstElementFactory* factory) {
-  const std::string element = GST_OBJECT_NAME(factory);
-  const char* longname = gst_element_factory_get_metadata(factory, GST_ELEMENT_METADATA_LONGNAME);
-  const std::string name = longname && *longname ? element + " (" + longname + ")" : element;
-  return name.size() <= 63 ? name : element.substr(0, 63);
+// "nvh264dec (NVDEC H.264 Decoder) on renderD129, another GPU": the element,
+// its long name and the GPU it decodes on (pb_video::Describe), without the
+// long name when the whole is longer than the 63 bytes report_v1 takes, as
+// a va decoder's long name, which names its driver's device, can make it
+// ("vah264dec on renderD128").
+std::string DecoderName(const std::string& element, const std::string& longname, const std::string& gpu) {
+  const std::string name = longname.empty() ? element + gpu : element + " (" + longname + ")" + gpu;
+  if (name.size() <= 63) return name;
+  const std::string brief = element + gpu;
+  return brief.size() <= 63 ? brief : element.substr(0, 63);
+}
+
+// The machine's GPUs as sysfs lists them now, and which one presents: the
+// one whose DRM device file is `device`.
+pb_video::Topology ReadTopology(const std::string& device) {
+  pb_video::Topology topology;
+  topology.gpus = pb_video::ReadGpus();
+  topology.presenting = device.empty() ? "" : pb_video::RenderNode(device);
+  topology.va_all_drivers = g_getenv("GST_VA_ALL_DRIVERS") != nullptr;
+  guint major = 0, minor = 0, micro = 0, nano = 0;
+  gst_version(&major, &minor, &micro, &nano);
+  topology.gst_major = major;
+  topology.gst_minor = minor;
+  return topology;
 }
 
 // A decoder the registry has for a codec.
@@ -182,7 +200,6 @@ struct Candidate {
   std::string factory;
   std::string name;
   bool hardware = false;
-  guint rank = 0;
   // The largest picture its sink template takes.
   uint32_t max_width = UINT32_MAX, max_height = UINT32_MAX;
 };
@@ -210,11 +227,17 @@ bool OffersMemory(GstElementFactory* factory, bool dmabuf) {
 // Every decoder the registry has for `codec` that this pipeline can use:
 // it takes the codec, gives pictures in system memory or, when `dmabuf`,
 // in dma-bufs, and has a rank (GST_PLUGIN_FEATURE_RANK=name:NONE takes one
-// out). Hardware first, then by rank, as GStreamer would pick them.
-std::vector<Candidate> Candidates(Codec codec, bool dmabuf) {
+// out). Hardware first, those on the presenting GPU first among them
+// (pb_video::Order), then by rank, as GStreamer would pick them. Nothing
+// loads a plugin: a decoder's GPU comes from the factories' names and sysfs.
+std::vector<Candidate> Candidates(Codec codec, bool dmabuf, const pb_video::Topology& topology) {
   std::vector<Candidate> found;
+  // What the registry says of each candidate, and of every decoder for the
+  // codec whatever its rank: one ranked out still tells where the others are.
+  std::vector<pb_video::Decoder> decoders, all;
+  std::vector<std::string> longnames;
   GList* factories = gst_element_factory_list_get_elements(
-      GST_ELEMENT_FACTORY_TYPE_DECODER | GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO, GST_RANK_MARGINAL);
+      GST_ELEMENT_FACTORY_TYPE_DECODER | GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO, GST_RANK_NONE);
   for (GList* item = factories; item; item = item->next) {
     auto* factory = static_cast<GstElementFactory*>(item->data);
     Candidate candidate;
@@ -234,19 +257,37 @@ std::vector<Candidate> Candidates(Codec codec, bool dmabuf) {
       }
       gst_caps_unref(caps);
     }
-    if (!takes || !OffersMemory(factory, dmabuf)) continue;
+    if (!takes) continue;
     const char* klass = gst_element_factory_get_metadata(factory, GST_ELEMENT_METADATA_KLASS);
-    candidate.factory = GST_OBJECT_NAME(factory);
-    candidate.name = DecoderName(factory);
-    candidate.hardware = klass && strstr(klass, "Hardware");
-    candidate.rank = gst_plugin_feature_get_rank(GST_PLUGIN_FEATURE(factory));
+    const char* plugin = gst_plugin_feature_get_plugin_name(GST_PLUGIN_FEATURE(factory));
+    pb_video::Decoder decoder;
+    decoder.factory = GST_OBJECT_NAME(factory);
+    decoder.plugin = plugin ? plugin : "";
+    decoder.hardware = klass && strstr(klass, "Hardware");
+    decoder.rank = gst_plugin_feature_get_rank(GST_PLUGIN_FEATURE(factory));
+    all.push_back(decoder);
+    if (decoder.rank < static_cast<uint32_t>(GST_RANK_MARGINAL) || !OffersMemory(factory, dmabuf)) continue;
+    const char* longname = gst_element_factory_get_metadata(factory, GST_ELEMENT_METADATA_LONGNAME);
+    candidate.factory = decoder.factory;
+    candidate.hardware = decoder.hardware;
+    decoders.push_back(decoder);
+    longnames.push_back(longname ? longname : "");
     found.push_back(std::move(candidate));
   }
   gst_plugin_feature_list_free(factories);
-  std::stable_sort(found.begin(), found.end(), [](const Candidate& a, const Candidate& b) {
-    return a.hardware != b.hardware ? a.hardware : a.rank > b.rank;
-  });
-  return found;
+  std::vector<pb_video::Where> where;
+  const std::vector<size_t> order = pb_video::Order(decoders, all, topology, &where);
+  std::vector<Candidate> ordered;
+  ordered.reserve(found.size());
+  // G_MESSAGES_DEBUG=pb-mapper-video: the order, each with where it decodes.
+  std::string listed;
+  for (const size_t i : order) {
+    found[i].name = DecoderName(found[i].factory, longnames[i], pb_video::Describe(where[i]));
+    listed += (listed.empty() ? "" : " | ") + found[i].factory + pb_video::Describe(where[i]);
+    ordered.push_back(std::move(found[i]));
+  }
+  g_debug("%s decoders in order: %s", CodecName(codec), listed.empty() ? "none" : listed.c_str());
+  return ordered;
 }
 
 // Decoders that failed before their first picture: the next configuration
@@ -279,9 +320,9 @@ bool Allows(const Candidate& candidate, Codec codec, uint32_t width, uint32_t he
 
 // The probe's answer for one codec: the first candidate that has not failed
 // and is allowed a viewer bound, with the largest bound it is allowed.
-void ProbeCodec(Codec codec, PbVideoCodecProbe* out) {
+void ProbeCodec(Codec codec, const pb_video::Topology& topology, PbVideoCodecProbe* out) {
   if (!HasElement(Parser(codec))) return;
-  for (const Candidate& candidate : Candidates(codec, NegotiatesDmabuf())) {
+  for (const Candidate& candidate : Candidates(codec, NegotiatesDmabuf(), topology)) {
     if (Failed(candidate.factory)) continue;
     for (const auto& bounds : kBounds) {
       if (!Allows(candidate, codec, bounds[0], bounds[1])) continue;
@@ -294,7 +335,7 @@ void ProbeCodec(Codec codec, PbVideoCodecProbe* out) {
   }
 }
 
-int32_t Probe(PbVideoProbe* out, char* error, size_t error_len) {
+int32_t Probe(const char* device, PbVideoProbe* out, char* error, size_t error_len) {
   if (!out) return -1;
   *out = PbVideoProbe{};
   std::string why;
@@ -306,8 +347,18 @@ int32_t Probe(PbVideoProbe* out, char* error, size_t error_len) {
     CopyText(error, error_len, "GStreamer's base plugins (appsrc, appsink, videoconvert) are missing");
     return 0;
   }
-  ProbeCodec(Codec::kH264, &out->h264);
-  ProbeCodec(Codec::kH265, &out->h265);
+  const pb_video::Topology topology = ReadTopology(device ? device : "");
+  // G_MESSAGES_DEBUG=pb-mapper-video: which GPU presents, and so which
+  // decoders go first, among which render nodes.
+  g_debug("Presenting GPU: %s (render node %s); GStreamer %u.%u", device && *device ? device : "unknown",
+          topology.presenting.empty() ? "unknown" : topology.presenting.c_str(), topology.gst_major,
+          topology.gst_minor);
+  for (const pb_video::Gpu& gpu : topology.gpus) {
+    g_debug("Render node %s: driver %s%s", gpu.node.c_str(), gpu.driver.empty() ? "unknown" : gpu.driver.c_str(),
+            gpu.openable ? "" : ", which this process cannot open");
+  }
+  ProbeCodec(Codec::kH264, topology, &out->h264);
+  ProbeCodec(Codec::kH265, topology, &out->h265);
   return 0;
 }
 
@@ -600,13 +651,14 @@ class Pipeline {
   // the failure, and repeated failures end the session as decoder_failed,
   // after which Dart connects again without H.265.
   // `modifiers`: the dma-buf layouts the presenter samples, none for
-  // system memory only.
+  // system memory only. `device`: the presenting GPU's DRM device file, or
+  // empty.
   static std::unique_ptr<Pipeline> Start(const Frame& frame, PbVideoDecoder* owner,
-                                         const std::vector<uint64_t>& modifiers) {
+                                         const std::vector<uint64_t>& modifiers, const std::string& device) {
     std::string last;
     bool any = false;
     if (!HasElement(Parser(frame.codec))) throw std::runtime_error(std::string("GStreamer has no ") + Parser(frame.codec));
-    for (Candidate& candidate : Candidates(frame.codec, !modifiers.empty())) {
+    for (Candidate& candidate : Candidates(frame.codec, !modifiers.empty(), ReadTopology(device))) {
       if (Failed(candidate.factory) || !Allows(candidate, frame.codec, frame.width, frame.height)) continue;
       any = true;
       std::unique_ptr<Pipeline> pipeline(new Pipeline(frame, std::move(candidate), owner, modifiers));
@@ -876,9 +928,9 @@ class Pipeline {
 // One texture's decoder. While a source is attached, its thread pulls the
 // access units straight from Rust; nothing of the video crosses Dart.
 struct PbVideoDecoder {
-  PbVideoDecoder(const PbVideoExports& api, const PbVideoPresenter& presenter, void (*frame_ready)(void*),
-                 void* context)
-      : api_(api), presenter_(presenter), frame_ready_(frame_ready), context_(context) {}
+  PbVideoDecoder(const PbVideoExports& api, const PbVideoPresenter& presenter, std::string device,
+                 void (*frame_ready)(void*), void* context)
+      : api_(api), presenter_(presenter), device_(std::move(device)), frame_ready_(frame_ready), context_(context) {}
   PbVideoDecoder(const PbVideoDecoder&) = delete;
   PbVideoDecoder& operator=(const PbVideoDecoder&) = delete;
   ~PbVideoDecoder() {
@@ -1105,7 +1157,7 @@ struct PbVideoDecoder {
           throw std::runtime_error("Video size outside the session limits");
         }
         pipeline.reset();
-        pipeline = Pipeline::Start(frame, this, Modifiers());
+        pipeline = Pipeline::Start(frame, this, Modifiers(), device_);
         ++configurations_;
         {
           std::lock_guard<std::mutex> lock(mutex_);
@@ -1201,6 +1253,8 @@ struct PbVideoDecoder {
 
   const PbVideoExports api_;
   const PbVideoPresenter presenter_;
+  // The presenting GPU's DRM device file, or empty.
+  const std::string device_;
   std::atomic<bool> dmabuf_refused_{false};
   void (*const frame_ready_)(void*);
   void* const context_;
@@ -1347,8 +1401,8 @@ std::string Pipeline::WrapDmabuf(GstBuffer* buffer, PbVideoPicture* picture) {
   return "";
 }
 
-PbVideoDecoder* Create(const PbVideoExports* exports, const PbVideoPresenter* presenter, void (*frame_ready)(void*),
-                       void* context) {
+PbVideoDecoder* Create(const PbVideoExports* exports, const PbVideoPresenter* presenter, const char* device,
+                       void (*frame_ready)(void*), void* context) {
   if (!exports || !frame_ready || !exports->attach || !exports->next || !exports->presented || !exports->keyframe ||
       !exports->failed || !exports->report || !exports->detach) {
     return nullptr;
@@ -1356,7 +1410,7 @@ PbVideoDecoder* Create(const PbVideoExports* exports, const PbVideoPresenter* pr
   // No presenter: system memory only.
   const PbVideoPresenter none{};
   try {
-    return new PbVideoDecoder(*exports, presenter ? *presenter : none, frame_ready, context);
+    return new PbVideoDecoder(*exports, presenter ? *presenter : none, device ? device : "", frame_ready, context);
   } catch (const std::exception&) {
     return nullptr;
   }

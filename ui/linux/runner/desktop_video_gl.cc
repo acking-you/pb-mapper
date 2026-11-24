@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <cstring>
 #include <mutex>
 #include <system_error>
 #include <thread>
@@ -41,6 +42,11 @@ constexpr uint64_t kImageIdle = 120;
 constexpr EGLTimeKHR kFenceWaitNs = 1000000000ull;
 // A conversion draws to texture units 0 to 2.
 constexpr int kUnits = 3;
+// EGL_EXT_device_drm_render_node's name, which an older libepoxy's registry
+// may not have.
+#ifndef EGL_DRM_RENDER_NODE_FILE_EXT
+#define EGL_DRM_RENDER_NODE_FILE_EXT 0x3377
+#endif
 
 const char kVertexShader[] =
     "attribute vec2 position;\n"
@@ -440,6 +446,16 @@ std::vector<uint64_t> Modifiers(EGLDisplay display, uint32_t fourcc) {
   return found;
 }
 
+// Whether the space-separated `list` names `extension`, a whole word.
+bool HasExtension(const char* list, const char* extension) {
+  if (!list) return false;
+  const size_t length = strlen(extension);
+  for (const char* at = strstr(list, extension); at; at = strstr(at + length, extension)) {
+    if ((at == list || at[-1] == ' ') && (at[length] == '\0' || at[length] == ' ')) return true;
+  }
+  return false;
+}
+
 }  // namespace
 
 void ReadPresenter(EGLDisplay display, PbVideoPresenter* out) {
@@ -461,6 +477,26 @@ void ReadPresenter(EGLDisplay display, PbVideoPresenter* out) {
   for (const uint64_t modifier : modifiers) {
     if (out->modifier_count < PB_VIDEO_MAX_MODIFIERS) out->modifiers[out->modifier_count++] = modifier;
   }
+}
+
+std::string PresentingDevice(EGLDisplay display) {
+  // Client extensions, which libepoxy finds with no display.
+  if (display == EGL_NO_DISPLAY || (!epoxy_has_egl_extension(EGL_NO_DISPLAY, "EGL_EXT_device_query") &&
+                                    !epoxy_has_egl_extension(EGL_NO_DISPLAY, "EGL_EXT_device_base"))) {
+    return "";
+  }
+  EGLAttrib value = 0;
+  if (!eglQueryDisplayAttribEXT(display, EGL_DEVICE_EXT, &value) || value == 0) return "";
+  const auto device = reinterpret_cast<EGLDeviceEXT>(value);
+  const char* extensions = eglQueryDeviceStringEXT(device, EGL_EXTENSIONS);
+  const char* file = nullptr;
+  if (HasExtension(extensions, "EGL_EXT_device_drm_render_node")) {
+    file = eglQueryDeviceStringEXT(device, EGL_DRM_RENDER_NODE_FILE_EXT);
+  }
+  if ((!file || !*file) && HasExtension(extensions, "EGL_EXT_device_drm")) {
+    file = eglQueryDeviceStringEXT(device, EGL_DRM_DEVICE_FILE_EXT);
+  }
+  return file ? file : "";
 }
 
 VideoGl::VideoGl(const PbVideoModule* module, bool es2_paths) : module_(module), es2_paths_(es2_paths) {}
