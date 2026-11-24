@@ -4,8 +4,8 @@ use crate::{
     protocol::{
         CAPABILITY_ARRIVAL_TIME, CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE,
         CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265,
-        CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS, HostMessage, PeerColor, PeerSlot,
-        RejectReason, StopReason, ViewerMessage,
+        CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS, CAPABILITY_STANDBY, HostMessage,
+        PeerColor, PeerSlot, RejectReason, StopReason, ViewerMessage,
     },
     wire,
 };
@@ -128,6 +128,7 @@ fn accepted_with(codec: VideoCodec) -> HostMessage {
         nominal_fps: 60,
         quality: QualityPreset::Balanced,
         capabilities: vec!["lock".into()],
+        ticket: None,
     }
 }
 
@@ -151,7 +152,7 @@ async fn connect_with(
     ViewerMessage,
 ) {
     let (viewer, mut host) = tokio::io::duplex(1 << 20);
-    let connecting = tokio::spawn(Viewer::start(viewer, TOKEN.into(), config, None));
+    let connecting = tokio::spawn(Viewer::start(viewer, TOKEN.into(), config, None, None));
     let authenticate = receive(&mut host).await;
     send(&mut host, answer, None).await;
     (connecting.await.unwrap(), host, authenticate)
@@ -195,7 +196,8 @@ async fn scripted_host_session_acknowledges_first_and_authorises_input_by_presen
             CAPABILITY_CURSOR_SHAPE,
             CAPABILITY_PEER_CURSORS,
             CAPABILITY_ARRIVAL_TIME,
-            CAPABILITY_KEYFRAME_SEQ
+            CAPABILITY_KEYFRAME_SEQ,
+            CAPABILITY_STANDBY
         ]
     );
 
@@ -341,6 +343,7 @@ async fn h265_is_offered_as_a_capability_and_accepted_only_when_offered() {
             CAPABILITY_PEER_CURSORS,
             CAPABILITY_ARRIVAL_TIME,
             CAPABILITY_KEYFRAME_SEQ,
+            CAPABILITY_STANDBY,
             CAPABILITY_H265,
             CAPABILITY_FPS_OVERRIDE
         ]
@@ -532,6 +535,7 @@ async fn the_shape_of_every_report_is_taken_and_follows_its_slot() {
         nominal_fps: 60,
         quality: QualityPreset::Balanced,
         capabilities: vec![CAPABILITY_CURSOR_SHAPE.into()],
+        ticket: None,
     })
     .await;
     let viewer = viewer.unwrap();
@@ -637,6 +641,7 @@ async fn an_unasked_or_misfit_shape_breaks_the_protocol() {
             nominal_fps: 60,
             quality: QualityPreset::Balanced,
             capabilities,
+            ticket: None,
         })
         .await;
         let viewer = viewer.unwrap();
@@ -767,6 +772,7 @@ async fn arrival_times_and_keyframe_seqs_go_to_a_host_that_listed_them() {
             .iter()
             .map(|value| (*value).to_owned())
             .collect(),
+        ticket: None,
     };
     for listed in [true, false] {
         let answer = if listed {
@@ -916,7 +922,7 @@ async fn a_session_that_panics_ends_as_a_failure_the_supervisor_retries() {
         inner: stream,
         armed: armed.clone(),
     };
-    let connecting = tokio::spawn(Viewer::start(stream, TOKEN.into(), config(), None));
+    let connecting = tokio::spawn(Viewer::start(stream, TOKEN.into(), config(), None, None));
     receive(&mut host).await;
     send(&mut host, accepted(), None).await;
     let viewer = connecting.await.unwrap().unwrap();
@@ -995,6 +1001,7 @@ async fn peer_cursors_require_capability_and_track_generation_and_visibility() {
         nominal_fps: 60,
         quality: QualityPreset::Balanced,
         capabilities: vec![CAPABILITY_PEER_CURSORS.into()],
+        ticket: None,
     })
     .await;
     let viewer = viewer.unwrap();

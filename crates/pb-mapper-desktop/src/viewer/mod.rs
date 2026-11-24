@@ -18,6 +18,10 @@
 //! asks for IDRs on a limited backoff (`recovery`), and when the consumer
 //! falls behind the host is capped below what it can take (`fps_cap`). A
 //! decoder that cannot recover ends the session with `decoder_failed`.
+//!
+//! Beside a session on a path the relay can stand in for, or on the relay
+//! after direct fell back for a while, a standby session on the other path
+//! waits to take its place (`standby`).
 mod config;
 mod error;
 mod fps_cap;
@@ -25,6 +29,7 @@ mod outbound;
 mod recovery;
 mod session;
 mod sink;
+mod standby;
 mod stats;
 mod status;
 
@@ -51,10 +56,11 @@ use crate::{
 use outbound::{Barrier, Lifecycle, ModeRequest, Outbound};
 use parking_lot::Mutex;
 use pb_mapper_client::sdk::{
-    Client, ConnectOptions, Connection, TunnelMetrics, TunnelMetricsStream,
+    Client, ConnectOptions, Connection, PathPolicy, TunnelMetrics, TunnelMetricsStream,
 };
 use pb_mapper_core::time::saturating_millis;
-use session::{Session, handshake, run};
+use session::{Shared, handshake};
+use standby::{ConnectionSlot, Plan, PlanBase, drive};
 use stats::ViewerStatsAcc;
 use std::{
     io,
@@ -203,7 +209,7 @@ struct CursorSlot {
     y: i32,
     visible: bool,
     /// Advances with every update, so a reader can tell a new position.
-    seq: u64,
+    pub(super) seq: u64,
     /// The generation and sequence of the last move written to the host.
     moved: Option<(u64, u64)>,
     /// The slot of the pointer's shape, from the host's last report that
@@ -281,6 +287,11 @@ impl ShapeTable {
         }
         number
     }
+    /// The session moved to another host session, whose slots name
+    /// definitions of its own. The numbers go on from where they stood.
+    fn forget_slots(&mut self) {
+        self.slots.clear();
+    }
     fn holds(&self, number: u16) -> bool {
         self.slots.iter().flatten().any(|(held, _)| *held == number)
     }
@@ -312,20 +323,62 @@ const _: () = {
 pub struct Viewer {
     shared: Arc<ViewerShared>,
     sink: Arc<VideoSink>,
-    /// `None` only for sessions over a test stream.
-    connection: Option<Arc<Connection>>,
+    /// The live connection's tunnel, which a standby's replaces when it
+    /// takes the session; `None` only for sessions over a test stream.
+    connection: ConnectionSlot,
     cancel: CancellationToken,
     join: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Viewer {
     /// Returns only after the host's `Accepted`, or a typed rejection, pin or
-    /// version failure.
+    /// version failure. With `PathPolicy::Auto`, a host that offers standbys
+    /// gets one beside a session that runs direct across the internet, on
+    /// the relay, or beside one the relay carries after direct fell back for
+    /// a while, direct; either takes the session's place when its own path
+    /// fails (see [`Self::subscribe_metrics`]).
     pub async fn connect(
         client: &Client,
         invitation: &Invitation,
         options: ConnectOptions,
         config: ViewerConfig,
+    ) -> std::result::Result<Self, ConnectError> {
+        let base = (options.path == PathPolicy::Auto).then(|| PlanBase {
+            client: client.clone(),
+            invitation: invitation.clone(),
+            options,
+            config: config.clone(),
+            #[cfg(test)]
+            hooks: standby::Hooks::default(),
+        });
+        Self::connect_with(client, invitation, options, config, base).await
+    }
+
+    /// [`Self::connect`], with standbys as a test gives them.
+    #[cfg(test)]
+    pub(crate) async fn connect_with_hooks(
+        client: &Client,
+        invitation: &Invitation,
+        options: ConnectOptions,
+        config: ViewerConfig,
+        hooks: standby::Hooks,
+    ) -> std::result::Result<Self, ConnectError> {
+        let base = PlanBase {
+            client: client.clone(),
+            invitation: invitation.clone(),
+            options,
+            config: config.clone(),
+            hooks,
+        };
+        Self::connect_with(client, invitation, options, config, Some(base)).await
+    }
+
+    async fn connect_with(
+        client: &Client,
+        invitation: &Invitation,
+        options: ConnectOptions,
+        config: ViewerConfig,
+        base: Option<PlanBase>,
     ) -> std::result::Result<Self, ConnectError> {
         config.validate()?;
         // The service is public, so check what an SDK caller may have changed.
@@ -367,6 +420,7 @@ impl Viewer {
             invitation.token_text(),
             config,
             Some(Arc::new(connection)),
+            base,
         )
         .await
     }
@@ -383,7 +437,7 @@ impl Viewer {
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         config.validate()?;
-        Self::start(stream, token, config, None).await
+        Self::start(stream, token, config, None, None).await
     }
 
     /// Authenticate over an established stream, then run the session on it.
@@ -392,11 +446,13 @@ impl Viewer {
         token: String,
         config: ViewerConfig,
         connection: Option<Arc<Connection>>,
+        base: Option<PlanBase>,
     ) -> std::result::Result<Self, ConnectError>
     where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
-        let accepted = handshake(&mut stream, token, &config).await?;
+        let accepted = handshake(&mut stream, token, &config, None).await?;
+        let plan = Plan::new(base, &accepted);
         tracing::info!(
             target: "pb_mapper_desktop::session",
             event = "desktop_viewer_connected",
@@ -452,18 +508,20 @@ impl Viewer {
             config.fps_override,
         );
         let cancel = CancellationToken::new();
-        let join = tokio::spawn(run(
+        let connection: ConnectionSlot = Arc::new(Mutex::new(connection));
+        let join = tokio::spawn(drive(
             stream,
-            Session {
+            Arc::new(Shared {
                 shared: shared.clone(),
                 sink: sink.clone(),
-                connection: connection.clone(),
                 cancel: cancel.clone(),
                 codec: accepted.codec,
                 limits: config.limits,
                 cursor_shapes,
                 peer_cursors,
-            },
+            }),
+            connection.clone(),
+            plan,
         ));
         Ok(Self {
             shared,
@@ -474,21 +532,26 @@ impl Viewer {
         })
     }
 
+    /// The live connection's tunnel, if any.
+    fn tunnel(&self) -> Option<Arc<Connection>> {
+        self.connection.lock().clone()
+    }
+
     /// The figures of the tunnel the session runs over, sampled now: its
     /// path, the bytes it carried, the relay's health and the direct link.
-    /// `None` only for a session over a test stream.
+    /// After a standby took the session's place, its tunnel's. `None` only
+    /// for a session over a test stream.
     pub fn metrics(&self) -> Option<TunnelMetrics> {
-        self.connection
-            .as_ref()
-            .map(|connection| connection.metrics())
+        self.tunnel().map(|connection| connection.metrics())
     }
 
     /// [`Self::metrics`] at once, then every `every` and as the tunnel
     /// changes, until the session's tunnel stops: see
-    /// [`TunnelMetricsStream`].
+    /// [`TunnelMetricsStream`]. A standby that takes the session's place
+    /// brings a tunnel of its own, and the stream of the one it replaced
+    /// ends: subscribe again then.
     pub fn subscribe_metrics(&self, every: std::time::Duration) -> Option<TunnelMetricsStream> {
-        self.connection
-            .as_ref()
+        self.tunnel()
             .map(|connection| connection.subscribe_metrics(every))
     }
 
@@ -902,7 +965,7 @@ impl Viewer {
             let _ = task.await;
         }
         join.take();
-        match &self.connection {
+        match self.tunnel() {
             Some(connection) => connection.stop().await.map_err(io::Error::other),
             None => Ok(()),
         }
@@ -916,3 +979,10 @@ impl Drop for Viewer {
 
 #[cfg(test)]
 mod tests;
+
+/// The standby rig, for the slow-link measurements.
+#[cfg(test)]
+pub(crate) use standby::{
+    Hooks as StandbyHooks,
+    tests::{Counting, Pair as StandbyPair, render as render_noting},
+};

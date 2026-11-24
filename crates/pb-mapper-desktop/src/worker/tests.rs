@@ -603,6 +603,7 @@ impl Harness {
                 limits: VideoLimits { max_fps, ..LIMITS },
                 cursor_shapes,
                 peer_cursors: true,
+                succeeds: None,
             },
         );
         shared
@@ -1816,6 +1817,97 @@ fn native_input_failure_ends_control_and_survives_new_video() {
     assert_eq!(h.inputs(), 1);
 }
 
+/// A standby that takes a slot paused, as when its pair's session lost its
+/// connection, costs the viewers watching no keyframe. One its viewer
+/// resumed takes over the control the session it replaces had, and the
+/// admission lease with it, which is never let go meanwhile; the replaced
+/// session's held input is released all the same. A session that merely
+/// takes a slot over takes no control.
+#[test]
+fn a_standby_keeps_its_pairs_control_and_a_paused_one_costs_no_keyframe() {
+    struct Admission(Arc<AtomicU64>, Arc<AtomicU64>);
+    struct Lease(Arc<AtomicU64>);
+    impl ControlAdmission for Admission {
+        fn acquire(&self) -> Result<Box<dyn ControlLease>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            self.1.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(Lease(self.1.clone())))
+        }
+    }
+    impl Drop for Lease {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    let (acquired, held) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let admission = Admission(acquired.clone(), held.clone());
+    let mut h = Harness::new(true, Some(Arc::new(admission)));
+    h.present();
+    h.send(LaneCommand::Control { enabled: true });
+    h.step();
+    assert!(h.state().record.controlling);
+    h.join_watcher(60);
+    h.run(Duration::from_millis(300), true);
+    let keyframes = |h: &Harness| {
+        h.fake
+            .log
+            .lock()
+            .captures
+            .iter()
+            .filter(|capture| capture.2)
+            .count()
+    };
+    let before = keyframes(&h);
+
+    let take = |h: &Harness, index: usize, conn_id: u64, paused: bool, succeeds| {
+        let room = &h.engine.room;
+        let slot = PeerSlot::new(index).unwrap();
+        let shared = Arc::new(SessionShared::new_in_room(
+            slot,
+            room.wake.clone(),
+            room.peer_cursors.clone(),
+            room.policy.clone(),
+            room.cancel.child_token(),
+            Targets::new(60, 4_000_000, 10),
+        ));
+        shared.targets.paused.store(paused, Ordering::Release);
+        room.set_slot(
+            slot,
+            conn_id,
+            RoomSlotConfig {
+                shared: shared.clone(),
+                color: PeerColor::new(index).unwrap(),
+                limits: LIMITS,
+                cursor_shapes: false,
+                peer_cursors: false,
+                succeeds,
+            },
+        );
+        shared
+    };
+    // The watcher's place, taken paused.
+    let paused = take(&h, 1, 3, true, None);
+    h.run(Duration::from_millis(300), true);
+    assert_eq!(keyframes(&h), before);
+    assert_eq!(paused.state.borrow().record.state, SessionState::Paused);
+
+    // The controller's place, taken by its resumed standby.
+    let releases = h.fake.log.lock().releases;
+    let promoted = take(&h, 0, 4, false, Some(1));
+    h.step();
+    assert!(promoted.state.borrow().record.controlling);
+    assert!(h.fake.log.lock().releases > releases);
+    assert_eq!(acquired.load(Ordering::SeqCst), 1);
+    assert_eq!(held.load(Ordering::SeqCst), 1);
+
+    // Taken over by a session that is no standby of its pair: no control,
+    // and the lease goes.
+    let other = take(&h, 0, 5, false, None);
+    h.step();
+    assert!(!other.state.borrow().record.controlling);
+    assert_eq!(held.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn observation_never_acquires_write_admission_and_revocation_releases_it() {
     struct Admission(Arc<AtomicU64>);
@@ -2685,6 +2777,7 @@ impl<const PUSH: bool> Synth<PUSH> {
                 limits,
                 cursor_shapes: false,
                 peer_cursors: false,
+                succeeds: None,
             },
         );
         self.joined.push(shared.clone());

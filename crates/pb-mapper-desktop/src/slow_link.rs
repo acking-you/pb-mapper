@@ -3306,3 +3306,284 @@ fn direct_quic_on_lossy_links() {
         }
     }
 }
+
+/// Runs of each standby measurement.
+const STANDBY_RUNS: usize = 10;
+/// When the live link goes dead, after the viewer began connecting.
+const STANDBY_BLOCK_AT: Duration = Duration::from_secs(6);
+/// The longest a measured run waits for anything.
+const STANDBY_LIMIT: Duration = Duration::from_secs(15);
+
+/// The median, 90th percentile and largest of `values`, in ms.
+fn spread(values: &mut [f64]) -> (f64, f64, f64) {
+    values.sort_by(f64::total_cmp);
+    let at = |fraction: f64| {
+        let rank = ((values.len() as f64 * fraction).ceil() as usize).clamp(1, values.len());
+        values[rank - 1]
+    };
+    (at(0.5), at(0.9), at(1.0))
+}
+
+/// Poll `probe` every 5 ms until it answers, for up to `STANDBY_LIMIT`.
+async fn first<T>(mut probe: impl FnMut() -> Option<T>) -> Option<T> {
+    let deadline = Instant::now() + STANDBY_LIMIT;
+    while Instant::now() < deadline {
+        if let Some(value) = probe() {
+            return Some(value);
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    None
+}
+
+/// The viewer takes input of the generation it shows now: control is
+/// granted, and a picture of that generation is fresh.
+fn takes_input(viewer: &Viewer) -> bool {
+    let status = viewer.status();
+    status.controlling
+        && status.fresh
+        && viewer
+            .input(status.generation, &[Input::Move { x: 1, y: 1 }])
+            .is_ok()
+}
+
+/// A relayed session whose path dies while the relay lives: its link to the
+/// relay holds every byte from 6 s after the viewer began connecting, while
+/// its standby's link carries on. Per run: from the block to the first
+/// picture of the session the standby took over, from the block to input
+/// taken again, and the IDRs the host encoded in that time and the second
+/// after. Run with:
+/// cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture --test-threads=1 slow_link::standby
+#[test]
+#[ignore = "explicit ~2-minute measurement of a standby taking a dead path's place, 10 runs"]
+fn standby_takes_a_dead_paths_place() {
+    const CASE: &str = "standby";
+    traced(|_| async move {
+        let (mut pictures, mut inputs, mut keyframes) = (Vec::new(), Vec::new(), Vec::new());
+        for run in 0..STANDBY_RUNS {
+            let pair = crate::viewer::StandbyPair::start(&format!("standby-dead-{run}")).await;
+            let connecting = Instant::now();
+            let viewer = pair.viewer(true).await;
+            let stop = Arc::new(AtomicBool::new(false));
+            let (shown, renderer) = crate::viewer::render_noting(&viewer, stop.clone());
+            first(|| viewer.status().fresh.then_some(())).await.unwrap();
+            viewer.request_control(true).unwrap();
+            first(|| takes_input(&viewer).then_some(())).await.unwrap();
+            first(|| (pair.relayed() == 2).then_some(())).await.unwrap();
+            tokio::time::sleep_until((connecting + STANDBY_BLOCK_AT).into()).await;
+            let before = pair.keyframes.load(Ordering::SeqCst);
+            let generation = viewer.status().generation;
+            let blocked = Instant::now();
+            pair.live.blocked.store(true, Ordering::Relaxed);
+            let picture = first(|| {
+                shown
+                    .first_read_after(blocked + Duration::from_millis(100))
+                    .map(|(at, _)| at)
+            })
+            .await
+            .unwrap();
+            let input = first(|| {
+                let status = viewer.status();
+                (status.generation != generation && takes_input(&viewer)).then(Instant::now)
+            })
+            .await
+            .unwrap();
+            tokio::time::sleep_until((picture + Duration::from_secs(1)).into()).await;
+            let idrs = pair.keyframes.load(Ordering::SeqCst) - before;
+            let status = viewer.status();
+            println!(
+                "{CASE} run={run} picture_after_block_ms={:.0} input_after_block_ms={:.0} keyframes={idrs} state={:?} host_viewers={}",
+                picture.duration_since(blocked).as_secs_f64() * 1000.0,
+                input.duration_since(blocked).as_secs_f64() * 1000.0,
+                status.state,
+                pair.host.status().viewers.len(),
+            );
+            assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+            pictures.push(picture.duration_since(blocked).as_secs_f64() * 1000.0);
+            inputs.push(input.duration_since(blocked).as_secs_f64() * 1000.0);
+            keyframes.push(idrs);
+            viewer.stop().await.unwrap();
+            stop.store(true, Ordering::Release);
+            renderer.join().unwrap();
+            pair.host.stop().await.unwrap();
+        }
+        let (picture_p50, picture_p90, picture_max) = spread(&mut pictures);
+        let (input_p50, input_p90, input_max) = spread(&mut inputs);
+        println!(
+            "{CASE} summary runs={STANDBY_RUNS} picture_after_block_ms p50={picture_p50:.0} p90={picture_p90:.0} max={picture_max:.0} input_after_block_ms p50={input_p50:.0} p90={input_p90:.0} max={input_max:.0} keyframes min={} max={}",
+            keyframes.iter().min().unwrap(),
+            keyframes.iter().max().unwrap(),
+        );
+    });
+}
+
+/// The baseline of `standby_takes_a_dead_paths_place`: the same rig with
+/// no standby, as every session had before. Per run: from the block to the
+/// session ending, at the read timeout, and a timed reconnect over the
+/// other link: to its first picture, and to input taken. An app waits its
+/// reconnect backoff between the two, 1 s at first, which is not counted.
+#[test]
+#[ignore = "explicit ~2.5-minute baseline of a session whose path dies, 10 runs"]
+fn standby_baseline_reconnects() {
+    const CASE: &str = "standby_baseline";
+    traced(|_| async move {
+        let (mut ends, mut pictures, mut inputs) = (Vec::new(), Vec::new(), Vec::new());
+        for run in 0..STANDBY_RUNS {
+            let pair = crate::viewer::StandbyPair::start(&format!("standby-base-{run}")).await;
+            let connecting = Instant::now();
+            let viewer = pair.viewer(false).await;
+            let stop = Arc::new(AtomicBool::new(false));
+            let (_, renderer) = crate::viewer::render_noting(&viewer, stop.clone());
+            first(|| viewer.status().fresh.then_some(())).await.unwrap();
+            viewer.request_control(true).unwrap();
+            first(|| takes_input(&viewer).then_some(())).await.unwrap();
+            tokio::time::sleep_until((connecting + STANDBY_BLOCK_AT).into()).await;
+            let blocked = Instant::now();
+            pair.live.blocked.store(true, Ordering::Relaxed);
+            let ended =
+                first(|| (viewer.status().state == ViewerState::Stopped).then(Instant::now))
+                    .await
+                    .unwrap();
+            stop.store(true, Ordering::Release);
+            renderer.join().unwrap();
+            let reconnecting = Instant::now();
+            let again = Viewer::connect(
+                &pair.clients[1],
+                pair.host.invitation(),
+                ConnectOptions {
+                    path: PathPolicy::RelayOnly,
+                    ..Default::default()
+                },
+                ViewerConfig::new(vec![VideoCodec::H264]),
+            )
+            .await
+            .unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let (_, renderer) = crate::viewer::render_noting(&again, stop.clone());
+            let picture = first(|| again.status().fresh.then(Instant::now))
+                .await
+                .unwrap();
+            again.request_control(true).unwrap();
+            let input = first(|| takes_input(&again).then(Instant::now))
+                .await
+                .unwrap();
+            let end_ms = ended.duration_since(blocked).as_secs_f64() * 1000.0;
+            let picture_ms = picture.duration_since(reconnecting).as_secs_f64() * 1000.0;
+            let input_ms = input.duration_since(reconnecting).as_secs_f64() * 1000.0;
+            println!(
+                "{CASE} run={run} ended_after_block_ms={end_ms:.0} reconnect_picture_ms={picture_ms:.0} reconnect_input_ms={input_ms:.0} reason={:?}",
+                viewer.status().reason,
+            );
+            ends.push(end_ms);
+            pictures.push(picture_ms);
+            inputs.push(input_ms);
+            again.stop().await.unwrap();
+            stop.store(true, Ordering::Release);
+            renderer.join().unwrap();
+            pair.host.stop().await.unwrap();
+        }
+        let (end_p50, end_p90, end_max) = spread(&mut ends);
+        let (picture_p50, picture_p90, picture_max) = spread(&mut pictures);
+        let (input_p50, input_p90, input_max) = spread(&mut inputs);
+        println!(
+            "{CASE} summary runs={STANDBY_RUNS} ended_after_block_ms p50={end_p50:.0} p90={end_p90:.0} max={end_max:.0} reconnect_picture_ms p50={picture_p50:.0} p90={picture_p90:.0} max={picture_max:.0} reconnect_input_ms p50={input_p50:.0} p90={input_p90:.0} max={input_max:.0}",
+        );
+    });
+}
+
+/// A relayed session that direct fell back from (a test hook says so of a
+/// relay-only connection) gets a direct standby over the relay's loopback
+/// direct coordination, which takes its place once it commits. Per run:
+/// from the session's first picture to the session running direct, the
+/// IDRs the host encoded from that picture to a second after, and the
+/// longest the renderer went without a picture within a second either side
+/// of the switch.
+#[test]
+#[ignore = "explicit ~1-minute measurement of a relayed session moving to direct, 10 runs"]
+fn standby_upgrades_a_relayed_session() {
+    const CASE: &str = "standby_upgrade";
+    traced(|_| async move {
+        let (mut directs, mut keyframes, mut gaps) = (Vec::new(), Vec::new(), Vec::new());
+        for run in 0..STANDBY_RUNS {
+            let relay = Relay::start_with_direct(
+                &format!("desktop-standby-upgrade-{run}"),
+                Some(pb_mapper_testkit::loopback_direct()),
+            )
+            .await;
+            let client =
+                Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
+            let counted = Arc::new(AtomicU32::new(0));
+            let backend = counted.clone();
+            let mut options = HostOptions::new(format!("desktop:standby-upgrade-{run}"));
+            options.allow_control = true;
+            let host = Host::builder(options)
+                .backend(move || Ok(crate::viewer::Counting(backend.clone())))
+                .start(&client)
+                .await
+                .unwrap();
+            let viewer = Viewer::connect_with_hooks(
+                &client,
+                host.invitation(),
+                ConnectOptions {
+                    path: PathPolicy::RelayOnly,
+                    ..Default::default()
+                },
+                ViewerConfig::new(vec![VideoCodec::H264]),
+                crate::viewer::StandbyHooks {
+                    relay: None,
+                    fell_back: true,
+                },
+            )
+            .await
+            .unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let (shown, renderer) = crate::viewer::render_noting(&viewer, stop.clone());
+            let fresh = first(|| viewer.status().fresh.then(Instant::now))
+                .await
+                .unwrap();
+            let before = counted.load(Ordering::SeqCst);
+            let direct = first(|| (viewer.status().stats.path == "direct").then(Instant::now))
+                .await
+                .unwrap();
+            tokio::time::sleep_until((direct + Duration::from_secs(1)).into()).await;
+            let idrs = counted.load(Ordering::SeqCst) - before;
+            let shown_at: Vec<Instant> = shown
+                .units
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(at, _, _, _)| *at)
+                .filter(|at| {
+                    *at + Duration::from_secs(1) >= direct && *at <= direct + Duration::from_secs(1)
+                })
+                .collect();
+            let gap = shown_at
+                .windows(2)
+                .map(|pair| pair[1].duration_since(pair[0]).as_secs_f64() * 1000.0)
+                .fold(0.0, f64::max);
+            let status = viewer.status();
+            let direct_ms = direct.duration_since(fresh).as_secs_f64() * 1000.0;
+            println!(
+                "{CASE} run={run} direct_after_first_picture_ms={direct_ms:.0} keyframes={idrs} longest_gap_ms={gap:.0} pictures={} state={:?} host_viewers={}",
+                shown_at.len(),
+                status.state,
+                host.status().viewers.len(),
+            );
+            assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+            directs.push(direct_ms);
+            keyframes.push(idrs);
+            gaps.push(gap);
+            viewer.stop().await.unwrap();
+            stop.store(true, Ordering::Release);
+            renderer.join().unwrap();
+            host.stop().await.unwrap();
+        }
+        let (direct_p50, direct_p90, direct_max) = spread(&mut directs);
+        let (gap_p50, gap_p90, gap_max) = spread(&mut gaps);
+        println!(
+            "{CASE} summary runs={STANDBY_RUNS} direct_after_first_picture_ms p50={direct_p50:.0} p90={direct_p90:.0} max={direct_max:.0} keyframes min={} max={} longest_gap_ms p50={gap_p50:.0} p90={gap_p90:.0} max={gap_max:.0}",
+            keyframes.iter().min().unwrap(),
+            keyframes.iter().max().unwrap(),
+        );
+    });
+}

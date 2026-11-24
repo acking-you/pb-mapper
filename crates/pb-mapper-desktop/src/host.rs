@@ -13,7 +13,9 @@ use crate::{
     Result, VideoCodec, VideoLimits, error,
     launch::{Launch, Recovery},
     platform,
-    protocol::{MAX_VIEWERS, PeerColor, PeerSlot, RateModel, SessionState, StopReason},
+    protocol::{
+        MAX_VIEWERS, PeerColor, PeerSlot, RateModel, RejectReason, SessionState, StopReason,
+    },
     qos::ClosingRate,
     security::HostIdentity,
     session::{Session, stop_message},
@@ -36,7 +38,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 /// How long `Accepted` waits for a new backend to describe itself: which
@@ -89,9 +91,82 @@ struct Shared {
     closing_rate: Mutex<Option<ClosingRate>>,
 }
 
+/// The SHA-256 digest of a pair's ticket: what the room keeps of it.
+pub(super) type TicketDigest = [u8; 32];
+
+/// The digest a ticket is kept and compared as, so a comparison takes as
+/// long whatever was presented.
+pub(super) fn ticket_digest(ticket: &str) -> TicketDigest {
+    let digest = ring::digest::digest(&ring::digest::SHA256, ticket.as_bytes());
+    let mut kept = [0; 32];
+    kept.copy_from_slice(digest.as_ref());
+    kept
+}
+
+/// A viewer slot's pair: its live session and, while one is open, the
+/// standby that may take its place. Both hold an admission permit, which
+/// stays with the slot when the standby takes it.
 pub(super) struct RoomSlot {
     pub conn_id: u64,
     pub session: Arc<Session>,
+    permit: OwnedSemaphorePermit,
+    /// The pair's ticket, for a viewer that listed `standby`.
+    ticket: Option<TicketDigest>,
+    standby: Option<Standby>,
+}
+
+impl RoomSlot {
+    /// `standby` takes the live session's place in this pair, which keeps
+    /// its permit and ticket: the session it replaced, the standby's own
+    /// permit, freed by the caller once it lets go of the room's lock, and
+    /// thread C's view of the slot now. `promoted`: its viewer resumed it,
+    /// and it takes over the replaced session's control; else it is still
+    /// paused, and takes over nothing.
+    fn take_over(
+        &mut self,
+        slot: PeerSlot,
+        standby: Standby,
+        promoted: bool,
+    ) -> ((Arc<Session>, OwnedSemaphorePermit), RoomSlotConfig) {
+        let Standby {
+            conn_id,
+            session,
+            limits,
+            permit,
+        } = standby;
+        session.leave_standby();
+        let config = slot_config(slot, &session, limits, promoted.then_some(self.conn_id));
+        self.conn_id = conn_id;
+        let replaced = std::mem::replace(&mut self.session, session);
+        ((replaced, permit), config)
+    }
+}
+
+/// What thread C holds of `session` in `slot`; `succeeds`: the session it
+/// takes over from.
+fn slot_config(
+    slot: PeerSlot,
+    session: &Session,
+    limits: VideoLimits,
+    succeeds: Option<u64>,
+) -> RoomSlotConfig {
+    RoomSlotConfig {
+        shared: session.shared.clone(),
+        color: PeerColor::new(slot.index()).unwrap_or_default(),
+        limits,
+        cursor_shapes: session.cursor_shape,
+        peer_cursors: session.peer_cursors,
+        succeeds,
+    }
+}
+
+/// A paused session that holds no slot of its own and takes its pair's
+/// place when its viewer resumes it.
+struct Standby {
+    conn_id: u64,
+    session: Arc<Session>,
+    limits: VideoLimits,
+    permit: OwnedSemaphorePermit,
 }
 
 struct RoomInner {
@@ -126,7 +201,7 @@ impl Room {
         h265: bool,
         rate_model: RateModel,
         codec: VideoCodec,
-        session: Arc<Session>,
+        first: (Arc<Session>, OwnedSemaphorePermit, Option<TicketDigest>),
     ) -> Arc<Self> {
         let (exit_tx, exit_rx) = tokio::sync::watch::channel(None);
         let join = tokio::spawn(async move {
@@ -134,10 +209,14 @@ impl Room {
             let _ = exit_tx.send(Some(exit.clone()));
             exit
         });
+        let (session, permit, ticket) = first;
         let mut slots: [Option<RoomSlot>; MAX_VIEWERS] = std::array::from_fn(|_| None);
         slots[PeerSlot::FIRST.index()] = Some(RoomSlot {
             conn_id: 1,
             session,
+            permit,
+            ticket,
+            standby: None,
         });
         Arc::new(Self {
             shared,
@@ -178,11 +257,112 @@ impl Room {
             .collect()
     }
 
+    /// End every session, standbys included.
     pub(super) fn end_all(&self, reason: StopReason) {
         let message = stop_message(reason);
-        for (_, session) in self.live_sessions() {
+        let sessions: Vec<Arc<Session>> = self
+            .inner
+            .lock()
+            .slots
+            .iter()
+            .flatten()
+            .flat_map(|slot| {
+                std::iter::once(slot.session.clone())
+                    .chain(slot.standby.as_ref().map(|standby| standby.session.clone()))
+            })
+            .collect();
+        for session in sessions {
             session.end(reason, message);
         }
+    }
+
+    /// The slot whose pair holds `presented` as its ticket, and the codec of
+    /// its live session. Every slot's ticket is compared, each in constant
+    /// time over the digests.
+    pub(super) fn pair(&self, presented: &TicketDigest) -> Option<(PeerSlot, VideoCodec)> {
+        use subtle::ConstantTimeEq;
+        let inner = self.inner.lock();
+        if inner.closed || self.exit_rx.borrow().is_some() {
+            return None;
+        }
+        let mut found = None;
+        for (index, slot) in inner.slots.iter().enumerate() {
+            let Some(slot) = slot else { continue };
+            let Some(ticket) = &slot.ticket else { continue };
+            if bool::from(ticket.ct_eq(presented)) {
+                found = PeerSlot::new(index).map(|peer| (peer, slot.session.codec));
+            }
+        }
+        found
+    }
+
+    /// Hold `session` as the standby of the pair in `slot`, if that pair
+    /// still holds `ticket` and has none: paused, and taking the pair's
+    /// place once its viewer resumes it. `Err(Denied)` once the pair is
+    /// gone, `Err(Busy)` while it has a standby.
+    pub(super) fn attach_standby(
+        self: &Arc<Self>,
+        slot: PeerSlot,
+        ticket: &TicketDigest,
+        session: Arc<Session>,
+        limits: VideoLimits,
+        permit: OwnedSemaphorePermit,
+    ) -> std::result::Result<u64, RejectReason> {
+        let mut inner = self.inner.lock();
+        let conn_id = inner.next_conn_id;
+        let closed = inner.closed || self.exit_rx.borrow().is_some();
+        let Some(held) = inner.slots[slot.index()]
+            .as_mut()
+            .filter(|held| !closed && held.ticket.as_ref() == Some(ticket))
+        else {
+            return Err(RejectReason::Denied);
+        };
+        if held.standby.is_some() {
+            return Err(RejectReason::Busy);
+        }
+        // Under the room's lock, as is its taking the place, so a session
+        // never stands by once it holds it.
+        let room = Arc::downgrade(self);
+        session.stand_by(Box::new(move || {
+            room.upgrade()
+                .is_some_and(|room| room.promote(slot, conn_id))
+        }));
+        held.standby = Some(Standby {
+            conn_id,
+            session,
+            limits,
+            permit,
+        });
+        inner.next_conn_id += 1;
+        Ok(conn_id)
+    }
+
+    /// The standby `conn_id` of the pair in `slot` was resumed: under the
+    /// room's lock it takes the live session's place, with the slot's
+    /// admission permit and ticket, and thread C its control, if it held
+    /// it, and the admission lease with it; the display's mode stays as
+    /// it is, the room never emptying. The session it replaces ends
+    /// without a word, its held input released as thread C lets it go.
+    /// False when the standby no longer stands by: its pair is gone, or it
+    /// took the place already.
+    pub(super) fn promote(&self, slot: PeerSlot, conn_id: u64) -> bool {
+        let (replaced, _permit) = {
+            let mut inner = self.inner.lock();
+            let Some(held) = inner.slots[slot.index()].as_mut() else {
+                return false;
+            };
+            let Some(standby) = held.standby.take_if(|standby| standby.conn_id == conn_id) else {
+                return false;
+            };
+            let (replaced, config) = held.take_over(slot, standby, true);
+            // Under the room's lock, so no detach of either session comes
+            // between the pair's change and thread C's.
+            self.shared.set_slot(slot, conn_id, config);
+            replaced
+        };
+        replaced.close();
+        self.shared.wake.notify();
+        true
     }
 
     /// Pick a codec every live viewer in the room and the newcomer can decode,
@@ -259,11 +439,15 @@ impl Room {
             .and_then(PeerSlot::new)
     }
 
+    /// `session` takes the free `slot`, holding its admission `permit`, its
+    /// pair under `ticket` when its viewer listed `standby`.
     pub(super) fn attach(
         &self,
         slot: PeerSlot,
         session: Arc<Session>,
         limits: VideoLimits,
+        permit: OwnedSemaphorePermit,
+        ticket: Option<TicketDigest>,
     ) -> Option<u64> {
         let conn_id = {
             let mut inner = self.inner.lock();
@@ -275,34 +459,53 @@ impl Room {
             inner.slots[slot.index()] = Some(RoomSlot {
                 conn_id,
                 session: session.clone(),
+                permit,
+                ticket,
+                standby: None,
             });
             conn_id
         };
-        let color = PeerColor::new(slot.index()).unwrap_or_default();
-        self.shared.set_slot(
-            slot,
-            conn_id,
-            RoomSlotConfig {
-                shared: session.shared.clone(),
-                color,
-                limits,
-                cursor_shapes: session.cursor_shape,
-                peer_cursors: session.peer_cursors,
-            },
-        );
+        self.shared
+            .set_slot(slot, conn_id, slot_config(slot, &session, limits, None));
         self.shared.wake.notify();
         Some(conn_id)
     }
 
-    /// Detach `(slot, conn_id)`. Returns whether the room now holds zero slots.
+    /// Detach `(slot, conn_id)`, a pair's live session or its standby.
+    /// When the live session's transport ended it, its standby takes its
+    /// place, still paused, for its viewer to resume; when anything else
+    /// did, its standby ends with it, for the same reason. Returns whether
+    /// the room now holds zero slots. Permits free once the room's lock is
+    /// let go.
     pub(super) fn detach(&self, slot: PeerSlot, conn_id: u64) -> bool {
+        let mut freed = None;
+        let mut ended = None;
         let empty = {
             let mut inner = self.inner.lock();
-            if inner.slots[slot.index()]
-                .as_ref()
-                .is_some_and(|held| held.conn_id == conn_id)
-            {
-                inner.slots[slot.index()] = None;
+            let held = &mut inner.slots[slot.index()];
+            match held.as_mut() {
+                Some(pair) if pair.conn_id == conn_id => match pair.standby.take() {
+                    Some(standby) if pair.session.transport_ended() => {
+                        let next = standby.conn_id;
+                        let ((_, permit), config) = pair.take_over(slot, standby, false);
+                        freed = Some(permit);
+                        self.shared.set_slot(slot, next, config);
+                    }
+                    standby => {
+                        let outcome = pair.session.outcome();
+                        ended = standby.map(|standby| (standby, outcome));
+                        freed = held.take().map(|pair| pair.permit);
+                        self.shared.clear_slot(slot, conn_id);
+                    }
+                },
+                Some(pair) => {
+                    if let Some(standby) =
+                        pair.standby.take_if(|standby| standby.conn_id == conn_id)
+                    {
+                        freed = Some(standby.permit);
+                    }
+                }
+                None => {}
             }
             let empty = inner.slots.iter().all(Option::is_none);
             if empty {
@@ -310,7 +513,13 @@ impl Room {
             }
             empty
         };
-        self.shared.clear_slot(slot, conn_id);
+        if let Some((standby, outcome)) = ended {
+            match outcome {
+                Some((reason, message)) => standby.session.end(reason, message),
+                None => standby.session.close(),
+            }
+        }
+        drop(freed);
         self.shared.wake.notify();
         empty
     }
@@ -465,6 +674,7 @@ impl Host {
             shared: shared.clone(),
             room: AsyncMutex::new(None),
             slot: Arc::new(Semaphore::new(MAX_VIEWERS)),
+            standby: Arc::new(Semaphore::new(MAX_VIEWERS)),
             cancel: cancel.clone(),
         });
         let join = tokio::spawn(acceptor.accept(listener));

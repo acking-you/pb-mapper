@@ -66,6 +66,19 @@ async fn authenticate_with(
     codecs: Vec<VideoCodec>,
     capabilities: Vec<String>,
 ) -> (Viewer, HostMessage) {
+    authenticate_as(client, invitation, token, codecs, capabilities, None).await
+}
+
+/// `authenticate_with`, as the standby of the session whose ticket is
+/// `standby_for`, when there is one.
+async fn authenticate_as(
+    client: &Client,
+    invitation: &Invitation,
+    token: String,
+    codecs: Vec<VideoCodec>,
+    capabilities: Vec<String>,
+    standby_for: Option<String>,
+) -> (Viewer, HostMessage) {
     let mut viewer = tls(client, invitation).await.unwrap();
     let authenticate = ViewerMessage::Authenticate {
         token,
@@ -73,6 +86,7 @@ async fn authenticate_with(
         limits: VideoLimits::for_viewer(60.0),
         quality: QualityPreset::Balanced,
         capabilities,
+        standby_for,
     };
     wire::write_message(&mut viewer.stream, &authenticate, None)
         .await
@@ -1072,5 +1086,405 @@ async fn direct_video_goes_out_under_the_hosts_controller() {
         Some((quic, Some(CongestionControl::Cubic)))
     );
     drop(stream);
+    host.stop().await.unwrap();
+}
+
+/// A scripted viewer that keeps its session alive on its own: it reads
+/// every message, acknowledging each unit and answering each probe, and
+/// pings; what it read, and whether its connection closed, for the test.
+struct Scripted {
+    read: Arc<Mutex<Vec<HostMessage>>>,
+    closed: Arc<AtomicBool>,
+    send: tokio::sync::mpsc::UnboundedSender<ViewerMessage>,
+    _task: tokio::task::JoinHandle<()>,
+}
+impl Scripted {
+    fn start(viewer: Viewer) -> Self {
+        let read = Arc::new(Mutex::new(Vec::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let (send, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
+        let replies = send.clone();
+        let (log, ended) = (read.clone(), closed.clone());
+        let Viewer {
+            stream,
+            _connection: connection,
+        } = viewer;
+        let (mut reader, mut writer) = tokio::io::split(stream);
+        let task = tokio::spawn(async move {
+            let _connection = connection;
+            let reading = async {
+                while let Ok(Some(message)) =
+                    wire::read_header::<_, HostMessage>(&mut reader, Duration::from_secs(10)).await
+                {
+                    match &message {
+                        HostMessage::Video { seq, .. } => {
+                            if wire::read_payload(&mut reader).await.is_err() {
+                                break;
+                            }
+                            let _ = replies.send(ViewerMessage::Received {
+                                seq: *seq,
+                                at_us: None,
+                            });
+                        }
+                        HostMessage::Probe { nonce } => {
+                            let _ = replies.send(ViewerMessage::ProbeEcho {
+                                nonce: *nonce,
+                                at_us: None,
+                            });
+                        }
+                        _ => {}
+                    }
+                    log.lock().push(message);
+                }
+                ended.store(true, Ordering::Release);
+            };
+            let writing = async {
+                loop {
+                    let message = tokio::time::timeout(Duration::from_millis(500), outgoing.recv())
+                        .await
+                        .unwrap_or(Some(ViewerMessage::Ping {}));
+                    let Some(message) = message else { break };
+                    if wire::write_message(&mut writer, &message, None)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            };
+            tokio::select! {
+                () = reading => {}
+                () = writing => {}
+            }
+        });
+        Self {
+            read,
+            closed,
+            send,
+            _task: task,
+        }
+    }
+    fn send(&self, message: ViewerMessage) {
+        self.send.send(message).unwrap();
+    }
+    /// Whether each unit it read was a keyframe.
+    fn videos(&self) -> Vec<bool> {
+        self.read
+            .lock()
+            .iter()
+            .filter_map(|message| match message {
+                HostMessage::Video { keyframe, .. } => Some(*keyframe),
+                _ => None,
+            })
+            .collect()
+    }
+    fn stopped(&self) -> bool {
+        self.read
+            .lock()
+            .iter()
+            .any(|message| matches!(message, HostMessage::Stopped { .. }))
+    }
+    fn last_state(&self) -> Option<crate::protocol::StateRecord> {
+        self.read
+            .lock()
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                HostMessage::State(state) => Some(state.clone()),
+                _ => None,
+            })
+    }
+    fn closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+}
+impl Drop for Scripted {
+    fn drop(&mut self) {
+        self._task.abort();
+    }
+}
+
+/// A one-pixel H.264 desktop that counts the IDRs it was asked for, and
+/// whose display offers two modes: the one it was changed to, and how often
+/// it was asked to put the display back.
+#[derive(Default)]
+struct Modes {
+    keyframes: AtomicU32,
+    current: Mutex<Option<crate::Mode>>,
+    restores: AtomicU32,
+}
+const ORIGINAL: crate::Mode = crate::Mode {
+    width: 20,
+    height: 20,
+};
+const SMALLER: crate::Mode = crate::Mode {
+    width: 10,
+    height: 10,
+};
+struct ModesBackend(Arc<Modes>);
+impl crate::Backend for ModesBackend {
+    fn display(&mut self) -> Result<crate::Display> {
+        let mode = self.0.current.lock().unwrap_or(ORIGINAL);
+        Ok(crate::Display {
+            id: 1,
+            name: "modes".into(),
+            x: 0,
+            y: 0,
+            width: mode.width,
+            height: mode.height,
+        })
+    }
+    fn describe(&mut self, _: bool) -> Result<crate::Description> {
+        Ok(crate::Description {
+            display: self.display()?,
+            caps: BackendCaps {
+                display_modes: true,
+                ..BackendCaps::default()
+            },
+        })
+    }
+    fn capture(&mut self) -> Result<Vec<u8>> {
+        Ok(vec![1])
+    }
+    fn capture_video(
+        &mut self,
+        _: &crate::DesktopContext,
+        codec: VideoCodec,
+        keyframe: bool,
+        _: crate::VideoRate,
+    ) -> Result<Option<crate::EncodedFrame>> {
+        if keyframe {
+            self.0.keyframes.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(Some(crate::EncodedFrame {
+            format: crate::VideoFormat {
+                codec,
+                width: 10,
+                height: 10,
+                keyframe,
+                ..crate::VideoFormat::default()
+            },
+            bytes: vec![1],
+        }))
+    }
+    fn input(&mut self, _: &crate::Input) -> Result<()> {
+        Ok(())
+    }
+    fn release(&mut self) {}
+    fn display_modes(&mut self, _: &crate::DesktopContext) -> Result<Option<crate::ModeList>> {
+        Ok(Some(crate::ModeList {
+            current: self.0.current.lock().unwrap_or(ORIGINAL),
+            original: ORIGINAL,
+            supported: vec![ORIGINAL, SMALLER],
+        }))
+    }
+    fn set_display_mode(&mut self, _: &crate::DesktopContext, mode: crate::Mode) -> Result<()> {
+        *self.0.current.lock() = Some(mode);
+        Ok(())
+    }
+    fn restore_display_mode(&mut self) -> Result<bool> {
+        self.0.restores.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .0
+            .current
+            .lock()
+            .take()
+            .is_some_and(|mode| mode != ORIGINAL))
+    }
+}
+
+/// A host of `ModesBackend` that allows control, on a relay of its own.
+async fn modes_host(name: &str) -> (pb_mapper_testkit::Relay, Client, Host, Arc<Modes>) {
+    let relay = pb_mapper_testkit::Relay::start(name).await;
+    let client = Client::from_credential(
+        relay.addr().to_string(),
+        pb_mapper_testkit::admin_credential(),
+        true,
+        None,
+    );
+    let modes = Arc::new(Modes::default());
+    let backend = modes.clone();
+    let mut options = options();
+    options.allow_control = true;
+    let host = Host::builder(options)
+        .backend(move || Ok(ModesBackend(backend.clone())))
+        .start(&client)
+        .await
+        .unwrap();
+    (relay, client, host, modes)
+}
+
+fn standby_capabilities() -> Vec<String> {
+    vec![
+        crate::protocol::CAPABILITY_STANDBY.to_owned(),
+        crate::protocol::CAPABILITY_DISPLAY_MODE.to_owned(),
+    ]
+}
+
+/// The ticket an `Accepted` carries, if any.
+fn ticket(answer: &HostMessage) -> Option<String> {
+    match answer {
+        HostMessage::Accepted { ticket, .. } => ticket.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A pair's session gets a ticket only when its viewer listed `standby`.
+/// A standby that presents it, after the token, gets no ticket and no slot:
+/// it shows in no status, causes no keyframe and is sent no picture. A
+/// ticket no pair holds is denied, even beside the right token, and so is
+/// the right ticket beside a wrong token; a pair holds one standby at most.
+/// A resumed standby takes its pair's place: its first unit is an IDR, and
+/// the session it replaced ends without a word. The ticket goes with the
+/// place, for the next standby.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_standby_takes_no_slot_and_no_keyframe_until_it_takes_its_pairs_place() {
+    let (_relay, client, host, modes) = modes_host("desktop-standby").await;
+    let invitation = host.invitation().clone();
+    let token = invitation.token_text();
+    let h264 = || vec![VideoCodec::H264];
+
+    let (plain, answer) = authenticate(&client, &invitation, token.clone(), h264()).await;
+    assert_eq!(ticket(&answer), None);
+    drop(plain);
+    until(|| host.status().viewer.is_none()).await;
+
+    let (live, answer) = authenticate_with(
+        &client,
+        &invitation,
+        token.clone(),
+        h264(),
+        standby_capabilities(),
+    )
+    .await;
+    let pair = ticket(&answer).unwrap();
+    assert_eq!(pair.len(), 43, "{pair}");
+    let live = Scripted::start(live);
+    until(|| !live.videos().is_empty()).await;
+    let standby_as = |token: String, ticket: &str| {
+        authenticate_as(
+            &client,
+            &invitation,
+            token,
+            h264(),
+            standby_capabilities(),
+            Some(ticket.to_owned()),
+        )
+    };
+
+    let (standby, answer) = standby_as(token.clone(), &pair).await;
+    assert_eq!(ticket(&answer), None);
+    let standby = Scripted::start(standby);
+    let keyframes = modes.keyframes.load(Ordering::SeqCst);
+    let (_, answer) = standby_as(token.clone(), &pair).await;
+    assert_eq!(rejected(&answer), Some(RejectReason::Busy));
+    let (_, answer) = standby_as(token.clone(), &"A".repeat(43)).await;
+    assert_eq!(rejected(&answer), Some(RejectReason::Denied));
+    let (_, answer) = standby_as("A".repeat(token.len()), &pair).await;
+    assert_eq!(rejected(&answer), Some(RejectReason::Denied));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(host.status().viewers.len(), 1);
+    assert!(standby.videos().is_empty());
+    assert!(standby.last_state().is_some());
+    assert_eq!(modes.keyframes.load(Ordering::SeqCst), keyframes);
+    let units = live.videos().len();
+    until(|| live.videos().len() > units).await;
+
+    standby.send(ViewerMessage::Resume {});
+    until(|| !standby.videos().is_empty()).await;
+    assert!(standby.videos()[0], "{:?}", standby.videos());
+    until(|| live.closed()).await;
+    assert!(!live.stopped());
+    assert_eq!(host.status().viewers.len(), 1);
+    assert!(modes.keyframes.load(Ordering::SeqCst) > keyframes);
+
+    // The ticket went with the place.
+    let (next, answer) = standby_as(token, &pair).await;
+    assert_eq!(ticket(&answer), None);
+    drop((next, standby, live));
+    host.stop().await.unwrap();
+}
+
+/// The display's mode, and control with the admission lease, go with a
+/// pair's place: a standby its viewer resumes keeps both, and nothing puts
+/// the mode back until the pair's last session ends, which does once. A
+/// standby whose pair's session lost its connection takes the place
+/// paused, still putting nothing back, and is resumed as any session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pairs_place_keeps_the_display_mode_and_control() {
+    let (_relay, client, host, modes) = modes_host("desktop-standby-modes").await;
+    let invitation = host.invitation().clone();
+    let token = invitation.token_text();
+    let h264 = || vec![VideoCodec::H264];
+    let (live, answer) = authenticate_with(
+        &client,
+        &invitation,
+        token.clone(),
+        h264(),
+        standby_capabilities(),
+    )
+    .await;
+    let pair = ticket(&answer).unwrap();
+    let live = Scripted::start(live);
+    until(|| !live.videos().is_empty()).await;
+    live.send(ViewerMessage::Control { enabled: true });
+    until(|| live.last_state().is_some_and(|state| state.controlling)).await;
+    live.send(ViewerMessage::DisplayMode {
+        width: SMALLER.width,
+        height: SMALLER.height,
+    });
+    until(|| *modes.current.lock() == Some(SMALLER)).await;
+    until(|| host.status().display_mode.is_some()).await;
+
+    let standby_as = || {
+        authenticate_as(
+            &client,
+            &invitation,
+            token.clone(),
+            h264(),
+            standby_capabilities(),
+            Some(pair.clone()),
+        )
+    };
+    let (standby, _) = standby_as().await;
+    let standby = Scripted::start(standby);
+    standby.send(ViewerMessage::Resume {});
+    until(|| {
+        standby
+            .last_state()
+            .is_some_and(|state| state.controlling && state.modes.is_some())
+    })
+    .await;
+    until(|| live.closed()).await;
+    assert_eq!(modes.restores.load(Ordering::SeqCst), 0);
+    assert_eq!(*modes.current.lock(), Some(SMALLER));
+    let status = host.status();
+    assert!(status.viewers.len() == 1 && status.viewers[0].controlling);
+    assert!(status.display_mode.is_some());
+
+    // Its connection lost, the session gives its place to its standby,
+    // paused.
+    let (next, _) = standby_as().await;
+    let next = Scripted::start(next);
+    drop(standby);
+    until(|| {
+        next.last_state()
+            .is_some_and(|state| state.state == SessionState::Paused)
+    })
+    .await;
+    let status = host.status();
+    assert!(status.viewers.len() == 1 && status.viewers[0].paused);
+    assert_eq!(modes.restores.load(Ordering::SeqCst), 0);
+    next.send(ViewerMessage::Resume {});
+    until(|| !next.videos().is_empty()).await;
+    assert!(next.videos()[0]);
+    assert_eq!(modes.restores.load(Ordering::SeqCst), 0);
+
+    // The pair's last session ends: the mode is put back.
+    drop(next);
+    until(|| host.status().viewer.is_none()).await;
+    until(|| modes.restores.load(Ordering::SeqCst) >= 1).await;
+    assert_eq!(*modes.current.lock(), None);
+    drop(live);
     host.stop().await.unwrap();
 }
