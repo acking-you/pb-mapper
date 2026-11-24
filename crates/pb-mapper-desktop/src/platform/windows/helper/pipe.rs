@@ -72,10 +72,20 @@ mod tests {
     use super::*;
     use crate::oop::ipc;
 
-    /// A unit within the quota waits in the pipe, in either direction, while
-    /// nobody reads it: its write completes at once, so the writer's next
-    /// write, which starts only once the last one completed, never waits on
-    /// the reader. Every unit still arrives whole.
+    /// A keyframe the size of the bench's 170 KB unit. It is fixed, not
+    /// derived from `PIPE_QUOTA`, so the test fails whether the constant or
+    /// `bind` goes back to an 8 KiB quota.
+    const KEYFRAME: usize = 170_000;
+    const _: () = assert!(
+        KEYFRAME + 4 <= super::super::transfer::PIPE_QUOTA as usize,
+        "a helper pipe holds a keyframe and its length while nobody reads it"
+    );
+
+    /// A keyframe waits in the pipe, in either direction, while nobody reads
+    /// it: its write completes at once, so the writer's next write, which
+    /// starts only once the last one completed, never waits on the reader.
+    /// Under an 8 KiB quota the first write waits for the reader, and so the
+    /// second never starts. Every unit still arrives whole.
     #[tokio::test]
     async fn a_unit_waits_in_the_pipe_until_its_reader_reads() {
         let name = format!(
@@ -86,10 +96,7 @@ mod tests {
         let mut server = bind(&name, Some(owner.as_str()), true).unwrap();
         let mut client = connect(&name).unwrap();
         server.connect().await.unwrap();
-        let unit: Vec<u8> = (0..=255u8)
-            .cycle()
-            .take(super::super::transfer::PIPE_QUOTA as usize * 3 / 4)
-            .collect();
+        let unit: Vec<u8> = (0..=255u8).cycle().take(KEYFRAME).collect();
         let bound = std::time::Duration::from_secs(5);
         // The worker's direction, toward the service: the pipe's in quota.
         tokio::time::timeout(bound, async {
