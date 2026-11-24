@@ -3272,6 +3272,7 @@ dependencies = [
  "pb-mapper-protocol",
  "quinn-plus",
  "snafu",
+ "socket2 0.6.1",
  "stun-proto",
  "tokio",
  "tokio-util",

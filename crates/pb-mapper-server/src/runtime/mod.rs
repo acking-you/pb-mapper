@@ -149,6 +149,7 @@ pub async fn run_server_on_listener_with_options(
         control_timeout = ?control_io_timeout(),
         "pb-mapper server is listening"
     );
+    crate::tcp_tuning::log_idle_restart();
 
     // Clients reach QUIC at the IP they reached TCP at, so a listener on the
     // other address family is one some of them cannot use.
