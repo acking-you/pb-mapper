@@ -819,7 +819,8 @@ The design and its rules are in `docs/ui-design.md`.
     `darwin/DesktopVideo.swift`, which the macOS and iOS runners both
     compile, with VideoToolbox; `linux/runner/desktop_video.cc` with the
     GStreamer module `linux/runner/desktop_video_gst.cc`, behind the C
-    interface `desktop_video_module.h` and loaded with `dlopen`), or the
+    interface `desktop_video_module.h` and loaded with `dlopen`, and the GPU
+    conversion `linux/runner/desktop_video_gl.cc`), or the
     Android feeder; so H.264 and H.265 never pass through Dart. Where there
     is no decoder (Windows without Media Foundation, Linux without
     GStreamer's decoders) it is Dart's JPEG isolate. A unit's
