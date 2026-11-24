@@ -753,7 +753,7 @@ class FakeVideoTexture implements DesktopVideoTexture {
     this.platformViewType,
     this.plane = false,
     bool? enhances,
-  }) : enhances = enhances ?? platformViewType != null;
+  }) : enhances = enhances ?? (platformViewType != null || plane);
 
   @override
   final int textureId;
@@ -776,8 +776,8 @@ class FakeVideoTexture implements DesktopVideoTexture {
   /// Every [place] call's placement, in order.
   final placements = <VideoPlacement>[];
 
-  /// As the channel's texture: where a platform view presents, unless a
-  /// test says otherwise.
+  /// As the channel's texture: where a platform view or a plane presents,
+  /// unless a test says otherwise.
   @override
   final bool enhances;
 

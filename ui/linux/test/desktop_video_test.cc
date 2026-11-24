@@ -8,7 +8,8 @@
 // rules the runner shares with Windows and Android, the conversion against
 // GStreamer's own and against a decoder in system memory, the GL state the
 // conversion leaves, the video plane's drawing in GL ES and in a desktop GL
-// 3.2 core context with a converter of its own (GDK's kind of context), and
+// 3.2 core context with a converter of its own (GDK's kind of context),
+// its scaling there against CPU references (plane_reference.h), and
 // measures how many pictures a second each size decodes and presents and
 // what each thread's CPU costs per picture. Run by
 // scripts/test/linux-desktop-video.sh, which builds the library and the
@@ -44,6 +45,7 @@
 
 #include "desktop_video_gl.h"
 #include "desktop_video_module.h"
+#include "plane_reference.h"
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -591,6 +593,21 @@ struct PlaneVerification {
   // nothing outside the clip; its grey still; how many pixels differed.
   bool placed = false, greyed = false;
   size_t misplaced = 0, misgreyed = 0;
+  // The picture shrunk, enlarged and sharpened against the CPU references
+  // (plane_reference.h), a line for each case; whether every case drew
+  // with the filter its scale and enhancement call for, matched and left
+  // the rest black.
+  bool scaled = false;
+  std::string scaled_lines;
+  // Where the context mipmaps the picture (`mipmaps_tried`): whether the
+  // mipmapped area filter came closer to the area average than bilinear
+  // does, and left the picture's minifying filter linear; and whether it
+  // made the mipmaps again for another picture in the same texture, but
+  // not for a redraw.
+  bool mipmapped = false, mipmaps_tried = false, remipmapped = false;
+  // Desktop GL 3.3 or later: the draws timed while asked, and how many.
+  bool timer_queries = false;
+  size_t timed = 0;
   // The converter's and the plane's objects deleted in their context.
   bool freed = false;
   // What failed, a GL error included; empty when nothing did.
@@ -641,6 +658,227 @@ std::vector<uint8_t> ReadTexture(GLuint name, uint32_t width, uint32_t height) {
   return rgba;
 }
 
+pb_video::PlaneRect PlaneRectOf(int32_t x, int32_t y, int32_t width, int32_t height) {
+  pb_video::PlaneRect rect;
+  rect.x = x;
+  rect.y = y;
+  rect.width = width;
+  rect.height = height;
+  return rect;
+}
+
+plane_reference::Filter ReferenceFilter(pb_video::PlaneFilter filter) {
+  switch (filter) {
+    case pb_video::PlaneFilter::kArea:
+      return plane_reference::Filter::kArea;
+    case pb_video::PlaneFilter::kAreaMipmapped:
+      return plane_reference::Filter::kBox;
+    case pb_video::PlaneFilter::kSharpen:
+      return plane_reference::Filter::kSharpen;
+    case pb_video::PlaneFilter::kUpscaleSharpen:
+      return plane_reference::Filter::kUpscaleSharpen;
+    case pb_video::PlaneFilter::kNone:
+    case pb_video::PlaneFilter::kBilinear:
+      break;
+  }
+  return plane_reference::Filter::kBilinear;
+}
+
+// The plane's scaling into the bound framebuffer, `frame`'s target: the
+// picture `texture` (`width` x `height`, `picture` its pixels) shrunk,
+// enlarged, sharpened and greyed, each draw with the filter its scale and
+// enhancement call for, against that filter's CPU reference
+// (plane_reference.h) over the visible part, and black around it; where
+// the context mipmaps the picture, the mipmapped area filter against the
+// exact area average, beside bilinear, and its mipmaps made again for
+// another picture in the texture but not for a redraw; and, on desktop GL
+// 3.3 or later, the timer queries.
+void CheckPlaneScaling(pb_video::PlaneGl* plane, GLuint texture, uint32_t width, uint32_t height,
+                       const std::vector<uint8_t>& picture, pb_video::PlaneFrame* frame, PlaneVerification* result) {
+  using pb_video::PlaneFilter;
+  plane_reference::Image source(static_cast<int>(width), static_cast<int>(height));
+  source.rgba = picture;
+  const int32_t w = source.width, h = source.height;
+  const int32_t target_width = frame->target_width, target_height = frame->target_height;
+  const bool desktop = epoxy_is_desktop_gl();
+  const int version = epoxy_gl_version();
+  // GL ES 2 mipmaps a picture whose sides are not powers of two only with
+  // GL_OES_texture_npot.
+  const bool mipmaps = desktop || version >= 30 || epoxy_has_gl_extension("GL_OES_texture_npot");
+  const pb_video::PlaneRect everything = PlaneRectOf(0, 0, target_width, target_height);
+  struct Case {
+    const char* what;
+    pb_video::PlaneRect placed, clip;
+    pb_video::Enhance enhance;
+    bool grey;
+    // What the plane must draw it with.
+    PlaneFilter filter;
+  };
+  // Shrunk on either axis, area-averaged whatever the enhancement, from
+  // mipmaps below a third where the context makes them; enlarged,
+  // bilinear unless enhanced. The 2x case puts the picture's bottom right
+  // corner in view, so that its sharpening meets the picture's edge.
+  const Case cases[] = {
+      {"0.5x", PlaneRectOf(16, 24, w / 2, h / 2), everything, pb_video::Enhance::kOff, false, PlaneFilter::kArea},
+      {"0.75x, enhancement high", PlaneRectOf(5, 7, w * 3 / 4, h * 3 / 4), everything, pb_video::Enhance::kHigh,
+       false, PlaneFilter::kArea},
+      {"0.375x", PlaneRectOf(16, 24, w * 3 / 8, h * 3 / 8), everything, pb_video::Enhance::kOff, false,
+       PlaneFilter::kArea},
+      {"0.25x", PlaneRectOf(16, 24, w / 4, h / 4), everything, pb_video::Enhance::kOff, false,
+       mipmaps ? PlaneFilter::kAreaMipmapped : PlaneFilter::kArea},
+      {"1.5x", PlaneRectOf(-100, -50, w * 3 / 2, h * 3 / 2), everything, pb_video::Enhance::kOff, false,
+       PlaneFilter::kBilinear},
+      {"1:1, enhancement medium", PlaneRectOf(16, 24, w, h), everything, pb_video::Enhance::kMedium, false,
+       PlaneFilter::kSharpen},
+      {"2x, enhancement high", PlaneRectOf(8 - w, 10 - h, w * 2, h * 2), everything, pb_video::Enhance::kHigh, false,
+       PlaneFilter::kUpscaleSharpen},
+      {"1.5x, enhancement low, clipped", PlaneRectOf(-300, -200, w * 3 / 2, h * 3 / 2),
+       PlaneRectOf(40, 30, w - 100, h - 120), pb_video::Enhance::kLow, false, PlaneFilter::kUpscaleSharpen},
+      {"1.25x, enhancement medium, grey", PlaneRectOf(-40, -60, w * 5 / 4, h * 5 / 4), everything,
+       pb_video::Enhance::kMedium, true, PlaneFilter::kUpscaleSharpen},
+  };
+  std::vector<uint8_t> drawn(static_cast<size_t>(target_width) * target_height * 4);
+  const auto read = [&](const pb_video::PlaneRect& visible, plane_reference::Image* inside, size_t* outside) {
+    glReadPixels(0, 0, target_width, target_height, GL_RGBA, GL_UNSIGNED_BYTE, drawn.data());
+    *inside = plane_reference::Image(visible.width, visible.height);
+    *outside = 0;
+    for (int32_t y = 0; y < target_height; ++y) {
+      // GL's rows count from the bottom.
+      const uint8_t* row = &drawn[static_cast<size_t>(target_height - 1 - y) * target_width * 4];
+      for (int32_t x = 0; x < target_width; ++x) {
+        const uint8_t* got = row + static_cast<size_t>(x) * 4;
+        if (x >= visible.x && x < visible.x + visible.width && y >= visible.y && y < visible.y + visible.height) {
+          std::copy(got, got + 4,
+                    &inside->rgba[(static_cast<size_t>(y - visible.y) * visible.width + (x - visible.x)) * 4]);
+        } else if (got[0] > 2 || got[1] > 2 || got[2] > 2) {
+          ++*outside;
+        }
+      }
+    }
+  };
+  result->scaled = true;
+  for (const Case& c : cases) {
+    frame->picture = c.placed;
+    frame->clip = c.clip;
+    frame->grey = c.grey;
+    frame->enhance = c.enhance;
+    std::string fallback;
+    plane->Draw(*frame, &fallback);
+    const pb_video::PlanePlan plan =
+        pb_video::PlanPlane(width, height, c.placed, c.clip, c.enhance, mipmaps, target_width, target_height);
+    const pb_video::PlaneRect& visible = plan.visible;
+    plane_reference::Image inside;
+    size_t outside = 0;
+    read(visible, &inside, &outside);
+    const plane_reference::Image expected = plane_reference::Expected(
+        source, ReferenceFilter(c.filter), c.placed.width, c.placed.height, visible.x - c.placed.x,
+        visible.y - c.placed.y, visible.width, visible.height, pb_video::EnhancePeak(c.enhance), c.grey);
+    const double psnr = plane_reference::Psnr(inside, expected);
+    // The mipmapped filter approximates the exact area average, as closely
+    // as the GL's mipmaps and level of detail allow; the others are their
+    // reference's arithmetic, give or take GL's filtering.
+    const double least = c.filter == PlaneFilter::kAreaMipmapped ? 28 : 38;
+    const bool ok = plan.filter == c.filter && plane->last_filter() == c.filter && fallback.empty() &&
+                    psnr >= least && outside == 0;
+    char line[256];
+    snprintf(line, sizeof(line), "    %s: %s (wanted %s), PSNR %.1f dB, largest difference %d, %zu lit outside%s%s\n",
+             c.what, pb_video::PlaneFilterName(plane->last_filter()), pb_video::PlaneFilterName(c.filter), psnr,
+             plane_reference::MaxDifference(inside, expected), outside, fallback.empty() ? "" : ", fell back: ",
+             fallback.c_str());
+    result->scaled_lines += line;
+    if (!ok) result->scaled = false;
+  }
+  // At 0.25x, where the context mipmaps the picture: the mipmapped filter
+  // against bilinear, both against the exact area average, and the
+  // picture's own minifying filter left linear.
+  const pb_video::PlaneRect quarter = PlaneRectOf(0, 0, w / 4, h / 4);
+  result->mipmaps_tried = mipmaps;
+  if (mipmaps) {
+    frame->picture = quarter;
+    frame->clip = everything;
+    frame->grey = false;
+    frame->enhance = pb_video::Enhance::kOff;
+    const pb_video::PlaneRect visible = quarter;
+    // Draws the quarter and compares it with the area average of `with`.
+    const auto quarter_psnr = [&](const plane_reference::Image& with, bool* drawn_mipmapped) {
+      std::string fallback;
+      plane->Draw(*frame, &fallback);
+      *drawn_mipmapped = plane->last_filter() == PlaneFilter::kAreaMipmapped && fallback.empty();
+      plane_reference::Image inside;
+      size_t outside = 0;
+      read(visible, &inside, &outside);
+      if (outside != 0) *drawn_mipmapped = false;
+      return plane_reference::Psnr(
+          inside, plane_reference::Box(with, quarter.width, quarter.height, 0, 0, quarter.width, quarter.height));
+    };
+    // Another picture: its mipmaps are made again.
+    ++frame->serial;
+    bool first = false;
+    const double filtered = quarter_psnr(source, &first);
+    const plane_reference::Image box = plane_reference::Box(source, quarter.width, quarter.height, 0, 0,
+                                                            quarter.width, quarter.height);
+    const plane_reference::Image bilinear = plane_reference::Stretch(source, quarter.width, quarter.height, 0, 0,
+                                                                     quarter.width, quarter.height);
+    const double plain = plane_reference::Psnr(bilinear, box);
+    GLint filter = 0;
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &filter);
+    result->mipmapped = first && filtered >= plain + 5 && filter == GL_LINEAR;
+    // The same texture given another picture, the first's negative, as the
+    // converter renders each picture into its one texture. Drawn again
+    // under the same serial, a redraw, the plane keeps the mipmaps it made,
+    // so it misses the new picture's average; under the next it makes them
+    // again and meets it.
+    plane_reference::Image negative = source;
+    for (size_t i = 0; i < negative.rgba.size(); ++i) {
+      if (i % 4 != 3) negative.rgba[i] = static_cast<uint8_t>(255 - negative.rgba[i]);
+    }
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA,
+                    GL_UNSIGNED_BYTE, negative.rgba.data());
+    bool redrawn_mipmapped = false, remade_mipmapped = false;
+    const double redrawn = quarter_psnr(negative, &redrawn_mipmapped);
+    ++frame->serial;
+    const double remade = quarter_psnr(negative, &remade_mipmapped);
+    // The picture back for what draws it next, as another picture again.
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA,
+                    GL_UNSIGNED_BYTE, picture.data());
+    ++frame->serial;
+    result->remipmapped =
+        redrawn_mipmapped && remade_mipmapped && remade >= 28 && remade >= filtered - 3 && redrawn <= remade - 6;
+    char line[256];
+    snprintf(line, sizeof(line),
+             "    0.25x against the area average: %.1f dB mipmapped, %.1f dB bilinear; another picture in the "
+             "texture, %.1f dB redrawn, %.1f dB once its mipmaps are made again\n",
+             filtered, plain, redrawn, remade);
+    result->scaled_lines += line;
+  }
+  // The timer queries, which GL ES and desktop GL before 3.3 lack.
+  result->timer_queries = !(desktop && version >= 33);
+  if (desktop && version >= 33) {
+    plane->Time(true);
+    for (int i = 0; i < 10; ++i) {
+      plane->Draw(*frame, nullptr);
+      glFinish();
+    }
+    // A draw reads the answers of the draws before it, and starts one more
+    // query that must not carry into a later timing run.
+    plane->Draw(*frame, nullptr);
+    result->timed = plane->GpuTimes().samples;
+    plane->Time(false);
+    const size_t cleared = plane->GpuTimes().samples;
+    glFinish();
+    plane->Time(true);
+    pb_video::PlaneFrame empty = *frame;
+    empty.texture = 0;
+    plane->Draw(empty, nullptr);
+    const size_t stale = plane->GpuTimes().samples;
+    plane->Time(false);
+    result->timer_queries = result->timed >= 9 && cleared == 0 && stale == 0;
+  }
+}
+
 // Draws the converted picture `texture` (`picture`, its pixels) with the
 // video plane's code into a framebuffer larger than it, placed at (16, 24)
 // and cut to a clip 64 pixels inside it across and 48 down, plain and then
@@ -684,9 +922,20 @@ void CheckPlaneDrawing(GLuint texture, uint32_t width, uint32_t height, const st
   const auto at = [&](const std::vector<uint8_t>& rgba, int32_t x, int32_t y, int32_t stride) {
     return &rgba[(static_cast<size_t>(y) * static_cast<size_t>(stride) + static_cast<size_t>(x)) * 4];
   };
+  pb_video::PlaneFrame frame;
+  frame.texture = texture;
+  frame.width = width;
+  frame.height = height;
+  frame.serial = 1;
+  frame.target_width = target_width;
+  frame.target_height = target_height;
+  std::string fallback;
   for (const bool grey : {false, true}) {
     if (!result->setup) break;
-    plane.Draw(texture, placed, clip, grey, target_width, target_height);
+    frame.picture = placed;
+    frame.clip = clip;
+    frame.grey = grey;
+    plane.Draw(frame, &fallback);
     glReadPixels(0, 0, target_width, target_height, GL_RGBA, GL_UNSIGNED_BYTE, drawn.data());
     size_t wrong = 0;
     for (int32_t y = 0; y < target_height; ++y) {
@@ -717,6 +966,7 @@ void CheckPlaneDrawing(GLuint texture, uint32_t width, uint32_t height, const st
       result->placed = wrong == 0;
     }
   }
+  if (result->setup) CheckPlaneScaling(&plane, texture, width, height, picture, &frame, result);
   // What the plane left bound goes with it; nothing of it stays current.
   glUseProgram(0);
   glBindTexture(GL_TEXTURE_2D, 0);
@@ -1381,10 +1631,12 @@ int main(int argc, char** argv) {
 
   // The video plane (desktop_video_plane.cc) draws in GDK's context: GL ES
   // under GDK_GL=gles, else desktop GL 3.2 or later, which takes GLSL 1.50
-  // and a vertex array object of its own.
+  // and a vertex array object of its own. Its scaling checks draw a few
+  // dozen times in each context, on llvmpipe without a GPU, and compute
+  // their CPU references: the wait allows a slow runner for that.
   printf("the video plane's drawing\n");
   {
-    const Verification checked = raster.Verify(milliseconds(5000), Paths::kPlane);
+    const Verification checked = raster.Verify(milliseconds(20000), Paths::kPlane);
     for (const PlaneVerification* plane : {&checked.plane_es, &checked.plane_desktop}) {
       const bool desktop = plane == &checked.plane_desktop;
       if (!plane->skipped.empty()) {
@@ -1405,6 +1657,21 @@ int main(int argc, char** argv) {
                                                  : "the plane draws in GL ES (GLSL ES 1.00)");
       Check(plane->placed, "the picture lands one to one and upright where it is placed, cut to the clip, black around");
       Check(plane->greyed, "the grey still is the luma at half brightness");
+      printf("  scaled:\n%s", plane->scaled_lines.c_str());
+      Check(plane->scaled,
+            "shrunk it is area-averaged, enlarged bilinear or, enhanced, Catmull-Rom and sharpened, as the CPU "
+            "references, black around");
+      if (plane->mipmaps_tried) {
+        Check(plane->mipmapped, "below a third, from mipmaps made for the picture, far closer to the area average "
+                                "than bilinear, the picture's own filter left linear");
+        Check(plane->remipmapped, "the mipmaps are made again for another picture in the texture, not for a redraw");
+      } else {
+        printf("  this context does not mipmap the picture: below a third it is area-averaged without\n");
+      }
+      if (desktop) {
+        printf("  %zu draws timed\n", plane->timed);
+        Check(plane->timer_queries, "it times its passes while asked, where GL has timer queries, and then stops");
+      }
       Check(plane->failure.empty(), desktop ? "nothing of the plane fails in desktop GL or raises a GL error there"
                                             : "nothing of the plane's drawing fails or raises a GL error");
       if (desktop) Check(plane->freed, "the plane's converter deletes its texture in its own context");

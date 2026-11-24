@@ -79,7 +79,8 @@ Future<void> main() async {
       .where((r) => r.wire == resolutionName)
       .firstOrNull;
   const maxFps = int.fromEnvironment('maxFps');
-  // How much the macOS layer presenter sharpens an enlarged picture.
+  // How much the runner sharpens an enlarged picture: the macOS layer
+  // presenter or the Linux video plane.
   final enhance =
       PictureEnhancement.values.asNameMap()[const String.fromEnvironment(
         'enhance',
@@ -214,8 +215,10 @@ Future<void> main() async {
       // whether the Linux runner gave it, which it may refuse.
       'presenter': desktopVideoPresenter,
       'plane': texture?.plane ?? false,
-      // Asked of a layer presenter; each sample's `native.enhanced` says
-      // whether its metal layer showed the picture, at what size.
+      // Asked of a layer presenter or the Linux plane; each sample's
+      // `native.enhanced` says whether the layer's metal layer showed the
+      // picture, at what size, and the plane's `native.planeFilter` how it
+      // scaled it.
       'enhance': enhance.name,
       'transport': config['transport'],
       'seconds': seconds,

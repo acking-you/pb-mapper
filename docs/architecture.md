@@ -939,8 +939,9 @@ The design and its rules are in `docs/ui-design.md`.
     GStreamer module `linux/runner/desktop_video_gst.cc`, behind the C
     interface `desktop_video_module.h` and loaded with `dlopen`, which
     places its decoders on GPUs with `linux/runner/desktop_video_device.cc`,
-    the GPU conversion `linux/runner/desktop_video_gl.cc`, and the opt-in
-    video plane under the Flutter view `linux/runner/desktop_video_plane.cc`), or the
+    the GPU conversion and the plane's drawing and scaling
+    `linux/runner/desktop_video_gl.cc`, and the opt-in video plane under
+    the Flutter view `linux/runner/desktop_video_plane.cc`), or the
     Android feeder; so H.264 and H.265 never pass through Dart. Where there
     is no decoder (Windows without Media Foundation, Linux without
     GStreamer's decoders) it is Dart's JPEG isolate. A unit's
