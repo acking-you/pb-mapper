@@ -1226,8 +1226,9 @@ where that fits. Seven rules carry it:
 4. **Infinite GOP.** IDRs are sent only on demand and are rate-limited on both
    sides. Requests are deferred and coalesced, never dropped.
 5. **The viewer owns presentation lag.** Its sink keeps only the newest
-   decodable frames, drops to the next IDR when it falls behind, and caps the
-   host's frame rate to what it actually presents.
+   decodable frames; when the decoder falls behind it asks for an IDR and
+   drains what queued until that IDR supersedes it, and it caps the host's
+   frame rate below what the decoder can take.
 6. **Input is authorised only by presentation.** A validated presentation is
    the only thing that admits input. Input is drained ahead of capture on the
    one desktop-bound thread, and the receive task never waits for it.
@@ -1648,21 +1649,61 @@ it. The sink keeps only what is still worth decoding:
 
 - An arriving IDR supersedes everything queued, marked as a discontinuity.
 - When the oldest queued unit is older than 250 ms with at least three queued,
-  and the consumer last took an IDR more than 500 ms ago, the sink drops to
-  the next IDR and asks for one. Before the consumer takes its first IDR,
-  nothing is dropped for age: what queued is the hand-off to a consumer still
-  attaching. Overflow (32 units or 8 MiB) drops the same way at any time.
-- A P-frame that arrives while an IDR is awaited is dropped. A new generation
-  starts at an IDR. JPEG keeps only the newest picture.
+  and the consumer last took an IDR more than 500 ms ago, the consumer fell
+  behind: the sink opens a backlog episode and asks for an IDR, once. It
+  keeps the queue, so a consumer back from a stall drains it and shows newer
+  and newer pictures instead of a frozen one, until the IDR arrives and
+  supersedes what is left; the episode also ends once the oldest queued unit
+  is younger than 125 ms. Before the consumer takes its first IDR, no episode
+  opens: what queued is the hand-off to a consumer still attaching.
+- Overflow (32 units or 8 MiB) drops the queue to the next IDR at any time and
+  asks for one. That bounds memory and the lag shown.
+- After an overflow, a new generation or a pause, a P-frame that arrives before
+  the IDR is dropped. A new generation starts at an IDR. JPEG keeps only the
+  newest picture.
 
 Backlog also lowers the host's frame rate. Every 250 ms while streaming, from
-500 ms after the consumer took its first IDR, the fps cap compares the queue
-with what the consumer presented in the last second. More than two queued on
-two consecutive ticks, or a backlog drop from then on, sends
-`floor(presented × 0.9)` direct or `× 0.8` relayed, at least 5 and at least half
-the current cap, at most once a second. After 3 s with at most one queued it
-rises by 5, and at the preset's ceiling it is removed. Only backlog lowers it,
-so a phone that keeps up, or a static desktop, never ratchets the host down.
+500 ms after the consumer took its first IDR, the fps cap looks at the queue
+and at what the consumer takes:
+
+- A tick in which the consumer took units and never found the queue empty kept
+  it busy. Its pulls over the busy ticks among the last eight, once there are
+  four, are its capacity: what it can decode, which presentation alone cannot
+  tell.
+- The turnaround is the time from handing a unit out to its accepted
+  presentation. A decoder that queues inside itself (the Linux runner keeps up
+  to four units in its GStreamer pipeline, and Android's MediaCodec holds a
+  few) hides a
+  backlog from the sink's queue, but its turnaround rises by a decode time for
+  each unit it holds. The turnaround is late when its median over the last
+  second exceeds its least over the last ten seconds by more than two frame
+  intervals at the cap, and at least 40 ms.
+
+More than two queued on two consecutive ticks, a backlog episode or an overflow
+from then on, or a late turnaround on two consecutive ticks, lowers the cap to
+`floor(capacity × 0.9)` direct or `× 0.8` relayed, at least 5, at most once a
+second. Without a measured capacity it uses what the consumer presented in the
+last second, and then at most halves the cap at once. The cap remembers the
+capacity it lowered to.
+
+After 3 s with at most one queued and the turnaround on time, the cap rises
+once a second: by 5 at a 30 fps ceiling and in proportion above it (10 at 60,
+20 at 120), or by a quarter of the cap when that is more, but no further than
+95% of a remembered capacity. Above that a rise is a probe of a tenth of the
+capacity, watched for 3 s. Two queued with the oldest waiting more than two
+frame intervals at the probed cap (at least 40 ms), a late turnaround, a
+backlog episode or the consumer busy four ticks in a row take it back at once,
+whatever the 1 s spacing, and the next probe waits 3 s, doubling to 60 s. A
+probe that holds resets that wait, and the next may follow at once. The
+capacity is forgotten when a probe holds at 1.1 times it or more, and on a
+new generation, a new picture size or a preset change. A consumer takes at
+least one unit per median turnaround, so when that rate is 1.1 times the
+capacity or more it becomes the capacity: a decoder that got faster, or one
+only its presentations had measured, is not held below what it shows it can
+take, while probes above it keep their wait. At the preset's ceiling the cap
+is removed.
+Only backlog lowers it, so a phone that keeps up, or a static desktop, never
+ratchets the host down.
 
 One limiter covers every keyframe request: the decoder's, the sink's drops and
 the user's. While waiting for an IDR it asks at once (or after a 1 s hold that
@@ -1816,8 +1857,8 @@ shapes by content, never by number.
 | QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves; Balanced starts at its ceiling after a first probe under 50 ms; tick 250 ms; bits-per-frame window 3 s; latch at 1.3 × over 2 windows at ≤ 0.75 × nominal |
 | Process timers | 1 ms, with power throttling opted out, while a session captures |
 | IDR | host minimum interval 300 ms; viewer minimum 500 ms, backoff to 4 s; 1 s hold after a discontinuity |
-| Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued; IDR grace 500 ms; stall watchdog 700 ms |
-| fps cap | tick 250 ms; × 0.9 direct, × 0.8 relay; minimum 5; +5 after 3 s; ≥ 1 s between changes |
+| Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued, drained until the IDR or a head under 125 ms; IDR grace 500 ms; stall watchdog 700 ms |
+| fps cap | tick 250 ms; capacity from ≥ 4 busy ticks of the last 8; × 0.9 direct, × 0.8 relay; minimum 5; after 3 s, +5 per 30 fps of ceiling or a quarter of the cap, up to 95% of the capacity; probes of 10% watched 3 s, backoff 3 s doubling to 60 s; turnaround late past 2 frame intervals (≥ 40 ms) over its 10 s floor; ≥ 1 s between changes but for a probe taken back |
 | Input | viewer queue 512 events or 256 KiB, batches of 16; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input |
 | Cursor | sampled every 16 ms; the controller's own move never reported; a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated, the pointer shows on the shared display and the OS pointer changed (a failed read again after 250 ms), an image over 1024 px a side never, 1 to 256 px a side sent, 64 slots on each end |
 | Codec | `Accepted` waits at most 3 s for the backend's display and H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3 |
@@ -2246,8 +2287,9 @@ loaded with `dlopen` at the first probe or session, so the app starts without
 it). Each source's decoder thread pulls straight into pooled `GstBuffer`s
 (one copy of the compressed data) and feeds `appsrc → h264parse/h265parse →
 decoder → videoconvert → appsink` (RGBA), pulling the next unit only while
-fewer than four are inside the pipeline, so a backlog stays in Rust's sink,
-which drops to an IDR. Decoders are chosen from the registry, hardware first
+fewer than four are inside the pipeline, so a longer backlog stays in Rust's
+sink, which drains it while an IDR is on its way; the units inside show in the
+turnaround the fps cap watches. Decoders are chosen from the registry, hardware first
 (VA-API, NVDEC, V4L2) and then by rank; one that fails to start is skipped,
 and one that fails or stalls before its first picture is left out for the
 rest of the run (and from later probes), so the next keyframe falls back to
@@ -2422,6 +2464,16 @@ decoder asks for an IDR every 2 s and discards what arrives before it, and
 unlimited link asks instead. Each reports how long every IDR took to arrive
 and the P-frames that came first, the viewer's requests, its sink's discards
 and the host's dropped frames and IDRs. No run of them is recorded yet.
+
+Six cases cover the viewer's fps cap and its backlog, all on simulated
+decoders: `slow_decoder_speeds_up` (67 ms a frame for 20 s, then 5 ms),
+`pipelined_slow_consumer` (four units held inside, as the Linux runner holds
+them, decoded at 67 ms each), `fast_consumer_at_120` (10 ms a frame at 120
+FPS), `injected_backlog_at_120_recovers` (one second at 20 ms a frame in a
+120 FPS session on the short path) and `consumer_stall_drains` with its
+1 Mbit/s twin (a 2 ms decoder that stalls once for 400 ms). The 67 ms decoder
+case now runs 60 s. [Viewer fps cap measurements](benchmarks/2026-11-24-viewer-fps-cap/README.md)
+has three runs of each before and after the cap measured its decoder.
 
 `video_bench 10 60 --animate --max-width 1920 --max-height 1080` still reaches
 59.9 unique capture and encode FPS at a mean 1.9 ms encode with one unit in
