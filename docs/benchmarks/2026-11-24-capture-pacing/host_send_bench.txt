@@ -1,0 +1,48 @@
+# RUST_LOG=off host_send_bench; Apple M6, 12 cores, 24 GiB, macOS 27.0 (26A425), Rust 1.99.1, release builds
+# order: master 1515eda, then this branch at cb53294 (the code of c24e7c0), alternating, three runs each
+== master 1515eda 1
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1129 allocs_per_unit=18.82 alloc_bytes_per_unit=40197
+case=video+pointer units_per_s=60.2 inputs_per_s=249.9 allocs_per_s=3528 allocs_per_unit=58.62 alloc_bytes_per_unit=46992
+case=2viewers+pointer units_per_s=59.9 inputs_per_s=498.0 allocs_per_s=9976 allocs_per_unit=166.46 alloc_bytes_per_unit=100315
+case=peer_cursor samples=256 p50_us=159 p95_us=666 p99_us=2560
+== branch 1
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1129 allocs_per_unit=18.83 alloc_bytes_per_unit=40176
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3525 allocs_per_unit=58.77 alloc_bytes_per_unit=47059
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.9 allocs_per_s=10021 allocs_per_unit=167.04 alloc_bytes_per_unit=100434
+case=peer_cursor samples=256 p50_us=154 p95_us=313 p99_us=315
+== master 1515eda 2
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1133 allocs_per_unit=18.88 alloc_bytes_per_unit=40198
+case=video+pointer units_per_s=60.0 inputs_per_s=249.1 allocs_per_s=3515 allocs_per_unit=58.60 alloc_bytes_per_unit=46994
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.3 allocs_per_s=10016 allocs_per_unit=166.96 alloc_bytes_per_unit=100392
+case=peer_cursor samples=256 p50_us=158 p95_us=371 p99_us=882
+== branch 2
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1129 allocs_per_unit=18.83 alloc_bytes_per_unit=40202
+case=video+pointer units_per_s=60.0 inputs_per_s=244.8 allocs_per_s=3462 allocs_per_unit=57.71 alloc_bytes_per_unit=46920
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=484.3 allocs_per_s=9557 allocs_per_unit=159.33 alloc_bytes_per_unit=99088
+case=peer_cursor samples=256 p50_us=157 p95_us=315 p99_us=325
+== master 1515eda 3
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1127 allocs_per_unit=18.79 alloc_bytes_per_unit=40188
+case=video+pointer units_per_s=59.8 inputs_per_s=247.3 allocs_per_s=3490 allocs_per_unit=58.39 alloc_bytes_per_unit=47010
+case=2viewers+pointer units_per_s=60.2 inputs_per_s=492.9 allocs_per_s=9829 allocs_per_unit=163.30 alloc_bytes_per_unit=99722
+case=peer_cursor samples=256 p50_us=158 p95_us=402 p99_us=936
+== branch 3
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1130 allocs_per_unit=18.84 alloc_bytes_per_unit=40183
+case=video+pointer units_per_s=60.0 inputs_per_s=249.7 allocs_per_s=3522 allocs_per_unit=58.71 alloc_bytes_per_unit=47066
+case=2viewers+pointer units_per_s=59.8 inputs_per_s=489.6 allocs_per_s=9658 allocs_per_unit=161.58 alloc_bytes_per_unit=99486
+case=peer_cursor samples=256 p50_us=157 p95_us=271 p99_us=319
+# after review: this branch at eeff0ec, the same command and machine, three runs back to back (no master runs between them)
+== review fixes 1
+case=video units_per_s=60.2 inputs_per_s=0.0 allocs_per_s=1133 allocs_per_unit=18.82 alloc_bytes_per_unit=40136
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3529 allocs_per_unit=58.84 alloc_bytes_per_unit=47060
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.4 allocs_per_s=10027 allocs_per_unit=167.18 alloc_bytes_per_unit=100423
+case=peer_cursor samples=256 p50_us=157 p95_us=322 p99_us=476
+== review fixes 2
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1135 allocs_per_unit=18.91 alloc_bytes_per_unit=40242
+case=video+pointer units_per_s=59.8 inputs_per_s=247.0 allocs_per_s=3489 allocs_per_unit=58.36 alloc_bytes_per_unit=47018
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.9 allocs_per_s=10027 allocs_per_unit=167.17 alloc_bytes_per_unit=100438
+case=peer_cursor samples=256 p50_us=156 p95_us=313 p99_us=318
+== review fixes 3
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1130 allocs_per_unit=18.83 alloc_bytes_per_unit=40184
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3528 allocs_per_unit=58.83 alloc_bytes_per_unit=47087
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.8 allocs_per_s=10032 allocs_per_unit=167.26 alloc_bytes_per_unit=100442
+case=peer_cursor samples=256 p50_us=156 p95_us=312 p99_us=317

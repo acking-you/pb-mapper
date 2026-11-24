@@ -8,6 +8,9 @@
 //! - `--pattern-only`: animate the pattern window; no encoder runs here.
 //! - `--animate`: animate the pattern window and encode it.
 //! - `--backend`: drive the SDK backend instead of the encoder.
+//! - `--grid`: pace on the even grid, as thread C did before it anchored
+//!   ticks on presents (each consume undated), while still measuring the
+//!   wait from each dated present: the baseline arm of a pacing comparison.
 //! - `--pace 60,30,15,5`: encode `seconds` at each pace, at the nominal `fps`,
 //!   and classify the encoder's rate model against the produced bitrate. It
 //!   animates the pattern. The budget per frame (bitrate / nominal fps) must
@@ -32,13 +35,25 @@
 //! and the cycles its thread ran in them, per access unit; and the median and
 //! mean of each of a submit that converted a capture and of a drain that
 //! returned a unit. Either way it prints the capture calls per second, and
-//! the polls among them: the calls that found nothing new.
+//! the polls among them: the calls that found nothing new; and, with thread
+//! C's own pacer anchoring each tick on the present it took (unless
+//! `--grid`), the wait from a present to the submit that took it (p50 and
+//! p95), the share of submits whose picture was dated, and the presents no
+//! submitted picture showed (`coalesced_presents`: for each dated picture,
+//! the presents it covers beyond one, as thread C's `coalesced_per_s`
+//! counts them). It also prints how long the first access unit took from the
+//! start of the paced loop, and, driving the encoder, what the duplication's
+//! first frame reported (`first_acquire_*`).
 #[cfg(windows)]
 mod probe_support;
 // The `--pace` classifier, shared with the macOS encoder's measurement test.
 #[cfg(windows)]
 #[path = "../src/codec/rate_fit.rs"]
 mod rate_fit;
+// Thread C's capture pacer itself.
+#[cfg(windows)]
+#[path = "../src/pacer.rs"]
+mod pacer;
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -107,7 +122,7 @@ mod counting {
 /// The benchmark: its options, the paced loop and the report.
 #[cfg(windows)]
 mod bench {
-    use crate::{pattern::Pattern, probe_support::option};
+    use crate::{pacer::Pacer, pattern::Pattern, probe_support::option};
     use pb_mapper_desktop::{
         Backend, DRAIN_POLL, Display, DisplaySelection, NativeBackend, VideoCodec, VideoLimits,
         VideoRate, displays, native_backend,
@@ -283,6 +298,14 @@ mod bench {
         sorted.get(sorted.len() / 2).copied().unwrap_or(0.0)
     }
 
+    /// The `percent` quantile of `samples`, 0 without any.
+    fn quantile(samples: &[f64], percent: usize) -> f64 {
+        let mut sorted = samples.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        let at = (sorted.len() * percent / 100).min(sorted.len().saturating_sub(1));
+        sorted.get(at).copied().unwrap_or(0.0)
+    }
+
     fn mean(samples: &[f64]) -> f64 {
         samples.iter().sum::<f64>() / samples.len().max(1) as f64
     }
@@ -358,6 +381,8 @@ mod bench {
     struct Limits {
         /// Drive the SDK backend instead of the encoder.
         backend: bool,
+        /// Pace on the even grid, never anchored on a present.
+        grid: bool,
         max_width: u32,
         max_height: u32,
         bitrate: u32,
@@ -370,6 +395,7 @@ mod bench {
         /// The limits, and the files they name, created as they are read.
         fn parse(args: &[String], rates: &Rates, display: &Display) -> Result<(Self, Sinks)> {
             let backend = flag(args, "--backend");
+            let grid = flag(args, "--grid");
             let max_width = option(args, "--max-width")
                 .map(str::parse)
                 .transpose()?
@@ -414,6 +440,7 @@ mod bench {
             }
             let limits = Self {
                 backend,
+                grid,
                 max_width,
                 max_height,
                 bitrate,
@@ -485,6 +512,14 @@ mod bench {
         /// polls a still or slowly changing desktop costs.
         captures: u64,
         polls: u64,
+        /// Submits that spent their tick, and from each dated picture's
+        /// present to the submit that took it, in milliseconds.
+        submits: u64,
+        present_waits: Vec<f64>,
+        /// The presents the dated pictures covered beyond one each.
+        coalesced: u64,
+        /// From the start of the paced loop to the first access unit.
+        first_unit: Option<Duration>,
         /// What the encoder's own calls allocated, and bytes asked for.
         encoder_allocations: (u64, u64),
         /// Every encoder call, an empty drain or a submit that took nothing
@@ -587,10 +622,10 @@ mod bench {
         start: Instant,
     ) -> Result {
         let mut current_bitrate = limits.bitrate;
+        let mut pacer = Pacer::new(rates.fps, start);
         for (step, &pace) in steps.iter().enumerate() {
             let step_start = Instant::now();
-            let period = Duration::from_secs(1) / pace;
-            let mut next_tick = step_start;
+            pacer.set_pace(pace, step_start);
             // An armed tick's next poll, and until when polls come every
             // `DRAIN_POLL`.
             let mut poll_due: Option<Instant> = None;
@@ -617,7 +652,7 @@ mod bench {
                     pace_fps: pace,
                 };
                 let now = Instant::now();
-                let tick = now >= poll_due.map_or(next_tick, |due| due.max(next_tick));
+                let tick = pacer.due(now) && poll_due.is_none_or(|due| now >= due);
                 let force =
                     tick && tally.forced == 0 && start.elapsed() > Duration::from_millis(1500);
                 if force {
@@ -625,8 +660,9 @@ mod bench {
                     tally.pending_idr = Some(now);
                 }
                 let mut ready = Vec::new();
-                // Whether the tick's capture spent it.
-                let spent = match coder {
+                // Whether the tick's capture spent it, and when the display
+                // presented the picture it submitted.
+                let (spent, presented) = match coder {
                     Coder::Encoder(encoder) => {
                         encoder.set_rate(rate)?;
                         loop {
@@ -652,9 +688,9 @@ mod bench {
                                 tally.submit_us.push(took.as_secs_f64() * 1e6);
                                 tally.submit_kcycles.push(ran as f64 / 1e3);
                             }
-                            outcome.spends_tick()
+                            (outcome.spends_tick(), encoder.presented())
                         } else {
-                            false
+                            (false, None)
                         }
                     }
                     Coder::Backend(backend) => {
@@ -680,7 +716,8 @@ mod bench {
                             encode_us: frame.format.encode_us,
                             gop: frame.format.gop,
                         }));
-                        tick && backend.submitted_video()
+                        let spent = tick && backend.submitted_video();
+                        (spent, backend.submitted_picture().filter(|_| spent))
                     }
                 };
                 // As thread C: a new picture this round collected makes the
@@ -689,12 +726,28 @@ mod bench {
                     if !frame.duplicate {
                         hot_until = Instant::now() + HOT_WINDOW;
                     }
+                    if tally.first_unit.is_none() {
+                        tally.first_unit = Some(start.elapsed());
+                    }
                     tally.record(&frame, step, step_start, sinks, limits.pause_ms)?;
                 }
                 if tick {
                     tally.captures += 1;
                     if spent {
-                        next_tick = (next_tick + period).max(now + period * 3 / 4);
+                        tally.submits += 1;
+                        if let Some(presented) = presented {
+                            let waited = now.saturating_duration_since(presented.at);
+                            tally.present_waits.push(waited.as_secs_f64() * 1e3);
+                            tally.coalesced += u64::from(presented.presents.saturating_sub(1));
+                        }
+                        // As thread C: a dated picture anchors the next tick,
+                        // unless the grid is the arm measured.
+                        pacer.consume(
+                            now,
+                            presented
+                                .filter(|_| !limits.grid)
+                                .map(|presented| (presented.at, presented.presents)),
+                        );
                         poll_due = None;
                     } else {
                         tally.polls += 1;
@@ -702,7 +755,7 @@ mod bench {
                         poll_due = Some(if done < hot_until {
                             done + DRAIN_POLL
                         } else {
-                            done + DRAIN_POLL.max(period)
+                            done + DRAIN_POLL.max(pacer.period())
                         });
                     }
                 }
@@ -711,9 +764,10 @@ mod bench {
                 } else {
                     Duration::from_millis(1)
                 };
+                let earliest = pacer.earliest();
                 std::thread::sleep(
                     poll_due
-                        .map_or(next_tick, |due| due.max(next_tick))
+                        .map_or(earliest, |due| due.max(earliest))
                         .saturating_duration_since(Instant::now())
                         .min(idle),
                 );
@@ -792,6 +846,25 @@ mod bench {
             tally.polls,
             tally.polls as f64 / elapsed,
         );
+        println!(
+            "pacing={} dated_submits={} of {} present_to_submit_p50_ms={:.3} present_to_submit_p95_ms={:.3} coalesced_presents={} coalesced_presents_per_s={:.2}",
+            if limits.grid { "grid" } else { "anchored" },
+            tally.present_waits.len(),
+            tally.submits,
+            quantile(&tally.present_waits, 50),
+            quantile(&tally.present_waits, 95),
+            tally.coalesced,
+            tally.coalesced as f64 / elapsed,
+        );
+        if let Some(first) = tally.first_unit {
+            println!("first_access_unit_ms={:.1}", first.as_secs_f64() * 1e3);
+        }
+        if let Some(first) = stats.first_acquire {
+            println!(
+                "first_acquire_last_present_time={} first_acquire_accumulated_frames={} first_acquire_resource={}",
+                first.last_present_time, first.accumulated_frames, first.resource
+            );
+        }
         if let Some(paces) = &rates.paces {
             // `Nominal` encoders budget each frame from the nominal rate, so their
             // bitrate falls with the pace; `Timestamp` encoders hold the target.

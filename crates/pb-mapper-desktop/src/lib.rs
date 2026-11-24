@@ -57,7 +57,7 @@ use std::io;
 
 pub use backend::{
     Backend, BackendCaps, BackendError, CursorMode, DRAIN_POLL, Description, FailureKind, HostOs,
-    Permission, Waker, failure_kind, missing_permission,
+    Permission, Presented, Waker, failure_kind, missing_permission,
 };
 pub use host::{Access, Custom, DisplaySelection, Host, HostBuilder, HostOptions, Native};
 pub use input::cursor::{CursorKind, CursorShape};
