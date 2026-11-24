@@ -8,7 +8,7 @@ use super::{
     grant_fits,
     lan::Assessment,
     link::{counts, direct_link, lan_missed, log_path, stun_timings, summary},
-    memory::{Cooldown, Pauses, SharedPauses},
+    memory::{Cooldown, PauseScope, Pauses, SharedPauses},
     reports::{self, REPORT_INTERVAL, SessionReporter, Sink},
     tcp,
 };
@@ -30,7 +30,15 @@ use pb_mapper_protocol::{
     direct::*,
     forward::{ByteMeter, StreamForward},
 };
-use std::{io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    io,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{
     sync::{Mutex, OnceCell},
     time::Instant,
@@ -53,6 +61,17 @@ const _: () = assert!(
     "RetryBackoff needs a first wait, and a cap no shorter"
 );
 
+/// What a fallback says of the path, for pauses that outlive the consumer:
+/// see [`PauseScope::Client`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Says {
+    /// That it will not punch for a while.
+    Unpunchable,
+    /// Nothing: the setup found no publisher to go direct to, or no
+    /// coordinator.
+    Nothing,
+}
+
 pub(crate) struct Consumer {
     remote: RelayEndpoint,
     credential: Credential,
@@ -69,12 +88,16 @@ pub(crate) struct Consumer {
     /// own, or shared with its client's other `connect_tcp` calls to the
     /// service.
     pauses: SharedPauses,
+    /// `Some` when `pauses` are the client's: whether this consumer's
+    /// fallback said the path will not punch, which pauses direct once the
+    /// relay carries the connection.
+    unpunchable: Option<AtomicBool>,
     policy: crate::direct_policy::DirectPolicy,
 }
 impl Consumer {
     #[expect(
         clippy::too_many_arguments,
-        reason = "a tunnel's settings, and the pauses it shares"
+        reason = "a tunnel's settings, and the pauses it goes by"
     )]
     pub fn new(
         remote: RelayEndpoint,
@@ -84,8 +107,12 @@ impl Consumer {
         keep_alive: bool,
         diagnostics: Diagnostics,
         policy: crate::direct_policy::DirectPolicy,
-        pauses: SharedPauses,
+        scope: PauseScope,
     ) -> Arc<Self> {
+        let (pauses, unpunchable) = match scope {
+            PauseScope::Own => (SharedPauses::default(), None),
+            PauseScope::Client(pauses) => (pauses, Some(AtomicBool::new(false))),
+        };
         let control = Arc::new(Mutex::new(None::<Arc<Control>>));
         let reports = Arc::new(reports::Latest::default());
         let report_wake = Arc::new(tokio::sync::Notify::new());
@@ -110,6 +137,7 @@ impl Consumer {
             network: OnceCell::new(),
             diagnostics,
             pauses,
+            unpunchable,
             policy,
         })
     }
@@ -171,6 +199,31 @@ impl Consumer {
         cooldown.back_off(Instant::now());
         self.diagnostics.direct_cooldown(cooldown.until());
     }
+    /// A setup fell back, saying `says` of the path. A listener's own
+    /// pauses take every fallback at once; a client's, only one that says
+    /// the path will not punch, once the relay carries it.
+    fn fell_back(&self, says: Says) {
+        match &self.unpunchable {
+            None => self.back_off(),
+            Some(unpunchable) => {
+                if says == Says::Unpunchable {
+                    unpunchable.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    /// The relay carries the connection this consumer fell back for: if its
+    /// fallback said the path will not punch, pause direct for its client's
+    /// next calls to the service.
+    pub fn relay_carried(&self) {
+        if self
+            .unpunchable
+            .as_ref()
+            .is_some_and(|unpunchable| unpunchable.swap(false, Ordering::Relaxed))
+        {
+            self.back_off();
+        }
+    }
     fn clear_cooldown(&self) {
         self.cooldown().clear();
         self.diagnostics.direct_cooldown(None);
@@ -202,10 +255,10 @@ impl Consumer {
             ..
         } = response
         else {
-            tracing::debug!(service = %key, "relay or publisher does not offer direct");
+            tracing::debug!(service = %key, "relay does not offer direct");
             *slot = None;
             // Set before the lock is released, so no queued setup repeats the query.
-            self.back_off();
+            self.fell_back(Says::Unpunchable);
             return Ok(None);
         };
         if capability.version != DIRECT_VERSION {
@@ -213,7 +266,7 @@ impl Consumer {
                 version = capability.version,
                 "unsupported direct coordination version"
             );
-            self.back_off();
+            self.fell_back(Says::Unpunchable);
             return Ok(None);
         }
         let control = Control::connect(&self.remote, self.credential, self.namespace).await?;
@@ -264,19 +317,22 @@ impl Consumer {
         .await
         {
             Ok(Ok(Some(negotiated))) => Ok(negotiated),
-            Ok(Ok(None)) => Err(FallbackReason::NotOffered),
+            // No direct registration to grant: the publisher may be away,
+            // restarting or without direct. A relay without direct said so
+            // where it answered.
+            Ok(Ok(None)) => Err((FallbackReason::NotOffered, Says::Nothing)),
             Ok(Err(error)) => {
                 tracing::debug!(%error, "direct coordination or discovery failed before a grant");
-                Err(FallbackReason::NegotiationFailed)
+                Err((FallbackReason::NegotiationFailed, Says::Nothing))
             }
-            Err(_) => Err(FallbackReason::NegotiationTimeout),
+            Err(_) => Err((FallbackReason::NegotiationTimeout, Says::Unpunchable)),
         };
         let (control, network, discovered, grant) = match negotiated {
             Ok(negotiated) => negotiated,
-            Err(reason) => {
+            Err((reason, says)) => {
                 tracing::info!(event = "session_path_selected", path = "relay", service = %key, reason = reason.as_str());
                 attempt.fell_back(reason);
-                self.back_off();
+                self.fell_back(says);
                 return Ok(None);
             }
         };
@@ -322,12 +378,11 @@ impl Consumer {
                 lan_missed(&self.diagnostics, &lan, None);
                 self.tcp_settled(tcp_missed, None);
                 attempt.fell_back(FallbackReason::Unreachable);
-                self.back_off();
+                self.fell_back(Says::Unpunchable);
                 network.punching_failed();
-                return self
-                    .relay(key, &control, grant, &mut pending)
-                    .await
-                    .map(Some);
+                let relayed = self.relay(key, &control, grant, &mut pending).await?;
+                self.relay_carried();
+                return Ok(Some(relayed));
             }
         };
         // From this point on, timeout/cancellation/ACK loss MUST NOT select relay.

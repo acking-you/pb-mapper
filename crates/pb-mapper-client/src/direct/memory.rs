@@ -5,7 +5,8 @@
 //! accepts. A `Client` keeps one per service in its [`DirectMemory`] for its
 //! `connect_tcp` calls, each of which sets up a consumer of its own: without
 //! it, every reconnect over a path that cannot be punched would spend the
-//! whole setup budget again.
+//! whole setup budget again. Which fallbacks pause the client's is narrower:
+//! see [`PauseScope::Client`].
 use pb_mapper_core::timeout::RetryBackoff;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::time::Instant;
@@ -119,6 +120,24 @@ impl Pauses {
 /// Pauses one or more consumers share.
 pub(crate) type SharedPauses = Arc<parking_lot::Mutex<Pauses>>;
 
+/// Whose pauses a consumer's setups go by, and so which fallbacks pause
+/// them.
+pub(crate) enum PauseScope {
+    /// Its own, for every stream of its listener: every fallback pauses
+    /// direct at once, so that streams queued behind it ask no further.
+    Own,
+    /// Its client's for the service, which the client's later `connect_tcp`
+    /// calls go by. Each of those decides its path once, for its whole
+    /// session, so only a fallback that says the path will not punch pauses
+    /// them: a relay without direct, a granted punch that found no way
+    /// through, or negotiating past its budget. Even that pauses them only
+    /// once the relay has carried the connection, which shows that the
+    /// relay and the publisher were there. A publisher that was away or had
+    /// no direct registration, or a relay that could not be reached, leaves
+    /// them as they were.
+    Client(SharedPauses),
+}
+
 /// What a `Client`'s `connect_tcp` calls learn of direct, by service, so
 /// that a fallback in one pauses direct for the next calls to that service.
 ///
@@ -132,15 +151,19 @@ pub(crate) struct DirectMemory {
 
 impl DirectMemory {
     /// The pauses of `service`, kept from now on. Past the bound, the
-    /// services that hold nothing back at `now` on network `generation` are
-    /// forgotten first, then the one whose pause ends soonest.
+    /// services that no call is setting up or carrying and that hold nothing
+    /// back at `now` on network `generation` are forgotten first, then the
+    /// one whose pause ends soonest.
     pub(crate) fn pauses(&mut self, service: &str, now: Instant, generation: u64) -> SharedPauses {
         if let Some(pauses) = self.services.get(service) {
             return pauses.clone();
         }
         if self.services.len() >= MAX_SERVICES {
-            self.services
-                .retain(|_, pauses| !pauses.lock().idle(now, generation));
+            // A running call holds its service's pauses, and may yet pause
+            // them once the relay carries it.
+            self.services.retain(|_, pauses| {
+                Arc::strong_count(pauses) > 1 || !pauses.lock().idle(now, generation)
+            });
         }
         if self.services.len() >= MAX_SERVICES
             && let Some(soonest) = self

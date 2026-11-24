@@ -17,7 +17,7 @@ mod socket;
 mod tcp;
 
 pub(crate) use consumer::Consumer;
-pub(crate) use memory::{DirectMemory, SharedPauses};
+pub(crate) use memory::{DirectMemory, PauseScope};
 use pb_mapper_protocol::direct::{SETUP_TTL_MS, SessionGrant};
 pub(crate) use provider::{MAX_SESSIONS as MAX_PROVIDER_SESSIONS, Provider};
 

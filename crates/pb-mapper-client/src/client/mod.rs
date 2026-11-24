@@ -271,7 +271,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
             keep_alive,
             diagnostics.clone(),
             policy,
-            crate::direct::SharedPauses::default(),
+            crate::direct::PauseScope::Own,
         )
     });
     #[cfg(not(feature = "p2p"))]
@@ -405,7 +405,8 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
 /// is set up again after that.
 ///
 /// Its direct setup goes by the pauses `memory`, its client's, keeps for the
-/// service, and leaves what it learns there for the client's next streams.
+/// service, and leaves there what it learns of the path for the client's next
+/// streams: see [`PauseScope::Client`](crate::direct::PauseScope::Client).
 #[expect(
     clippy::too_many_arguments,
     reason = "the SDK starts a stream with each of its settings"
@@ -437,7 +438,7 @@ pub(crate) async fn run_owned_stream(
             keep_alive,
             diagnostics.clone(),
             policy,
-            pauses,
+            crate::direct::PauseScope::Client(pauses),
         )
     });
     #[cfg(not(feature = "p2p"))]
