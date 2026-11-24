@@ -134,6 +134,10 @@ pub struct ClientConfigStore {
 pub struct AppConfig {
     pub server_address: String,
     pub keep_alive_enabled: bool,
+    /// None for an untouched installation. An explicit off is remembered so a
+    /// Windows service can reconcile a missed change when the app restarts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_awake: Option<bool>,
     pub msg_header_key: String,
     /// How this computer reaches the relay: TCP, as a config saved before
     /// there was a choice, or QUIC. A tunnel keeps the one it started with.
@@ -159,6 +163,7 @@ impl Default for AppConfig {
         Self {
             server_address: "localhost:7666".to_string(),
             keep_alive_enabled: true,
+            keep_awake: None,
             msg_header_key: String::new(),
             relay_transport: RelayTransport::Tcp,
             lan_first: true,
@@ -178,6 +183,7 @@ impl AppConfig {
         let Self {
             server_address,
             keep_alive_enabled,
+            keep_awake: _,
             msg_header_key,
             relay_transport,
             lan_first: _,

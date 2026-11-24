@@ -123,9 +123,11 @@ pub unsafe extern "C" fn pb_mapper_set_app_dir(
         // and all subsequent native diagnostics reach the same directory as
         // its files.
         crate::disk_log::configure(&PbMapperState::get_config_dir(&path));
-        handle
-            .runtime
-            .block_on(async { handle.state.lock().await.set_app_directory_path(path) })?;
+        handle.runtime.block_on(async {
+            handle.state.lock().await.set_app_directory_path(path)?;
+            crate::desktop::restore_keep_awake(handle).await;
+            Ok::<_, CtlError>(())
+        })?;
         Ok(Reply::Message("app directory updated".into()))
     })
 }

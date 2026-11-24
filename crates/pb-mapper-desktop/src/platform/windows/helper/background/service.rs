@@ -10,6 +10,7 @@ use crate::{
     Host, HostOptions, HostState, StopReason,
     platform::login::{self, Attest},
 };
+use pb_mapper_core::power::SystemAwake;
 use pb_mapper_core::timeout::RetryBackoff;
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::{
@@ -47,6 +48,7 @@ pub(crate) async fn run(stop: CancellationToken) -> Result<()> {
             .is_some_and(|saved| saved.options.settings.auto_start),
         saved,
         host: None,
+        awake: None,
         pending: None,
         session: None,
         login: None,
@@ -56,6 +58,9 @@ pub(crate) async fn run(stop: CancellationToken) -> Result<()> {
         capture_failure_since: None,
         persistence_failed: false,
     };
+    if let Err(failure) = state.restore_power_request().await {
+        os::record_service_event("keep_awake_failed", &failure.to_string());
+    }
     let (sender, mut commands) = mpsc::channel::<Operation>(8);
     let mut management = tokio::spawn(manage(config.clone(), sender, stop.clone()));
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -109,6 +114,7 @@ struct Login {
 struct Supervisor {
     saved: Option<Saved>,
     enabled: bool,
+    awake: Option<SystemAwake>,
     host: Option<Host>,
     pending: Option<JoinHandle<Result<Host>>>,
     session: Option<u32>,
@@ -121,6 +127,18 @@ struct Supervisor {
     persistence_failed: bool,
 }
 impl Supervisor {
+    async fn restore_power_request(&mut self) -> Result<()> {
+        if self.enabled
+            && self
+                .saved
+                .as_ref()
+                .is_some_and(|saved| saved.options.settings.keep_awake)
+        {
+            self.awake = Some(SystemAwake::acquire().await?);
+        }
+        Ok(())
+    }
+
     fn snapshot(&self) -> Snapshot {
         let saved = self.saved.as_ref();
         Snapshot {
@@ -177,6 +195,26 @@ impl Supervisor {
                 "Background authorization belongs to another relay or namespace",
             ));
         }
+        // Reserve the request before persisting a new preference. On any
+        // error the temporary request drops and the old one remains valid.
+        let wants_awake = match &command {
+            Command::Configure { options, .. } => options.settings.keep_awake,
+            Command::Start {} => self
+                .saved
+                .as_ref()
+                .is_some_and(|s| s.options.settings.keep_awake),
+            Command::SetKeepAwake { enabled } => self.enabled && *enabled,
+            Command::Stop {} | Command::RevokeScope { .. } => false,
+            Command::Status {}
+            | Command::EndSession {}
+            | Command::Permission { .. }
+            | Command::RestoreDisplayMode {} => self.awake.is_some(),
+        };
+        let acquired = if wants_awake && self.awake.is_none() {
+            Some(SystemAwake::acquire().await?)
+        } else {
+            None
+        };
         match command {
             Command::Status {} => {}
             Command::EndSession {} => {
@@ -236,6 +274,16 @@ impl Supervisor {
                 self.persist_restriction(root).await?;
                 self.message.clear();
             }
+            Command::SetKeepAwake { enabled } => {
+                if let Some(saved) = &self.saved
+                    && saved.options.settings.keep_awake != enabled
+                {
+                    let mut saved = saved.clone();
+                    saved.options.settings.keep_awake = enabled;
+                    save(root, &saved)?;
+                    self.saved = Some(saved);
+                }
+            }
             Command::Permission { allow_control } => {
                 if allow_control && self.persistence_failed {
                     return Err(error(
@@ -273,6 +321,11 @@ impl Supervisor {
                 }
             }
         }
+        if !wants_awake {
+            self.awake = None;
+        } else if acquired.is_some() {
+            self.awake = acquired;
+        }
         Ok(self.snapshot())
     }
     async fn persist_restriction(&mut self, root: &Path) -> Result<()> {
@@ -289,6 +342,7 @@ impl Supervisor {
             .and_then(|()| clear_marker(root));
         if result.is_err() {
             self.enabled = false;
+            self.awake = None;
             self.deactivate().await;
             self.message = "Background hosting stopped, but the authorization change could not be saved; configure it again before starting".into();
             return Err(error(self.message.clone()));
@@ -495,6 +549,7 @@ mod tests {
                 display_device: None,
                 allow_control: false,
                 allow_direct: false,
+                keep_awake: false,
                 auto_start: true,
             },
             lan_first: true,
@@ -505,6 +560,7 @@ mod tests {
             saved: Some(saved),
             enabled: true,
             host: None,
+            awake: None,
             pending: None,
             session: None,
             login: None,
@@ -514,6 +570,29 @@ mod tests {
             capture_failure_since: None,
             persistence_failed: false,
         }
+    }
+
+    #[tokio::test]
+    async fn a_waiting_service_holds_power_until_stopped_even_if_persisting_stop_fails() {
+        let mut opts = options();
+        opts.settings.keep_awake = true;
+        let saved = Saved::prepare(opts, "owner-one", None, None).unwrap();
+        let mut service = state(saved);
+        service.restore_power_request().await.unwrap();
+        assert!(service.awake.is_some());
+        assert!(service.host.is_none());
+
+        // A nonexistent installation cannot save a stop. The owner's
+        // request must still take effect in the running service.
+        let missing = pb_mapper_core::test_support::TempPath::new("missing-service-install");
+        assert!(
+            service
+                .command(Command::Stop {}, &missing, "owner-one")
+                .await
+                .is_err()
+        );
+        assert!(service.awake.is_none());
+        assert!(!service.enabled);
     }
 
     #[test]

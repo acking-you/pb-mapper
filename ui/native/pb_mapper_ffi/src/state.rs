@@ -67,6 +67,8 @@ pub struct PbMapperState {
     quic_offer: Option<(AppConfig, Option<u16>)>,
     service_runtime: HashMap<String, TunnelRuntime>,
     client_runtime: HashMap<String, TunnelRuntime>,
+    pub(crate) awake: Option<pb_mapper_core::power::SystemAwake>,
+    pub(crate) awake_error: Option<String>,
     config: AppConfig,
     config_dir: PathBuf,
     app_directory_path: Option<String>,

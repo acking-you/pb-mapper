@@ -3139,6 +3139,8 @@ version = "0.12.1"
 dependencies = [
  "base64 0.23.1",
  "hickory-resolver",
+ "objc2",
+ "objc2-foundation",
  "parking_lot",
  "rand 0.10.2",
  "ring",
@@ -3146,6 +3148,8 @@ dependencies = [
  "snafu",
  "tokio",
  "tracing",
+ "windows 0.62.2",
+ "zbus",
 ]
 
 [[package]]
@@ -4407,6 +4411,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2 0.6.1",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -5788,6 +5793,7 @@ dependencies = [
  "rustix 1.1.5",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",

@@ -46,6 +46,8 @@ impl PbMapperState {
             service_runtime: HashMap::new(),
             client_runtime: HashMap::new(),
             config: AppConfig::default(),
+            awake: None,
+            awake_error: None,
             config_dir: Self::get_config_dir(&None),
             app_directory_path: None,
             local_server_status: Arc::default(),
@@ -145,6 +147,16 @@ impl PbMapperState {
             ))
         })?;
         Ok(config_dir.join("config.json"))
+    }
+
+    pub(crate) fn save_keep_awake(&mut self, enabled: bool) -> Result<(), CtlError> {
+        let config = AppConfig {
+            keep_awake: Some(enabled),
+            ..self.config.clone()
+        };
+        self.write_config_file(&config)?;
+        self.config = config;
+        Ok(())
     }
 
     pub fn load_config(&self) -> Result<AppConfig, CtlError> {

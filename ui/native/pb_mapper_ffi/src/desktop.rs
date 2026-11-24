@@ -22,6 +22,8 @@ use std::sync::atomic::AtomicU64;
 
 mod background;
 mod host;
+mod power;
+pub(crate) use power::restore_keep_awake;
 pub(crate) mod trust;
 mod viewer;
 
@@ -107,6 +109,9 @@ impl DesktopState {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
     Capabilities,
+    SetKeepAwake {
+        enabled: bool,
+    },
     HostStatus,
     TrustStatus,
     TrustRevoke,
@@ -284,6 +289,7 @@ async fn capabilities() -> Result<Value, CtlError> {
 async fn call(handle: &PbMapperHandle, request: Request) -> Result<Value, CtlError> {
     match request {
         Request::Capabilities => capabilities().await,
+        Request::SetKeepAwake { enabled } => power::set_keep_awake(handle, enabled).await,
         Request::HelperAction { action } => helper_action(handle, action).await,
         Request::TrustStatus => trust_status(handle).await,
         Request::TrustRevoke => revoke_trust_with_background(handle, revoke_background(handle))

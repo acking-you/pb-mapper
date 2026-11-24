@@ -37,7 +37,7 @@ pb-mapper = { workspace = true, features = ["desktop", "p2p", "relay-quic"] }
 # relay itself is reached over TCP or, when Settings says so, QUIC. Port
 # mapping comes per target, below.
 pb-mapper-client = { workspace = true, features = ["p2p", "relay-quic"] }
-pb-mapper-core.workspace = true
+pb-mapper-core = { workspace = true, features = ["system-awake"] }
 pb-mapper-galaxy.workspace = true
 pb-mapper-server = { workspace = true, features = ["p2p", "relay-quic"] }
 uni-stream.workspace = true

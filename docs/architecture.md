@@ -464,10 +464,11 @@ Nothing in the SDK crates knows it exists.
     or is offered Update); `background.rs` and `background/`, its own host
     and that host's grant at rest; `os/`, its Win32 glue by concern. The
     service side and the `pb-mapper-desktop-helper` binary need `--features
-    windows-helper`. `HELPER_PROTOCOL` (now 11) and the `.v<n>` pipe names
+    windows-helper`. `HELPER_PROTOCOL` (now 12) and the `.v<n>` pipe names
     change together; an installed helper of another protocol, or of another
     build (its executable differs from the one bundled with the app), is
-    offered Update. Protocol 11: `Request::Adapter` and `Response.adapter`,
+    offered Update. Protocol 12 adds the background host’s keep-awake setting
+    and the operation that changes it during sharing. Protocol 11: `Request::Adapter` and `Response.adapter`,
     the GPU and driver that drive the worker's display (`AdapterKey`, named
     by the platform through `oop/server.rs`'s `NamedAdapter`), asked only
     for a viewer that decodes H.265; the `H265` answer names the GPU only

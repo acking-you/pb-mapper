@@ -853,9 +853,13 @@ refused over such a grant (`HELPER_OUTDATED`, `HELPER_FOREIGN_APP`), since
 configuring it from here would replace its view-only, relay-only or paused
 policy, and under another service name its invitation.
 
-Protocol 11 is the current one, with the pipes
-`pb-mapper.desktop-helper.v11` and `pb-mapper.desktop-background.v11`. It
-adds `Request::Adapter`, which the host sends only for a viewer that decodes
+Protocol 12 uses the pipes `pb-mapper.desktop-helper.v12` and
+`pb-mapper.desktop-background.v12`. It adds `keep_awake` to the background
+host settings and a `set_keep_awake` management operation. While background
+sharing is enabled, the service can hold a system power request between
+viewers. Stop and revoke release it. Older grants default to off.
+
+Protocol 11 added `Request::Adapter`, which the host sends only for a viewer that decodes
 H.265, just before it would ask `Request::H265`: the worker answers with the
 GPU that drives its display and that GPU's driver (`adapter`: the adapter's
 vendor, device, subsystem and revision ids from DXGI, and the user-mode

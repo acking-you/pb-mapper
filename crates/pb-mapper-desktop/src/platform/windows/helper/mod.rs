@@ -130,8 +130,9 @@ fn connect_backend(
 /// the host keeps its tick armed and polls. 11: `Request::Adapter` names the
 /// GPU and driver that drive the worker's display (`adapter`), and the
 /// `H265` answer names the GPU its probe answered of, under which the host
-/// keeps that answer for later workers.
-pub const HELPER_PROTOCOL: u32 = 11;
+/// keeps that answer for later workers. 12: a configured background host
+/// can hold a system power request while it waits for connections.
+pub const HELPER_PROTOCOL: u32 = 12;
 
 /// What a worker exits with when a display mode it changed is still
 /// journalled: the service then starts a `restore` worker.
@@ -139,7 +140,7 @@ pub const HELPER_PROTOCOL: u32 = 11;
 pub(crate) const RESTORE_PENDING: u32 = 3;
 
 const SERVICE: &str = "PbMapperDesktop";
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v11";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v12";
 const _: () = assert!(
     names_protocol(PIPE, HELPER_PROTOCOL),
     "the helper pipe's name ends in .v and HELPER_PROTOCOL"
