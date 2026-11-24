@@ -160,11 +160,11 @@ impl VideoSource for video::Encoder {
         video::Encoder::set_rate(self, rate)
     }
     /// A full encoder spends the tick; one that has not asked for input yet,
-    /// or a desktop with nothing new, leaves it armed, with the capture
-    /// thread armed too, which wakes thread C for the next picture. Every
-    /// call keeps the display and the system awake a little longer: thread
-    /// C submits at least once a second while a session streams, and never
-    /// while it is paused.
+    /// a desktop with nothing new, or a refinement repeat of a still
+    /// picture leaves it armed, with the capture thread armed too, which
+    /// wakes thread C for the next picture. Every call keeps the display
+    /// and the system awake a little longer: thread C submits at least once
+    /// a second while a session streams, and never while it is paused.
     fn submit(&mut self, keyframe: bool) -> Result<bool> {
         power::touch();
         video::Encoder::submit(self, keyframe).map(video::Submit::spends_tick)
@@ -178,8 +178,8 @@ impl VideoSource for video::Encoder {
     /// it came before thread C chose its next poll. Otherwise at the tick
     /// while a picture waits or the capture thread is to be armed, and
     /// while it is armed, at the capture thread's wake or the next repeat
-    /// due: liveness, `keyframe_due`, or a keyframe waiting for the
-    /// thread's answer that nothing newer came.
+    /// due: a refinement repeat, liveness, `keyframe_due`, or a keyframe
+    /// waiting for the thread's answer that nothing newer came.
     fn idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         video::Encoder::idle_until(self, keyframe_due)
     }
