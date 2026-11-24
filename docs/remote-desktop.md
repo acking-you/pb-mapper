@@ -1141,9 +1141,10 @@ dispatch.
   break twice. `CursorShape::readable` bounds every pointer image before a
   pixel of it is read (1024 a side); a larger one is not read, and the
   viewer keeps the last shape. `CursorSource::shape` is asked only when the
-  session negotiated `cursor_shape`, on thread C's 16 ms pointer tick (the
-  helper's worker likewise), and only while the pointer shows on the shared
-  display. It reads a bitmap only when the OS says the pointer's image
+  session negotiated `cursor_shape`, at thread C's pointer samples and the
+  shape looks after a controller's move (see
+  [Input and cursor](#input-and-cursor); the helper's worker likewise), and
+  only while the pointer shows on the shared display. It reads a bitmap only when the OS says the pointer's image
   changed, or 250 ms after a read that failed (`ShapeReads`), and returns
   physical pixels, straight RGBA8, at most 256 a side (`CursorShape::fitted`
   scales a larger one down).
@@ -1513,7 +1514,7 @@ that a session that starts or resumes on one gets its first picture without
 anyone at the host. It clears the request 2 s after the last capture
 (`awake::LINGER`): a pause, a disconnect or a lost helper. While a session runs
 unpaused, thread C asks for a capture at least once a second, and reads the
-pointer every 16 ms (through the helper, the worker reads it at each desktop
+pointer at least every 16 ms (through the helper, the worker reads it at each desktop
 check and video request) even while the network or the encoder holds capture
 back, so a stall does not let the request lapse. When to take and clear it is
 `awake::Watchdog`, which the unit tests drive through whole sessions with an
@@ -1955,9 +1956,25 @@ A press that starts a drag waits out the OS double-click time (plus 20 ms, at
 most 600 ms) after a click on the same spot, so the two never merge into a
 double click. Held commands are re-authorised when they are released.
 
-The desktop-bound thread samples the cursor every 16 ms while capturing (never
-while paused or unavailable) and at once reports every sample unlike its last
-report, except the controlling viewer's own move coming back: the viewer draws
+The desktop-bound thread samples the cursor while capturing (never while
+paused or unavailable) every 16 ms, or once a period of a faster pace, down to
+8 ms (8.3 ms at 120 FPS): a pointer a viewer does not draw itself (the host
+user's, an app's, another controller's that the OS stopped short) moves at the
+session's frame rate. After it applies a move from a controller that reads
+shapes, it also looks at the pointer's shape 2 ms later, and once more 8 ms
+after the last move for a slower app: the hand over a link, the I-beam over
+text or the resize arrow at a border that the move brought reaches the viewer
+then, not at the next sample. At most one look is pending; moves closer than
+2 ms apart never put the first off, and a reading that finds a new shape drops
+the look still owed. A look reports only a new shape, as a sample would, and
+starts the sample clock again; otherwise it reports nothing, so a viewer gets
+a position sooner than the clock only together with a new shape. Through the
+helper the shape still crosses the pipe only when the worker numbered a new
+one, which each capture call observes: every 2 ms after an input while the
+picture is still, at the frame rate while it changes.
+
+The desktop-bound thread reports at once every sample unlike its last report,
+except the controlling viewer's own move coming back: the viewer draws
 its pointer where it put it, and an echo arriving behind the video would drag
 it back. A shown pointer at the position the thread last injected, in the same
 display pixels, is that echo, whatever it showed before, until a report finds
@@ -2033,8 +2050,8 @@ a shape is known, every `cursor` report names its slot in `shape`, written
 only to a `cursor_shape` viewer. A new shape is reported even at the
 controller's own move, and the viewer takes every report's shape while it
 sets aside only stale positions. Thread C asks the backend for the shape only
-when the session negotiated it, on the 16 ms tick, and compares content, so
-an equal image under a new OS handle sends nothing. A failed read is the
+when the session negotiated it, at each pointer sample and shape look, and
+compares content, so an equal image under a new OS handle sends nothing. A failed read is the
 debug event `desktop_cursor_shape_failed` and keeps the last shape. The
 viewer hands Dart a number per definition in the view (`cursor_shape`), and
 the FFI's hot op `cursor_shape` returns that definition when the number
@@ -2094,6 +2111,22 @@ shape under a hidden pointer for the rest of that viewer, as a viewer did
 before. Viewing only, with the host's pointer elsewhere, and on a phone, the
 shape is painted as before.
 
+**The viewer's reads and frames.** Dart reads the view leaf (the host's
+pointer, its shape number and the peer pointers) in every frame Flutter draws,
+from a 16 ms timer, and as each 4 ms move gate closes while this viewer moves
+the pointer (`desktop_store.dart`). The cursor layer repaints only when what
+it paints changes: `RemoteCursorLayer` derives it from the viewport, the
+cursor, the pointer's look and the display, and tells its painter only of a
+change, never of nothing painted becoming nothing painted. So a hover while it
+paints nothing, which is a controller's whenever the local pointer shows the
+host's shape, asks for no frame: over a still picture, moving the mouse costs
+the viewer no Flutter frame, and the move gate's read picks up the shape the
+host gives the pointer for the move, every 4 ms while the pointer moves and by
+the timer once it rests. A read that finds a peer pointer moved, the timer's
+included, asks for a frame, whose read asks for the next while the pointer
+keeps moving; one that finds it still asks for none. A moving peer pointer is
+so read at the display's rate, and a still one on the timer only.
+
 ### Constants
 
 | What | Value |
@@ -2113,7 +2146,7 @@ shape is painted as before.
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued, drained until the IDR or a head under 125 ms; IDR grace 500 ms; stall watchdog 700 ms |
 | fps cap | tick 250 ms; capacity from ≥ 4 busy ticks of the last 8; × 0.9 direct, × 0.8 relay; minimum 5; after 3 s, +5 per 30 fps of ceiling or a quarter of the cap, up to 95% of the capacity; probes of 10% watched 3 s (not by the queue within the IDR grace; a pause takes one back), backoff 3 s doubling to 60 s; turnaround late past 2 frame intervals (≥ 40 ms) over its 10 s floor; ≥ 1 s between changes but for a probe taken back |
 | Input | viewer queue 512 events or 256 KiB, batches of 16; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input |
-| Cursor | sampled every 16 ms; the controller's own move never reported; an injected move is the pointer until the OS shows it, at most 250 ms after the last (`SETTLE`); a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated, the pointer shows on the shared display and the OS pointer changed (a failed read again after 250 ms), an image over 1024 px a side never, 1 to 256 px a side sent, 64 slots on each end |
+| Cursor | sampled every 16 ms, or once a period of a faster pace down to 8 ms; the shape looked at 2 ms after a shape-reading controller's move and 8 ms after its last, one look pending; the controller's own move never reported; an injected move is the pointer until the OS shows it, at most 250 ms after the last (`SETTLE`); a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated, the pointer shows on the shared display and the OS pointer changed (a failed read again after 250 ms), an image over 1024 px a side never, 1 to 256 px a side sent, 64 slots on each end |
 | Codec | `Accepted` waits at most 3 s for the backend's display and H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3 |
 
 ### Diagnostics

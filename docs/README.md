@@ -49,6 +49,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [Shared direct cooldown measurements](benchmarks/2026-11-24-direct-cooldown/README.md) | `connect_tcp`'s time to the first byte inside a direct pause, before and after one client's calls share it |
 | [Mac viewer decoder stats](benchmarks/2026-11-24-viewer-decoder-stats/README.md) | the macOS viewer's new decode time and decoder-thread CPU, read by the acceptance tool at 1080p and 4K, against a paced VideoToolbox harness on the same clips |
 | [Native pointer shape measurements](benchmarks/2026-11-24-native-cursor/README.md) | `ui/tool/pointer_latency.dart` on the macOS runner: a pointer shape change through a rebuild and the post-frame pass, against the direct system cursor and runner bitmap calls the cursor session makes, and how long a painted pointer took to draw after a mouse move |
+| [Pointer cadence measurements](benchmarks/2026-11-24-pointer-cadence/README.md) | `host_send_bench`'s new shape and host-pointer cases before and after the 2 ms shape look and the pace-driven pointer clock, and `ui/tool/hover_frames.dart` on the macOS runner: frames drawn while the mouse sweeps over a still picture, before and after the cursor layer stopped repainting for a hover that paints nothing |
 | [Viewer pixel snap measurements](benchmarks/2026-11-24-viewer-pixel-snap/README.md) | the contrast a 1-pixel stroke keeps through the viewer's picture transform, before and after keeping a 1:1 picture on device pixels and showing a near-1 fit at exactly 1:1 |
 
 ## Security
