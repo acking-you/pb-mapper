@@ -183,6 +183,10 @@ next connections straight to the relay for a while (10 s doubling to 5 min,
 cleared by a direct success or `notify_network_change`). `connect_tcp` calls
 through one `Client`, its clones and its `with_relay_transport` siblings share
 that pause per service, so a fallback in one sends the next to the relay too.
+Since each of those streams keeps the path it started on, only a fallback the
+relay then carried and that says the path cannot be punched (a failed punch,
+negotiation past its budget, or a relay without direct) pauses the next; one
+that found the publisher away or without direct, or no relay, does not.
 
 Established direct sessions survive coordinator loss and credential revocation;
 the local handle's `stop()` closes them. `client.sessions()` returns

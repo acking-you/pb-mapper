@@ -266,8 +266,9 @@ Nothing in the SDK crates knows it exists.
     fallback, over `control.rs`'s control connection, and `provider.rs` is
     the publishing end. `memory.rs` holds the pauses after a fallback: a
     connect tunnel's own, or the client's `DirectMemory`, which its
-    `connect_tcp` calls share per service. `identity.rs` carries the exact
-    certificates, `mapping.rs` the gateway port mapping (feature
+    `connect_tcp` calls share per service and which only an unpunchable
+    path the relay carried pauses (`PauseScope`). `identity.rs` carries
+    the exact certificates, `mapping.rs` the gateway port mapping (feature
     `port-mapping`), `reports.rs` the coalesced observations, and `link.rs`
     what a committed session's path is. LAN-first (on by default,
     `lan_first` in the options, carried as the crate-private

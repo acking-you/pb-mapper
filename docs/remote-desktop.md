@@ -973,13 +973,18 @@ does not require Flutter or a POCOX runtime.
   quality, progress })` uses `Client::connect_tcp` and the existing
   registration, namespace, direct commit and pre-commit relay fallback; its
   `ConnectOptions.lan_first`, which the app takes from Settings at each
-  connect, decides whether a shared LAN is tried first. A fallback pauses
-  direct for that client's later `connect_tcp` calls to the same computer
-  (10 s, doubling to 5 min, cleared by a direct success or a network
-  change), so a reconnect over a path that cannot be punched goes straight
-  to the relay instead of spending the setup budgets (3 s to a grant, 2 s to
-  punch) on direct again; the client keeps these pauses for 64 computers at
-  most. It
+  connect, decides whether a shared LAN is tried first. A session decides
+  its path once and keeps it: one that took the relay stays on it. A
+  fallback that says the path cannot be punched (the punch after a grant
+  found no way through, negotiating outran its 3 s, or the relay offers no
+  direct) pauses direct for that client's later `connect_tcp` calls to the
+  same computer once the relay has carried the session (10 s, doubling to
+  5 min, cleared by a direct success or a network change), so a reconnect
+  goes straight to the relay instead of spending the setup budgets (3 s to
+  a grant, 2 s to punch) on direct again. A call that found the host away
+  or without direct, or could not reach the relay, pauses nothing, so the
+  reconnect after the host is back tries direct. The client keeps these
+  pauses for 64 computers at most. It
   returns once the host accepted, or fails with a typed `ConnectError`: identity
   changed, version mismatch, busy, denied, invalid request, cancelled, transport
   or protocol. `VideoLimits::for_viewer(refresh_hz)` derives the limits:
@@ -1978,8 +1983,9 @@ seconds without video while the viewer shows and the session streams
 (counted from the later of the last video and the session streaming again
 after a pause or unavailable capture), opens a fresh authenticated session
 with the same target and path preference after 1, 2, 4, 8 and 15 seconds.
-While direct is paused after a fallback, those sessions take the relay at
-once.
+While direct is paused after a fallback on a path that cannot be punched,
+those sessions take the relay at once; a retry while the host was away
+pauses nothing, so the first session after it is back tries direct.
 Retrying stops once failures have gone on for two minutes, counted from the
 first since the last live picture and never while the viewer is hidden; the
 session then ends, saying why, with Reconnect. Capture-unavailable states wait
