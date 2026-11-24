@@ -2,12 +2,14 @@
 //! worker, the bound input desktop), the fused DXGI to D3D11 to Media
 //! Foundation encoder, enigo and `SendInput` injection and the pointer,
 //! xcap stills; DPAPI; the waitable timer and fine timers; the display and
-//! the system kept awake while capture runs; and the privileged helper.
+//! the system kept awake while capture runs; the capture device's GPU
+//! priority, where an encoder asks for it; and the privileged helper.
 //! Uses published Apache-2.0 xcap and MIT enigo. No RustDesk source is copied.
 
 pub(crate) mod cursor;
 pub(crate) mod desktop;
 pub mod dpapi;
+pub(crate) mod gpu_priority;
 pub(crate) mod helper;
 pub(crate) mod input;
 pub(crate) mod mf;
@@ -143,6 +145,7 @@ impl VideoSource for video::Encoder {
             limits.max_width,
             limits.max_height,
             Some(waker),
+            video::EncoderOptions::default(),
         )
     }
     fn codec(&self) -> VideoCodec {

@@ -20,6 +20,7 @@ use crate::{
         pipeline::LATE_OUTPUT,
         rate_fit::Fit,
         resubmit::Unit,
+        sps::SpsReorder,
     },
     platform::DisplayModes,
     scheduler::{Waiter, Wake},
@@ -127,6 +128,13 @@ fn keyframes_come_only_when_asked_and_carry_their_parameter_sets() {
             let mut sets = ParameterSets::new(VideoCodec::H264);
             sets.observe(&parsed).unwrap();
             assert!(sets.complete() && sets.carried(&parsed), "frame {frame}");
+            // The SPS rewriter reads this session's SPS whole, whatever it
+            // says of reordering.
+            assert!(
+                !matches!(sets.sps_reorder(), None | Some(SpsReorder::Unread)),
+                "frame {frame}: {:?}",
+                sets.sps_reorder()
+            );
         }
     }
     assert_eq!(encoder.pending(), 0);
@@ -467,6 +475,62 @@ fn a_low_latency_session_lets_rate_control_reach_qp_51() {
     }
     assert_eq!(bound.max_qp(), Some(51));
     assert_ne!(unbound.max_qp(), Some(51));
+}
+
+/// Core Media takes every rewrite of `codec::sps`'s samples with its PPS
+/// as a decoder's format, at the same dimensions as the encoder's own SPS:
+/// what the Mac viewer builds its decoder from. The 4:4:4 sample is left
+/// out, since its PPS is VideoToolbox's 4:2:0 one.
+#[test]
+fn core_media_takes_every_sps_rewrite() {
+    use crate::codec::sps::{
+        restrict_reorder,
+        tests::{BUILT, hex, samples},
+    };
+    use objc2_core_media::{
+        CMFormatDescription, CMVideoFormatDescriptionCreateFromH264ParameterSets,
+        CMVideoFormatDescriptionGetDimensions,
+    };
+
+    let format = |sps: &[u8], pps: &[u8]| {
+        let pointers = [NonNull::from(&sps[0]), NonNull::from(&pps[0])];
+        let sizes = [sps.len(), pps.len()];
+        let mut out: *const CMFormatDescription = std::ptr::null();
+        // SAFETY: two parameter sets the arrays point to and size, which
+        // outlive the call, and an out pointer to a local.
+        let status = unsafe {
+            CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                None,
+                2,
+                NonNull::from(&pointers[0]),
+                NonNull::from(&sizes[0]),
+                4,
+                NonNull::from(&mut out),
+            )
+        };
+        assert_eq!(status, 0);
+        // SAFETY: a Create-rule result.
+        let description = unsafe { CFRetained::from_raw(NonNull::new(out.cast_mut()).unwrap()) };
+        // SAFETY: a video format description.
+        let dimensions = unsafe { CMVideoFormatDescriptionGetDimensions(&description) };
+        (dimensions.width, dimensions.height)
+    };
+    let mut rewrites = 0;
+    for sample in samples().filter(|sample| sample.name != BUILT[2].name) {
+        let (sps, pps) = (hex(sample.sps), hex(sample.pps));
+        let (_, rewritten) = restrict_reorder(&sps);
+        let Some(rewritten) = rewritten else {
+            continue;
+        };
+        assert_eq!(
+            format(&rewritten, &pps),
+            format(&sps, &pps),
+            "{}",
+            sample.name
+        );
+        rewrites += 1;
+    }
+    assert_eq!(rewrites, 7);
 }
 
 /// Thread C's waits end on time where the kernel coalesces the process's

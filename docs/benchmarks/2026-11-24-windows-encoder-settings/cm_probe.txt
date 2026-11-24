@@ -1,0 +1,5 @@
+rewritten (0, 1280, 720)
+truncated by 3 (-12710, 0, 0)
+truncated by 1 (-12710, 0, 0)
+vui flag without a vui (-12710, 0, 0)
+no sps body (-12714, 0, 0)
