@@ -1,162 +1,114 @@
 ### Whole suite, per-tick latch, run 1
+load average at start: { 5.17 5.83 5.79 }
+
 
 running 12 tests
-test slow_link::bandwidth_limit_lowers_fps_and_bitrate_then_recovers ... bandwidth_limit link_mbps=1 limit_s=8 before_pace=60 before_bitrate=4150020 before_encoder_bitrate=4150020 clamped_after_ms=Some(1000) lowest_pace=11 lowest_bitrate=776153 lowest_encoder_bitrate=3880768 recovered_after_ms=Some(2002) final_pace=60 final_bitrate=3686729 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.95 sent_over_expected_after=- state=Streaming
+test slow_link::bandwidth_limit_lowers_fps_and_bitrate_then_recovers ... bandwidth_limit link_mbps=1 limit_s=8 before_pace=60 before_bitrate=4150020 before_encoder_bitrate=4150020 clamped_after_ms=Some(1000) lowest_pace=10 lowest_bitrate=580502 lowest_encoder_bitrate=3483016 recovered_after_ms=Some(1001) final_pace=60 final_bitrate=3483016 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.91 sent_over_expected_after=- state=Streaming
 ok
-test slow_link::encoder_latency_of_45ms_keeps_60 ... slow_encoder latency_ms=45 received_fps_mean=60.0 received_fps=[59.546307, 60.544758, 59.46896, 60.689636, 59.52831, 59.79028, 60.793674, 59.401222, 60.53654, 59.442394] pace_fps=60 capture_fps=60.0 skipped_ticks=0 expired_encoder_outputs=0 state=Streaming
-ok
-test slow_link::fixed_wan_keeps_full_rate_at_fixed_resolution ... fixed_wan roundtrip_ms=350 pace_fps=60 bitrate=4907914 encoder_bitrate=4907914 presented_fps=60.0 received_fps=59.5 rtt_ms=Some(358) keyframes=1 sizes=[(1920, 1080)] configured=1 expired_encoder_outputs=0 state=Streaming
-ok
-test slow_link::idr_another_viewer_asked_for_on_a_slow_link ... room_idr link_mbps=1 encoder_ms=45 rounds=8 answered=8 waited_ms=[468, 493, 466, 651, 649, 107, 569, 466] waited_ms_median=Some(493) waited_ms_max=Some(651) frames_first=[4, 5, 5, 9, 9, 0, 9, 7] frames_first_total=48 held=0 keyframes_requested=0 host_keyframes=22 host_dropped_frames=136 sink_discarded=0 received_fps=15.9 state=Streaming
-room_idr other_received_fps=27.8 other_state=Streaming
-ok
-test slow_link::idr_slower_than_a_second_is_followed_not_replaced ... slow_idr link_mbps=1 idr_kib=162 keyframes=1 received_keyframes=1 keyframes_requested=0 lowest_encoder_bitrate=2754013 final_pace=25 received_fps=19.9 presented_fps=20.0 state=Streaming
-ok
-test slow_link::isolated_stall_does_not_collapse_fps ... isolated_stall one_way_ms=18 stall_ms=600 (pace_before, lowest_pace, back_at_55_after)=[(60, 60, 0ns), (60, 60, 0ns), (60, 60, 0ns)] received_fps=59.6 state=Streaming
-ok
-test slow_link::lan_rtt_keeps_60 ... lan_rtt one_way_ms=18 ceiling_after_ms=Some(979) received_fps_mean=60.1 received_fps=[60.688053, 59.70475, 59.606476, 60.675014, 59.529724, 60.637676, 58.696667, 60.522358, 60.832672, 59.71366] presented_fps=60.0 rtt_ms=Some(38) state=Streaming
-ok
-test slow_link::per_second_encoder_latches_under_an_fps_cap ... per_second_presenter decode_ms=67 mean_pace_fps=13.3 caps=[Some(20), Some(20), Some(10), Some(10), Some(10), Some(15), Some(15), Some(11), Some(11), Some(11)] fps=60 encoder_bitrate=1466663 presented_fps=11.0 backlog_drops=6 keyframes_requested=6 expired_encoder_outputs=0 latched_after_ms=Some(2017) latched_in_low_stretch_ms=Some(2017) sent_over_expected_before=3.52 sent_over_expected_after=1.02 state=Streaming
-ok
-test slow_link::per_second_encoder_on_a_bandwidth_limit ... per_second_bandwidth_limit link_mbps=1 limit_s=8 before_pace=60 before_bitrate=4150020 before_encoder_bitrate=4150020 clamped_after_ms=Some(1008) lowest_pace=2 lowest_bitrate=148334 lowest_encoder_bitrate=4150020 recovered_after_ms=Some(20) final_pace=60 final_bitrate=4450020 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.00 sent_over_expected_after=- state=Streaming
-
-thread 'slow_link::per_second_encoder_on_a_bandwidth_limit' (5836585) panicked at crates/pb-mapper-desktop/src/slow_link.rs:999:9:
-a per-second budget must latch: latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.00 sent_over_expected_after=-
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-FAILED
-test slow_link::requested_idr_on_a_slow_link ... requested_idr link_mbps=1 encoder_ms=45 rounds=8 answered=8 waited_ms=[449, 521, 399, 381, 457, 411, 340, 361] waited_ms_median=Some(411) waited_ms_max=Some(521) frames_first=[4, 6, 5, 5, 7, 6, 5, 6] frames_first_total=44 held=0 keyframes_requested=8 host_keyframes=7 host_dropped_frames=0 sink_discarded=0 received_fps=25.8 state=Streaming
-ok
-test slow_link::slow_presenter_is_capped_by_fps_cap_not_host_backpressure ... slow_presenter decode_ms=67 mean_pace_fps=13.5 caps=[Some(10), Some(10), Some(15), Some(15), Some(10), Some(10), Some(10), Some(15), Some(20), Some(20)] fps=60 encoder_bitrate=7999980 presented_fps=11.0 backlog_drops=8 keyframes_requested=8 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=1.13 sent_over_expected_after=- state=Streaming
-ok
-test slow_link::sustained_slow_tls_reader ... slow_tls seconds=10 captured=41 skipped_ticks=346 pace_fps=2 received_kbit_s=1561
-slow_tls seconds=20 captured=82 skipped_ticks=609 pace_fps=10 received_kbit_s=2080
-slow_tls seconds=30 captured=121 skipped_ticks=787 pace_fps=60 received_kbit_s=2081
-slow_tls elapsed_s=30.002 link_kib_s=256 frame_bytes=65536 captured=121 skipped_ticks=787 control_ms=5.594 release_ms=5.285 revoke_ms=1.374 stop_ms=113.005 latched_after_ms=Some(10813) latched_in_low_stretch_ms=Some(4575) sent_over_expected_before=5.83 sent_over_expected_after=6.73
-ok
-
-failures:
-
-failures:
-    slow_link::per_second_encoder_on_a_bandwidth_limit
-
-test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 178 filtered out; finished in 251.59s
-
-error: test failed, to rerun pass `-p pb-mapper-desktop --lib`
-
-### Whole suite, per-tick latch, run 2
-
-running 12 tests
-test slow_link::bandwidth_limit_lowers_fps_and_bitrate_then_recovers ... bandwidth_limit link_mbps=1 limit_s=8 before_pace=60 before_bitrate=4150020 before_encoder_bitrate=4150020 clamped_after_ms=Some(1005) lowest_pace=10 lowest_bitrate=680836 lowest_encoder_bitrate=3880768 recovered_after_ms=Some(2012) final_pace=60 final_bitrate=3686729 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.74 sent_over_expected_after=- state=Streaming
-ok
-test slow_link::encoder_latency_of_45ms_keeps_60 ... slow_encoder latency_ms=45 received_fps_mean=60.0 received_fps=[59.50485, 60.504803, 59.41157, 60.36744, 59.435432, 60.743042, 59.390434, 60.54608, 59.501663, 60.51924] pace_fps=60 capture_fps=60.0 skipped_ticks=0 expired_encoder_outputs=0 state=Streaming
-ok
-test slow_link::fixed_wan_keeps_full_rate_at_fixed_resolution ... fixed_wan roundtrip_ms=350 pace_fps=60 bitrate=4907914 encoder_bitrate=4907914 presented_fps=60.0 received_fps=59.7 rtt_ms=Some(352) keyframes=1 sizes=[(1920, 1080)] configured=1 expired_encoder_outputs=0 state=Streaming
-ok
-test slow_link::idr_another_viewer_asked_for_on_a_slow_link ... room_idr link_mbps=1 encoder_ms=45 rounds=8 answered=8 waited_ms=[438, 266, 328, 427, 550, 510, 268, 266] waited_ms_median=Some(427) waited_ms_max=Some(550) frames_first=[4, 1, 4, 5, 8, 8, 2, 3] frames_first_total=35 held=0 keyframes_requested=0 host_keyframes=20 host_dropped_frames=129 sink_discarded=0 received_fps=16.9 state=Streaming
-room_idr other_received_fps=25.8 other_state=Streaming
-ok
-test slow_link::idr_slower_than_a_second_is_followed_not_replaced ... slow_idr link_mbps=1 idr_kib=162 keyframes=1 received_keyframes=1 keyframes_requested=0 lowest_encoder_bitrate=2624413 final_pace=20 received_fps=21.9 presented_fps=22.0 state=Streaming
-ok
-test slow_link::isolated_stall_does_not_collapse_fps ... isolated_stall one_way_ms=18 stall_ms=600 (pace_before, lowest_pace, back_at_55_after)=[(60, 60, 0ns), (60, 60, 0ns), (60, 60, 0ns)] received_fps=59.5 state=Streaming
-ok
-test slow_link::lan_rtt_keeps_60 ... lan_rtt one_way_ms=18 ceiling_after_ms=Some(979) received_fps_mean=60.1 received_fps=[60.67496, 59.81168, 59.52157, 59.696224, 60.566822, 59.759056, 60.811626, 59.74382, 59.55248, 60.689823] presented_fps=60.0 rtt_ms=Some(39) state=Streaming
-ok
-test slow_link::per_second_encoder_latches_under_an_fps_cap ... per_second_presenter decode_ms=67 mean_pace_fps=12.4 caps=[Some(20), Some(11), Some(11), Some(11), Some(11), Some(16), Some(11), Some(11), Some(11), Some(11)] fps=60 encoder_bitrate=1466663 presented_fps=11.0 backlog_drops=7 keyframes_requested=7 expired_encoder_outputs=0 latched_after_ms=Some(2018) latched_in_low_stretch_ms=Some(2018) sent_over_expected_before=3.53 sent_over_expected_after=1.11 state=Streaming
-ok
-test slow_link::per_second_encoder_on_a_bandwidth_limit ... per_second_bandwidth_limit link_mbps=1 limit_s=8 before_pace=60 before_bitrate=4150020 before_encoder_bitrate=4150020 clamped_after_ms=Some(998) lowest_pace=2 lowest_bitrate=148334 lowest_encoder_bitrate=4300020 recovered_after_ms=Some(1005) final_pace=60 final_bitrate=4450020 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.00 sent_over_expected_after=- state=Streaming
-
-thread 'slow_link::per_second_encoder_on_a_bandwidth_limit' (5862690) panicked at crates/pb-mapper-desktop/src/slow_link.rs:999:9:
-a per-second budget must latch: latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.00 sent_over_expected_after=-
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-FAILED
-test slow_link::requested_idr_on_a_slow_link ... requested_idr link_mbps=1 encoder_ms=45 rounds=8 answered=8 waited_ms=[367, 295, 243, 353, 298, 410, 353, 345] waited_ms_median=Some(353) waited_ms_max=Some(410) frames_first=[1, 2, 2, 4, 3, 7, 6, 6] frames_first_total=31 held=0 keyframes_requested=8 host_keyframes=7 host_dropped_frames=0 sink_discarded=0 received_fps=25.7 state=Streaming
-ok
-test slow_link::slow_presenter_is_capped_by_fps_cap_not_host_backpressure ... slow_presenter decode_ms=67 mean_pace_fps=12.5 caps=[Some(10), Some(10), Some(15), Some(15), Some(10), Some(10), Some(10), Some(10), Some(15), Some(20)] fps=60 encoder_bitrate=7999980 presented_fps=12.0 backlog_drops=8 keyframes_requested=8 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=1.16 sent_over_expected_after=- state=Streaming
-ok
-test slow_link::sustained_slow_tls_reader ... slow_tls seconds=10 captured=39 skipped_ticks=358 pace_fps=3 received_kbit_s=2078
-slow_tls seconds=20 captured=81 skipped_ticks=565 pace_fps=60 received_kbit_s=2086
-slow_tls seconds=30 captured=120 skipped_ticks=908 pace_fps=60 received_kbit_s=2088
-slow_tls elapsed_s=30.003 link_kib_s=256 frame_bytes=65536 captured=120 skipped_ticks=908 control_ms=5.731 release_ms=4.853 revoke_ms=2.650 stop_ms=101.110 latched_after_ms=Some(11577) latched_in_low_stretch_ms=Some(5073) sent_over_expected_before=6.98 sent_over_expected_after=5.02
-ok
-
-failures:
-
-failures:
-    slow_link::per_second_encoder_on_a_bandwidth_limit
-
-test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 178 filtered out; finished in 251.40s
-
-error: test failed, to rerun pass `-p pb-mapper-desktop --lib`
-
-### Whole suite, per-tick latch, run 3
-
-running 12 tests
-test slow_link::bandwidth_limit_lowers_fps_and_bitrate_then_recovers ... bandwidth_limit link_mbps=1 limit_s=8 before_pace=60 before_bitrate=4150020 before_encoder_bitrate=4150020 clamped_after_ms=Some(998) lowest_pace=10 lowest_bitrate=680836 lowest_encoder_bitrate=3880768 recovered_after_ms=Some(2000) final_pace=60 final_bitrate=3686729 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.79 sent_over_expected_after=- state=Streaming
-ok
-test slow_link::encoder_latency_of_45ms_keeps_60 ... slow_encoder latency_ms=45 received_fps_mean=60.1 received_fps=[60.791042, 59.776043, 59.440163, 60.63766, 59.70761, 59.488564, 60.90979, 59.70101, 59.445232, 60.648655] pace_fps=60 capture_fps=60.0 skipped_ticks=0 expired_encoder_outputs=0 state=Streaming
+test slow_link::encoder_latency_of_45ms_keeps_60 ... slow_encoder latency_ms=45 received_fps_mean=60.0 received_fps=[60.538662, 59.46605, 60.474735, 59.55049, 60.670345, 59.624996, 60.306255, 59.5548, 60.59729, 59.576305] pace_fps=60 capture_fps=60.0 skipped_ticks=0 expired_encoder_outputs=0 state=Streaming
 ok
 test slow_link::fixed_wan_keeps_full_rate_at_fixed_resolution ... fixed_wan roundtrip_ms=350 pace_fps=60 bitrate=4907914 encoder_bitrate=4907914 presented_fps=60.0 received_fps=59.7 rtt_ms=Some(353) keyframes=1 sizes=[(1920, 1080)] configured=1 expired_encoder_outputs=0 state=Streaming
 ok
-test slow_link::idr_another_viewer_asked_for_on_a_slow_link ... room_idr link_mbps=1 encoder_ms=45 rounds=8 answered=8 waited_ms=[469, 587, 645, 638, 50, 277, 477, 551] waited_ms_median=Some(551) waited_ms_max=Some(645) frames_first=[4, 7, 9, 9, 0, 2, 6, 8] frames_first_total=45 held=0 keyframes_requested=0 host_keyframes=17 host_dropped_frames=102 sink_discarded=0 received_fps=19.9 state=Streaming
-room_idr other_received_fps=21.8 other_state=Streaming
+test slow_link::idr_another_viewer_asked_for_on_a_slow_link ... room_idr link_mbps=1 encoder_ms=45 rounds=8 answered=8 waited_ms=[789, 675, 513, 612, 343, 503, 509, 382] waited_ms_median=Some(513) waited_ms_max=Some(789) frames_first=[10, 9, 7, 11, 6, 10, 11, 7] frames_first_total=71 held=0 keyframes_requested=0 host_keyframes=22 host_dropped_frames=167 sink_discarded=0 received_fps=19.9 state=Streaming
+room_idr other_received_fps=37.8 other_state=Streaming
 ok
-test slow_link::idr_slower_than_a_second_is_followed_not_replaced ... slow_idr link_mbps=1 idr_kib=162 keyframes=1 received_keyframes=1 keyframes_requested=0 lowest_encoder_bitrate=2624413 final_pace=10 received_fps=18.8 presented_fps=20.0 state=Streaming
+test slow_link::idr_slower_than_a_second_is_followed_not_replaced ... slow_idr link_mbps=1 idr_kib=162 keyframes=1 received_keyframes=1 keyframes_requested=0 lowest_encoder_bitrate=2770213 final_pace=28 received_fps=20.8 presented_fps=21.0 state=Streaming
 ok
 test slow_link::isolated_stall_does_not_collapse_fps ... isolated_stall one_way_ms=18 stall_ms=600 (pace_before, lowest_pace, back_at_55_after)=[(60, 60, 0ns), (60, 60, 0ns), (60, 60, 0ns)] received_fps=59.6 state=Streaming
 ok
-test slow_link::lan_rtt_keeps_60 ... lan_rtt one_way_ms=18 ceiling_after_ms=Some(978) received_fps_mean=59.9 received_fps=[59.512154, 60.925346, 59.615208, 59.41066, 60.710655, 59.675457, 59.650272, 60.688713, 59.622375, 59.567204] presented_fps=60.0 rtt_ms=Some(40) state=Streaming
+test slow_link::lan_rtt_keeps_60 ... lan_rtt one_way_ms=18 ceiling_after_ms=Some(978) received_fps_mean=60.1 received_fps=[60.817474, 59.518078, 59.59917, 60.78022, 59.49798, 59.600327, 60.630726, 59.660934, 59.7349, 60.665108] presented_fps=60.0 rtt_ms=Some(38) state=Streaming
 ok
-test slow_link::per_second_encoder_latches_under_an_fps_cap ... per_second_presenter decode_ms=67 mean_pace_fps=12.1 caps=[Some(11), Some(11), Some(11), Some(16), Some(11), Some(11), Some(11), Some(11), Some(16)] fps=60 encoder_bitrate=2133328 presented_fps=14.0 backlog_drops=5 keyframes_requested=5 expired_encoder_outputs=0 latched_after_ms=Some(2018) latched_in_low_stretch_ms=Some(2018) sent_over_expected_before=3.47 sent_over_expected_after=1.03 state=Streaming
+test slow_link::per_second_encoder_latches_under_an_fps_cap ... per_second_presenter decode_ms=67 mean_pace_fps=13.0 caps=[Some(10), Some(10), Some(15), Some(15), Some(15), Some(11), Some(11), Some(11), Some(16), Some(16)] fps=60 encoder_bitrate=2133328 presented_fps=14.0 backlog_drops=6 keyframes_requested=6 expired_encoder_outputs=0 latched_after_ms=Some(2015) latched_in_low_stretch_ms=Some(2015) sent_over_expected_before=3.53 sent_over_expected_after=1.03 state=Streaming
 ok
-test slow_link::per_second_encoder_on_a_bandwidth_limit ... per_second_bandwidth_limit link_mbps=1 limit_s=8 before_pace=60 before_bitrate=4150020 before_encoder_bitrate=4150020 clamped_after_ms=Some(998) lowest_pace=2 lowest_bitrate=148334 lowest_encoder_bitrate=4300020 recovered_after_ms=Some(1008) final_pace=60 final_bitrate=4450020 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.00 sent_over_expected_after=- state=Streaming
-
-thread 'slow_link::per_second_encoder_on_a_bandwidth_limit' (5887766) panicked at crates/pb-mapper-desktop/src/slow_link.rs:999:9:
-a per-second budget must latch: latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.00 sent_over_expected_after=-
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-FAILED
-test slow_link::requested_idr_on_a_slow_link ... requested_idr link_mbps=1 encoder_ms=45 rounds=8 answered=8 waited_ms=[487, 504, 466, 459, 440, 371, 379, 394] waited_ms_median=Some(459) waited_ms_max=Some(504) frames_first=[5, 5, 5, 6, 5, 4, 5, 5] frames_first_total=40 held=0 keyframes_requested=8 host_keyframes=7 host_dropped_frames=0 sink_discarded=0 received_fps=21.9 state=Streaming
+test slow_link::per_second_encoder_on_a_bandwidth_limit ... per_second_bandwidth_limit link_mbps=1 limit_s=8 before_pace=60 before_bitrate=4150020 before_encoder_bitrate=4150020 clamped_after_ms=Some(1005) lowest_pace=2 lowest_bitrate=148334 lowest_encoder_bitrate=4150020 recovered_after_ms=Some(1020) final_pace=60 final_bitrate=4450020 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.00 sent_over_expected_after=- state=Streaming
 ok
-test slow_link::slow_presenter_is_capped_by_fps_cap_not_host_backpressure ... slow_presenter decode_ms=67 mean_pace_fps=12.7 caps=[Some(11), Some(16), Some(16), Some(11), Some(11), Some(11), Some(11), Some(16), Some(11)] fps=60 encoder_bitrate=7999980 presented_fps=13.0 backlog_drops=4 keyframes_requested=4 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=1.10 sent_over_expected_after=- state=Streaming
+test slow_link::requested_idr_on_a_slow_link ... requested_idr link_mbps=1 encoder_ms=45 rounds=8 answered=8 waited_ms=[485, 511, 446, 409, 415, 480, 455, 465] waited_ms_median=Some(465) waited_ms_max=Some(511) frames_first=[5, 6, 5, 4, 5, 6, 6, 6] frames_first_total=43 held=0 keyframes_requested=8 host_keyframes=7 host_dropped_frames=0 sink_discarded=0 received_fps=20.9 state=Streaming
 ok
-test slow_link::sustained_slow_tls_reader ... slow_tls seconds=10 captured=39 skipped_ticks=378 pace_fps=3 received_kbit_s=1561
-slow_tls seconds=20 captured=83 skipped_ticks=433 pace_fps=32 received_kbit_s=2069
-slow_tls seconds=30 captured=120 skipped_ticks=738 pace_fps=5 received_kbit_s=2082
-slow_tls elapsed_s=30.002 link_kib_s=256 frame_bytes=65536 captured=120 skipped_ticks=738 control_ms=3.815 release_ms=5.279 revoke_ms=2.520 stop_ms=244.624 latched_after_ms=Some(11580) latched_in_low_stretch_ms=Some(4838) sent_over_expected_before=7.20 sent_over_expected_after=8.50
+test slow_link::slow_presenter_is_capped_by_fps_cap_not_host_backpressure ... slow_presenter decode_ms=67 mean_pace_fps=12.1 caps=[Some(10), Some(10), Some(15), Some(15), Some(11), Some(11), Some(11), Some(11), Some(16), Some(11)] fps=60 encoder_bitrate=7999980 presented_fps=14.0 backlog_drops=4 keyframes_requested=4 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=1.12 sent_over_expected_after=- state=Streaming
+ok
+test slow_link::sustained_slow_tls_reader ... slow_tls seconds=10 captured=40 skipped_ticks=381 pace_fps=4 received_kbit_s=2080
+slow_tls seconds=20 captured=84 skipped_ticks=637 pace_fps=2 received_kbit_s=1560
+slow_tls seconds=30 captured=122 skipped_ticks=876 pace_fps=10 received_kbit_s=2084
+slow_tls elapsed_s=30.002 link_kib_s=256 frame_bytes=65536 captured=122 skipped_ticks=876 control_ms=4.199 release_ms=3.946 revoke_ms=2.589 stop_ms=194.303 latched_after_ms=Some(9061) latched_in_low_stretch_ms=Some(1794) sent_over_expected_before=3.72 sent_over_expected_after=7.30
 ok
 
-failures:
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 185 filtered out; finished in 252.32s
 
-failures:
-    slow_link::per_second_encoder_on_a_bandwidth_limit
+exit status 0
 
-test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 178 filtered out; finished in 252.52s
+### Whole suite, per-tick latch, run 2
+load average at start: { 1.09 1.94 3.67 }
 
-error: test failed, to rerun pass `-p pb-mapper-desktop --lib`
 
-### per_second_encoder_on_a_bandwidth_limit alone, final assertions, run 1
-
-running 1 test
-test slow_link::per_second_encoder_on_a_bandwidth_limit ... per_second_bandwidth_limit link_mbps=1 limit_s=8 before_pace=60 before_bitrate=4150020 before_encoder_bitrate=4150020 clamped_after_ms=Some(998) lowest_pace=2 lowest_bitrate=148334 lowest_encoder_bitrate=4300020 recovered_after_ms=Some(1003) final_pace=60 final_bitrate=4450020 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.00 sent_over_expected_after=- state=Streaming
+running 12 tests
+test slow_link::bandwidth_limit_lowers_fps_and_bitrate_then_recovers ... bandwidth_limit link_mbps=1 limit_s=8 before_pace=60 before_bitrate=4150020 before_encoder_bitrate=4150020 clamped_after_ms=Some(998) lowest_pace=10 lowest_bitrate=680836 lowest_encoder_bitrate=3880768 recovered_after_ms=Some(998) final_pace=51 final_bitrate=3298652 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.74 sent_over_expected_after=- state=Streaming
+ok
+test slow_link::encoder_latency_of_45ms_keeps_60 ... slow_encoder latency_ms=45 received_fps_mean=60.0 received_fps=[59.338673, 60.81811, 59.818092, 59.68855, 60.562836, 59.786243, 59.530674, 60.46516, 59.40011, 60.593155] pace_fps=60 capture_fps=60.0 skipped_ticks=0 expired_encoder_outputs=0 state=Streaming
+ok
+test slow_link::fixed_wan_keeps_full_rate_at_fixed_resolution ... fixed_wan roundtrip_ms=350 pace_fps=60 bitrate=4907914 encoder_bitrate=4907914 presented_fps=60.0 received_fps=60.6 rtt_ms=Some(354) keyframes=1 sizes=[(1920, 1080)] configured=1 expired_encoder_outputs=0 state=Streaming
+ok
+test slow_link::idr_another_viewer_asked_for_on_a_slow_link ... room_idr link_mbps=1 encoder_ms=45 rounds=8 answered=8 waited_ms=[582, 48, 468, 366, 401, 381, 404, 233] waited_ms_median=Some(401) waited_ms_max=Some(582) frames_first=[6, 0, 6, 3, 4, 4, 4, 1] frames_first_total=28 held=0 keyframes_requested=0 host_keyframes=20 host_dropped_frames=150 sink_discarded=0 received_fps=15.9 state=Streaming
+room_idr other_received_fps=27.7 other_state=Streaming
+ok
+test slow_link::idr_slower_than_a_second_is_followed_not_replaced ... slow_idr link_mbps=1 idr_kib=162 keyframes=1 received_keyframes=1 keyframes_requested=0 lowest_encoder_bitrate=2924114 final_pace=26 received_fps=19.9 presented_fps=19.0 state=Streaming
+ok
+test slow_link::isolated_stall_does_not_collapse_fps ... isolated_stall one_way_ms=18 stall_ms=600 (pace_before, lowest_pace, back_at_55_after)=[(60, 60, 0ns), (60, 60, 0ns), (60, 60, 0ns)] received_fps=59.6 state=Streaming
+ok
+test slow_link::lan_rtt_keeps_60 ... lan_rtt one_way_ms=18 ceiling_after_ms=Some(978) received_fps_mean=60.0 received_fps=[59.69017, 59.540604, 60.76284, 59.76907, 59.63061, 59.623444, 60.517002, 59.654785, 59.77066, 60.658844] presented_fps=60.0 rtt_ms=Some(40) state=Streaming
+ok
+test slow_link::per_second_encoder_latches_under_an_fps_cap ... per_second_presenter decode_ms=67 mean_pace_fps=12.0 caps=[Some(10), Some(10), Some(15), Some(15), Some(11), Some(11), Some(11), Some(11), Some(16), Some(10)] fps=60 encoder_bitrate=1333330 presented_fps=10.0 backlog_drops=5 keyframes_requested=5 expired_encoder_outputs=0 latched_after_ms=Some(2017) latched_in_low_stretch_ms=Some(2017) sent_over_expected_before=3.47 sent_over_expected_after=1.01 state=Streaming
+ok
+test slow_link::per_second_encoder_on_a_bandwidth_limit ... per_second_bandwidth_limit link_mbps=1 limit_s=8 before_pace=60 before_bitrate=4150020 before_encoder_bitrate=4150020 clamped_after_ms=Some(998) lowest_pace=2 lowest_bitrate=148334 lowest_encoder_bitrate=4300020 recovered_after_ms=Some(1004) final_pace=2 final_bitrate=148334 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.00 sent_over_expected_after=- state=Streaming
+ok
+test slow_link::requested_idr_on_a_slow_link ... requested_idr link_mbps=1 encoder_ms=45 rounds=8 answered=8 waited_ms=[302, 480, 425, 373, 385, 456, 382, 400] waited_ms_median=Some(400) waited_ms_max=Some(480) frames_first=[1, 5, 5, 5, 5, 7, 6, 7] frames_first_total=41 held=0 keyframes_requested=8 host_keyframes=7 host_dropped_frames=0 sink_discarded=0 received_fps=24.8 state=Streaming
+ok
+test slow_link::slow_presenter_is_capped_by_fps_cap_not_host_backpressure ... slow_presenter decode_ms=67 mean_pace_fps=12.1 caps=[Some(11), Some(11), Some(11), Some(16), Some(11), Some(11), Some(11), Some(11), Some(16)] fps=60 encoder_bitrate=7999980 presented_fps=14.0 backlog_drops=6 keyframes_requested=6 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=1.14 sent_over_expected_after=- state=Streaming
+ok
+test slow_link::sustained_slow_tls_reader ... slow_tls seconds=10 captured=40 skipped_ticks=354 pace_fps=10 received_kbit_s=1561
+slow_tls seconds=20 captured=84 skipped_ticks=609 pace_fps=12 received_kbit_s=1563
+slow_tls seconds=30 captured=122 skipped_ticks=638 pace_fps=12 received_kbit_s=2084
+slow_tls elapsed_s=30.001 link_kib_s=256 frame_bytes=65536 captured=122 skipped_ticks=648 control_ms=4.307 release_ms=3.790 revoke_ms=2.799 stop_ms=120.281 latched_after_ms=Some(8301) latched_in_low_stretch_ms=Some(1811) sent_over_expected_before=2.67 sent_over_expected_after=9.86
 ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 15.06s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 185 filtered out; finished in 250.16s
+
+exit status 0
+
+### Whole suite, per-tick latch, run 3
+load average at start: { 1.36 1.52 2.66 }
 
 
-### per_second_encoder_on_a_bandwidth_limit alone, final assertions, run 2
-
-running 1 test
+running 12 tests
+test slow_link::bandwidth_limit_lowers_fps_and_bitrate_then_recovers ... bandwidth_limit link_mbps=1 limit_s=8 before_pace=60 before_bitrate=4150020 before_encoder_bitrate=4150020 clamped_after_ms=Some(998) lowest_pace=11 lowest_bitrate=788337 lowest_encoder_bitrate=3880768 recovered_after_ms=Some(1999) final_pace=60 final_bitrate=3686729 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.89 sent_over_expected_after=- state=Streaming
+ok
+test slow_link::encoder_latency_of_45ms_keeps_60 ... slow_encoder latency_ms=45 received_fps_mean=60.0 received_fps=[59.625027, 59.537117, 60.45398, 59.502773, 60.70494, 59.56066, 60.613827, 59.83506, 59.507496, 60.61683] pace_fps=60 capture_fps=60.0 skipped_ticks=0 expired_encoder_outputs=0 state=Streaming
+ok
+test slow_link::fixed_wan_keeps_full_rate_at_fixed_resolution ... fixed_wan roundtrip_ms=350 pace_fps=60 bitrate=4907914 encoder_bitrate=4907914 presented_fps=60.0 received_fps=59.6 rtt_ms=Some(351) keyframes=1 sizes=[(1920, 1080)] configured=1 expired_encoder_outputs=0 state=Streaming
+ok
+test slow_link::idr_another_viewer_asked_for_on_a_slow_link ... room_idr link_mbps=1 encoder_ms=45 rounds=8 answered=8 waited_ms=[200, 646, 569, 311, 71, 292, 61, 503] waited_ms_median=Some(311) waited_ms_max=Some(646) frames_first=[0, 8, 7, 2, 0, 1, 0, 7] frames_first_total=25 held=0 keyframes_requested=0 host_keyframes=19 host_dropped_frames=121 sink_discarded=0 received_fps=14.9 state=Streaming
+room_idr other_received_fps=18.9 other_state=Streaming
+ok
+test slow_link::idr_slower_than_a_second_is_followed_not_replaced ... slow_idr link_mbps=1 idr_kib=162 keyframes=1 received_keyframes=1 keyframes_requested=0 lowest_encoder_bitrate=2478612 final_pace=44 received_fps=21.8 presented_fps=22.0 state=Streaming
+ok
+test slow_link::isolated_stall_does_not_collapse_fps ... isolated_stall one_way_ms=18 stall_ms=600 (pace_before, lowest_pace, back_at_55_after)=[(60, 60, 0ns), (60, 60, 0ns), (60, 60, 0ns)] received_fps=60.7 state=Streaming
+ok
+test slow_link::lan_rtt_keeps_60 ... lan_rtt one_way_ms=18 ceiling_after_ms=Some(978) received_fps_mean=60.1 received_fps=[60.612255, 59.79204, 59.57991, 60.747852, 59.78119, 59.739197, 59.592876, 60.74817, 59.537025, 60.71005] presented_fps=60.0 rtt_ms=Some(39) state=Streaming
+ok
+test slow_link::per_second_encoder_latches_under_an_fps_cap ... per_second_presenter decode_ms=67 mean_pace_fps=11.9 caps=[Some(10), Some(10), Some(10), Some(10), Some(15), Some(15), Some(11), Some(11), Some(11), Some(16)] fps=60 encoder_bitrate=2133328 presented_fps=13.0 backlog_drops=5 keyframes_requested=5 expired_encoder_outputs=0 latched_after_ms=Some(2018) latched_in_low_stretch_ms=Some(2018) sent_over_expected_before=3.47 sent_over_expected_after=1.03 state=Streaming
+ok
 test slow_link::per_second_encoder_on_a_bandwidth_limit ... per_second_bandwidth_limit link_mbps=1 limit_s=8 before_pace=60 before_bitrate=4150020 before_encoder_bitrate=4150020 clamped_after_ms=Some(998) lowest_pace=2 lowest_bitrate=148334 lowest_encoder_bitrate=4300020 recovered_after_ms=Some(1007) final_pace=60 final_bitrate=4450020 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.00 sent_over_expected_after=- state=Streaming
 ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 15.31s
-
-
-### per_second_encoder_on_a_bandwidth_limit alone, final assertions, run 3
-
-running 1 test
-test slow_link::per_second_encoder_on_a_bandwidth_limit ... per_second_bandwidth_limit link_mbps=1 limit_s=8 before_pace=60 before_bitrate=4150020 before_encoder_bitrate=4150020 clamped_after_ms=Some(998) lowest_pace=2 lowest_bitrate=148334 lowest_encoder_bitrate=4300020 recovered_after_ms=Some(1009) final_pace=60 final_bitrate=4450020 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=0.00 sent_over_expected_after=- state=Streaming
+test slow_link::requested_idr_on_a_slow_link ... requested_idr link_mbps=1 encoder_ms=45 rounds=8 answered=8 waited_ms=[431, 336, 292, 443, 394, 460, 345, 405] waited_ms_median=Some(405) waited_ms_max=Some(460) frames_first=[4, 1, 3, 6, 5, 7, 5, 7] frames_first_total=38 held=0 keyframes_requested=8 host_keyframes=7 host_dropped_frames=0 sink_discarded=0 received_fps=21.9 state=Streaming
+ok
+test slow_link::slow_presenter_is_capped_by_fps_cap_not_host_backpressure ... slow_presenter decode_ms=67 mean_pace_fps=12.9 caps=[Some(10), Some(15), Some(15), Some(11), Some(11), Some(11), Some(11), Some(16), Some(16)] fps=60 encoder_bitrate=7999980 presented_fps=11.0 backlog_drops=6 keyframes_requested=6 expired_encoder_outputs=0 latched_after_ms=None latched_in_low_stretch_ms=None sent_over_expected_before=1.12 sent_over_expected_after=- state=Streaming
+ok
+test slow_link::sustained_slow_tls_reader ... slow_tls seconds=10 captured=39 skipped_ticks=341 pace_fps=10 received_kbit_s=1558
+slow_tls seconds=20 captured=80 skipped_ticks=565 pace_fps=60 received_kbit_s=2083
+slow_tls seconds=30 captured=116 skipped_ticks=758 pace_fps=2 received_kbit_s=1562
+slow_tls elapsed_s=30.002 link_kib_s=256 frame_bytes=65536 captured=116 skipped_ticks=758 control_ms=4.260 release_ms=3.964 revoke_ms=1.453 stop_ms=15.087 latched_after_ms=Some(8306) latched_in_low_stretch_ms=Some(2062) sent_over_expected_before=3.63 sent_over_expected_after=10.02
 ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 189 filtered out; finished in 15.30s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 185 filtered out; finished in 250.88s
 
+exit status 0
 
