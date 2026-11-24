@@ -45,6 +45,21 @@
 //!   with no input: each change is the first present after stillness, whose
 //!   wait to the submit that took it `after_still_present_to_submit_*`
 //!   reports.
+//! - `--greys`: cover the whole display with 16 still bands of grey, from
+//!   black on the left to white on the right in steps of 17, painted once,
+//!   and print a `greys` line: the mean luma of the middle of each band in
+//!   the last picture the encoder was given, read back from the GPU, beside
+//!   the studio-range luma the band's grey must become, and the largest
+//!   difference. On a Windows HDR desktop, at each SDR content brightness,
+//!   it shows whether SDR content arrives at the brightness it has on an
+//!   SDR desktop; with `--sdr-duplication`, as before the tone map. Not
+//!   with `--backend`.
+//! - `--sdr-duplication`: duplicate the desktop in BGRA8 only, so that
+//!   DXGI converts a Windows HDR desktop itself, as every capture did
+//!   before the encoder tone mapped it: the baseline arm of that
+//!   comparison, in the same build, which records what that conversion
+//!   does on the device's driver. Nothing changes on an SDR desktop. Not
+//!   with `--backend`.
 //! - `--h264-profile base|high`: the H.264 profile asked for first (High by
 //!   default, as a session: Constrained High, High, then Baseline where the
 //!   encoder refuses them).
@@ -69,10 +84,11 @@
 //!   time the encoder in a run without it. Not with `--backend`.
 //! - `--gpu-time`: time the GPU work each submitted picture queues with
 //!   D3D11 timestamp queries (a new picture's conversion, with its copy out
-//!   of the duplication where there is one; a repeat's copy of the last
-//!   sample), read back once the GPU has them, and print a `gpu_time` line.
-//!   A video processor on another engine of the GPU may not lie wholly
-//!   inside the span; GPUView or PIX tells. Not with `--backend`.
+//!   of the duplication where there is one, or its HDR tone map, which is
+//!   also timed apart; a repeat's copy of the last sample), read back once
+//!   the GPU has them, and print a `gpu_time` line. A video processor on
+//!   another engine of the GPU may not lie wholly inside the span; GPUView
+//!   or PIX tells. Not with `--backend`.
 //! - `--copy-capture`: copy each new picture out of the duplication before
 //!   converting it, as a video processor that refuses the duplication's
 //!   surface has it and as every picture was before direct conversion: the
@@ -114,8 +130,11 @@
 //! and the cycles its thread ran in them, per access unit; and the median and
 //! mean of each of a submit that converted a capture and of a drain that
 //! returned a unit; a `capture` line: whether new pictures were converted
-//! straight from the duplication's surface (`direct`) or copied out of it
-//! first (`copied`, where the video processor refused it), whether the
+//! straight from the duplication's surface (`direct`), copied out of it
+//! first (`copied`, where the video processor refused it) or tone mapped
+//! from an HDR desktop first (`tone_mapped`), the display's SDR white
+//! level read as the encoder was built for an HDR desktop
+//! (`sdr_white_nits`), whether the
 //! video processor was asked for quality, and the submits that repeated the
 //! last picture by copying its sample, with their median and mean time; and
 //! an `encoder_events` line: whether its events were
@@ -222,7 +241,7 @@ mod counting {
 mod bench {
     use crate::{
         pacer::Pacer,
-        pattern::{Fill, Pattern},
+        pattern::{Fill, GREYS, Pattern},
         probe_support::option,
     };
     use pb_mapper_desktop::{
@@ -286,20 +305,22 @@ mod bench {
         let text = flag(&args, "--text");
         let still = flag(&args, "--still");
         let spontaneous = flag(&args, "--spontaneous");
-        let still_fills = [text, still, spontaneous]
+        let greys = flag(&args, "--greys");
+        let still_fills = [text, still, spontaneous, greys]
             .into_iter()
             .filter(|fill| *fill)
             .count();
         let moving = noise
             || option(&args, "--dump").is_some()
-            || ((still || spontaneous) && (flag(&args, "--animate") || rates.paces.is_some()));
+            || ((still || spontaneous || greys)
+                && (flag(&args, "--animate") || rates.paces.is_some()));
         if still_fills > 1 || (still_fills == 1 && moving) {
             return Err(
-                "--text, --still and --spontaneous are still or change once a second: one at a time, not with --noise or --dump, and --still and --spontaneous not with --animate or --pace"
+                "--text, --still, --greys and --spontaneous are still or change once a second: one at a time, not with --noise or --dump, and --still, --greys and --spontaneous not with --animate or --pace"
                     .into(),
             );
         }
-        let _animation = if option(&args, "--dump").is_some() || noise || text || still {
+        let _animation = if option(&args, "--dump").is_some() || noise || text || still || greys {
             Some(Pattern::new(
                 display.x,
                 display.y,
@@ -311,6 +332,8 @@ mod bench {
                     Fill::Text
                 } else if still {
                     Fill::Still
+                } else if greys {
+                    Fill::Greys
                 } else {
                     Fill::Colour
                 },
@@ -381,7 +404,7 @@ mod bench {
         };
         let build_ms = building.elapsed().as_secs_f64() * 1000.0;
         if let Some(encoder) = &mut encoder {
-            if sinks.source.is_some() {
+            if sinks.source.is_some() || limits.greys {
                 encoder.keep_source();
             }
             if limits.gpu_time {
@@ -408,7 +431,7 @@ mod bench {
             }
         };
         println!(
-            "encoder={} codec={codec:?} build_ms={build_ms:.1} display={}x{} nominal_fps={fps} max_size={max_width}x{max_height}{} target_bitrate={bitrate} h264_profile={:?} qvs={} scenario={} gpu_priority={} vp_usage={:?}",
+            "encoder={} codec={codec:?} build_ms={build_ms:.1} display={}x{} nominal_fps={fps} max_size={max_width}x{max_height}{} target_bitrate={bitrate} h264_profile={:?} qvs={} scenario={} gpu_priority={} vp_usage={:?} sdr_duplication={}",
             coder.name(),
             display.width,
             display.height,
@@ -422,6 +445,7 @@ mod bench {
             },
             options.gpu_priority,
             options.vp_usage,
+            options.sdr_duplication,
         );
 
         let steps = rates.steps();
@@ -543,6 +567,30 @@ mod bench {
         value.map_or_else(|| "none".to_owned(), |value| value.to_string())
     }
 
+    /// The mean luma of each of `--greys`' bands in the NV12 picture `nv12`
+    /// of `width` × `height`, left to right: over the middle half of the
+    /// band's columns and of the rows, away from the edges a scaling
+    /// blurs. None for a picture shorter than its size says.
+    fn band_luma(nv12: &[u8], width: usize, height: usize) -> Option<Vec<f64>> {
+        let luma = nv12.get(..width * height)?;
+        let bands = GREYS.len();
+        (0..bands)
+            .map(|band| {
+                let (left, right) = (width * band / bands, width * (band + 1) / bands);
+                let margin = (right - left) / 4;
+                let (sum, count) = (height / 4..height * 3 / 4)
+                    .filter_map(|row| {
+                        luma.get(row * width + left + margin..row * width + right - margin)
+                    })
+                    .flatten()
+                    .fold((0u64, 0u64), |(sum, count), &value| {
+                        (sum + u64::from(value), count + 1)
+                    });
+                (count > 0).then(|| sum as f64 / count as f64)
+            })
+            .collect()
+    }
+
     /// What the run asks for that needs no display: how long, at which paces
     /// and nominal rate, in which codec.
     struct Rates {
@@ -624,8 +672,12 @@ mod bench {
         /// Copy each new picture out of the duplication before converting
         /// it, as before direct conversion.
         copy_capture: bool,
+        /// The display shows `--greys`' bands, whose luma the last picture
+        /// given to the encoder is read back for.
+        greys: bool,
         /// The encoder's profile, quality against speed, scenario, GPU
-        /// priority and polled events, and the video processor's usage.
+        /// priority and polled events, the video processor's usage, and
+        /// the duplication's formats.
         options: EncoderOptions,
     }
     impl Limits {
@@ -717,6 +769,7 @@ mod bench {
                         .into());
                     }
                 },
+                sdr_duplication: flag(args, "--sdr-duplication"),
             };
             if options.quality_vs_speed > 100 {
                 return Err("--qvs must be 0..100".into());
@@ -725,10 +778,11 @@ mod bench {
                 || option(args, "--qvs").is_some()
                 || options.display_remoting
                 || options.gpu_priority
-                || options.vp_usage != VpUsage::Auto;
+                || options.vp_usage != VpUsage::Auto
+                || options.sdr_duplication;
             if backend && changes_encoder {
                 return Err(
-                    "--h264-profile, --qvs, --scenario, --gpu-priority and --vp-usage build the encoder; a backend takes a session's settings"
+                    "--h264-profile, --qvs, --scenario, --gpu-priority, --vp-usage and --sdr-duplication build the encoder; a backend takes a session's settings"
                         .into(),
                 );
             }
@@ -736,9 +790,11 @@ mod bench {
                 .map(File::create)
                 .transpose()?
                 .map(BufWriter::new);
-            if source.is_some() && backend {
+            let greys = flag(args, "--greys");
+            if (source.is_some() || greys) && backend {
                 return Err(
-                    "--dump-source reads the encoder's input back; not with --backend".into(),
+                    "--dump-source and --greys read the encoder's input back; not with --backend"
+                        .into(),
                 );
             }
             let limits = Self {
@@ -753,6 +809,7 @@ mod bench {
                 exact,
                 gpu_time,
                 copy_capture,
+                greys,
                 options,
             };
             Ok((
@@ -897,9 +954,11 @@ mod bench {
         /// `--gpu-time`'s spans, as the GPU finished them.
         gpu: Vec<GpuSpan>,
         /// `--dump-source`'s NV12 pictures written, and the buffer each is
-        /// read back into.
+        /// read back into, which `--greys` reads the last of.
         sources: u64,
         source: Vec<u8>,
+        /// The encoded size, as the units give it.
+        size: Option<(u32, u32)>,
         /// Each unit's dwell in the encoder, submit to output, in
         /// milliseconds (`Encoded::encode_us`).
         dwell_ms: Vec<f64>,
@@ -943,6 +1002,7 @@ mod bench {
                 self.awaiting_recovery = false;
             }
             self.dwell_ms.push(f64::from(frame.encode_us) / 1e3);
+            self.size = Some((frame.width, frame.height));
             self.backend_stats.encoded += 1;
             self.backend_stats.unique_encoded += u64::from(!frame.duplicate);
             self.backend_stats.bytes += frame.bytes.len() as u64;
@@ -1094,8 +1154,9 @@ mod bench {
                                     .push_back(encoder.presented().map(|presented| presented.at));
                                 // After the timed call: the read-back waits
                                 // for the GPU.
-                                if let Some(file) = &mut sinks.source
+                                if (sinks.source.is_some() || limits.greys)
                                     && encoder.source_nv12(&mut tally.source)?
+                                    && let Some(file) = &mut sinks.source
                                 {
                                     file.write_all(&tally.source)?;
                                     tally.sources += 1;
@@ -1250,12 +1311,15 @@ mod bench {
                 mean(&tally.drain_kcycles),
             );
             println!(
-                "capture={} vp_quality={} repeats={} repeat_p50_us={:.1} repeat_mean_us={:.1} acquires={} acquires_per_s={:.1}",
-                if stats.direct_capture {
+                "capture={} sdr_white_nits={} vp_quality={} repeats={} repeat_p50_us={:.1} repeat_mean_us={:.1} acquires={} acquires_per_s={:.1}",
+                if stats.tone_mapped {
+                    "tone_mapped"
+                } else if stats.direct_capture {
                     "direct"
                 } else {
                     "copied"
                 },
+                or_none(stats.sdr_white_nits),
                 stats.vp_quality,
                 stats.repeats,
                 median(&tally.repeat_us),
@@ -1273,8 +1337,10 @@ mod bench {
                         .collect()
                 };
                 let (converted, repeated) = (spans(false), spans(true));
+                let tone_mapped: Vec<f64> =
+                    tally.gpu.iter().filter_map(|span| span.tone_map).collect();
                 println!(
-                    "gpu_time convert_spans={} convert_p50_us={:.1} convert_p95_us={:.1} convert_mean_us={:.1} repeat_spans={} repeat_p50_us={:.1} repeat_mean_us={:.1}",
+                    "gpu_time convert_spans={} convert_p50_us={:.1} convert_p95_us={:.1} convert_mean_us={:.1} repeat_spans={} repeat_p50_us={:.1} repeat_mean_us={:.1} tone_map_spans={} tone_map_p50_us={:.1} tone_map_p95_us={:.1} tone_map_mean_us={:.1}",
                     converted.len(),
                     quantile(&converted, 50),
                     quantile(&converted, 95),
@@ -1282,6 +1348,37 @@ mod bench {
                     repeated.len(),
                     quantile(&repeated, 50),
                     mean(&repeated),
+                    tone_mapped.len(),
+                    quantile(&tone_mapped, 50),
+                    quantile(&tone_mapped, 95),
+                    mean(&tone_mapped),
+                );
+            }
+            if limits.greys {
+                let (width, height) = tally.size.ok_or("--greys: no access unit came out")?;
+                let luma = band_luma(&tally.source, width as usize, height as usize)
+                    .ok_or("--greys: no picture was read back")?;
+                let expected: Vec<f64> = GREYS
+                    .iter()
+                    .map(|&level| 16.0 + 219.0 * f64::from(level) / 255.0)
+                    .collect();
+                let max_error = luma
+                    .iter()
+                    .zip(&expected)
+                    .map(|(luma, expected)| (luma - expected).abs())
+                    .fold(0.0, f64::max);
+                let list = |values: &[f64]| {
+                    values
+                        .iter()
+                        .map(|value| format!("{value:.1}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                println!(
+                    "greys levels={} luma={} expected={} max_error={max_error:.1}",
+                    GREYS.map(|level| level.to_string()).join(","),
+                    list(&luma),
+                    list(&expected),
                 );
             }
             println!(
@@ -1457,9 +1554,18 @@ mod pattern {
         /// One colour, painted once and again only when Windows asks the
         /// window to repaint.
         Still,
+        /// `GREYS`' bands, painted once and again only when Windows asks
+        /// the window to repaint.
+        Greys,
         /// A colour that changes, and a counter, once a second.
         Second,
     }
+
+    /// The grey levels of `Fill::Greys`' bands, left to right: black to
+    /// white in steps of 17.
+    pub const GREYS: [u8; 16] = [
+        0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255,
+    ];
 
     /// A topmost window at physical desktop coordinates: a changing colour
     /// or fresh noise every display refresh, a still page of text or
@@ -1524,7 +1630,8 @@ mod pattern {
                         let _ = DispatchMessageW(&message);
                     }
                     let once_a_second = fill == Fill::Second;
-                    if text.is_some() || fill == Fill::Still || once_a_second {
+                    let still = matches!(fill, Fill::Still | Fill::Greys);
+                    if text.is_some() || still || once_a_second {
                         if once_a_second && changed.elapsed() >= std::time::Duration::from_secs(1) {
                             changed = std::time::Instant::now();
                             frame = frame.wrapping_add(1);
@@ -1533,6 +1640,7 @@ mod pattern {
                         if std::mem::take(&mut stale) {
                             match &text {
                                 Some(text) => text.paint(dc),
+                                None if fill == Fill::Greys => paint_greys(dc, width, height),
                                 None => paint_colour(dc, width, height, frame),
                             }
                         }
@@ -1604,6 +1712,29 @@ mod pattern {
             );
             let _ = DeleteObject(brush.into());
             let _ = TextOutW(dc, 32, 32, &text);
+        }
+    }
+
+    /// Fill the window's `width` × `height` with `GREYS`' bands, left to
+    /// right.
+    unsafe fn paint_greys(dc: HDC, width: i32, height: i32) {
+        let bands = GREYS.len() as i32;
+        for (band, level) in (0..).zip(GREYS) {
+            let level = u32::from(level);
+            unsafe {
+                let brush = CreateSolidBrush(COLORREF(level | (level << 8) | (level << 16)));
+                let _ = FillRect(
+                    dc,
+                    &RECT {
+                        left: width * band / bands,
+                        top: 0,
+                        right: width * (band + 1) / bands,
+                        bottom: height,
+                    },
+                    brush,
+                );
+                let _ = DeleteObject(brush.into());
+            }
         }
     }
 

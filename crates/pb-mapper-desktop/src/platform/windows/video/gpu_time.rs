@@ -6,7 +6,9 @@
 //!
 //! The span is what the device's timestamps saw between the two: a video
 //! processor that runs on another engine of the GPU may not lie wholly
-//! inside it, which GPUView or PIX tells.
+//! inside it, which GPUView or PIX tells. A new picture of an HDR desktop
+//! also has a timestamp after its tone map's draw (`Split`), which times
+//! that pass apart.
 use crate::{Result, error};
 use std::collections::VecDeque;
 use windows::{
@@ -26,12 +28,18 @@ pub struct GpuSpan {
     /// picture's conversion.
     pub repeat: bool,
     pub micros: f64,
+    /// For a new picture of an HDR desktop, the part of `micros` before
+    /// the timestamp after its tone map's draw: that pass, with the copy
+    /// it reads from where it makes one. `None` for any other.
+    pub tone_map: Option<f64>,
 }
 
-/// One span's queries: the disjoint query around two timestamps.
+/// One span's queries: the disjoint query around two timestamps, and the
+/// timestamp a `Split` may take between them.
 pub(super) struct Queries {
     disjoint: ID3D11Query,
     start: ID3D11Query,
+    split: ID3D11Query,
     end: ID3D11Query,
 }
 impl Queries {
@@ -54,16 +62,57 @@ impl Queries {
         Ok(Self {
             disjoint: query(D3D11_QUERY_TIMESTAMP_DISJOINT)?,
             start: query(D3D11_QUERY_TIMESTAMP)?,
+            split: query(D3D11_QUERY_TIMESTAMP)?,
             end: query(D3D11_QUERY_TIMESTAMP)?,
         })
     }
+}
+
+/// Where a picture's work, timed or not, says its tone map's draw is
+/// queued: the timestamp `GpuSpan::tone_map` ends at, taken once, and only
+/// while timed.
+pub(super) struct Split<'a> {
+    timed: Option<(&'a ID3D11DeviceContext, &'a ID3D11Query)>,
+    marked: bool,
+}
+impl<'a> Split<'a> {
+    /// Inside the span of `queries` on `context`, or untimed.
+    pub(super) fn new(context: &'a ID3D11DeviceContext, queries: Option<&'a Queries>) -> Self {
+        Self {
+            timed: queries.map(|queries| (context, &queries.split)),
+            marked: false,
+        }
+    }
+
+    /// The tone map's draw is queued.
+    pub(super) fn tone_mapped(&mut self) {
+        if let Some((context, query)) = self.timed.take() {
+            // SAFETY: a timestamp query of this context's device, ended on
+            // the context that queues the span's work.
+            unsafe { context.End(query) };
+            self.marked = true;
+        }
+    }
+
+    /// Whether the split's timestamp was taken.
+    pub(super) fn marked(&self) -> bool {
+        self.marked
+    }
+}
+
+/// A span issued and not yet read: its queries, whether it was a repeat's,
+/// and whether its split was taken.
+struct Issued {
+    queries: Queries,
+    repeat: bool,
+    split: bool,
 }
 
 /// The spans issued and not yet read, oldest first, and read ones kept for
 /// reuse.
 #[derive(Default)]
 pub(super) struct GpuTimer {
-    issued: VecDeque<(Queries, bool)>,
+    issued: VecDeque<Issued>,
     free: Vec<Queries>,
 }
 impl GpuTimer {
@@ -88,36 +137,56 @@ impl GpuTimer {
         Ok(Some(queries))
     }
 
-    /// Close the span `begin` opened, for a `repeat` or a new picture.
-    pub(super) fn end(&mut self, context: &ID3D11DeviceContext, queries: Queries, repeat: bool) {
+    /// Close the span `begin` opened, for a `repeat` or a new picture,
+    /// whose `split` was taken or not.
+    pub(super) fn end(
+        &mut self,
+        context: &ID3D11DeviceContext,
+        queries: Queries,
+        repeat: bool,
+        split: bool,
+    ) {
         unsafe {
             context.End(&queries.end);
             context.End(&queries.disjoint);
         }
-        self.issued.push_back((queries, repeat));
+        self.issued.push_back(Issued {
+            queries,
+            repeat,
+            split,
+        });
     }
 
     /// Move the spans the GPU has finished into `out`, in the order they
     /// were opened. A span whose timestamps the GPU calls disjoint (its
     /// clock changed meanwhile) is left out.
     pub(super) fn collect(&mut self, context: &ID3D11DeviceContext, out: &mut Vec<GpuSpan>) {
-        while let Some((queries, _)) = self.issued.front() {
+        while let Some(Issued { queries, split, .. }) = self.issued.front() {
             let Some(clock) =
                 data::<D3D11_QUERY_DATA_TIMESTAMP_DISJOINT>(context, &queries.disjoint)
             else {
                 break;
             };
-            // The disjoint query ended after both timestamps, so they are in.
+            // The disjoint query ended after the timestamps, so they are in.
             let span = data::<u64>(context, &queries.start)
                 .zip(data::<u64>(context, &queries.end))
                 .filter(|_| !clock.Disjoint.as_bool() && clock.Frequency > 0);
-            let Some((queries, repeat)) = self.issued.pop_front() else {
+            let split = split
+                .then(|| data::<u64>(context, &queries.split))
+                .flatten();
+            let Some(Issued {
+                queries, repeat, ..
+            }) = self.issued.pop_front()
+            else {
                 break;
             };
             if let Some((start, end)) = span {
+                let micros =
+                    |to: u64| to.saturating_sub(start) as f64 * 1e6 / clock.Frequency as f64;
                 out.push(GpuSpan {
                     repeat,
-                    micros: end.saturating_sub(start) as f64 * 1e6 / clock.Frequency as f64,
+                    micros: micros(end),
+                    tone_map: split.map(micros),
                 });
             }
             self.free.push(queries);
