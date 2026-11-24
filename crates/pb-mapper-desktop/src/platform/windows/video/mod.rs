@@ -46,6 +46,8 @@ mod tonemap;
 pub use crate::codec::sps::SpsReorder;
 pub use gpu_time::GpuSpan;
 pub use probe::h265_available;
+#[cfg(feature = "windows-helper")]
+pub(crate) use probe::named_adapter;
 
 use super::gpu_priority::GpuPriority;
 use crate::{

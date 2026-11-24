@@ -36,13 +36,47 @@ fn display_adapter(id: u32) -> Result<IDXGIAdapter1> {
     Err(error("selected display is no longer available"))
 }
 
+/// What [`h265_available`] probed in this process, by adapter LUID.
+static PROBED: parking_lot::Mutex<Vec<(u64, bool)>> = parking_lot::const_mutex(Vec::new());
+
+/// The GPU that drives `display`, with its driver, as the helper's worker
+/// names it to the host, which keeps the worker's H.265 answer under it:
+/// the adapter's vendor, device, subsystem and revision, and the version of
+/// its user-mode driver; with what this process's probe of that adapter
+/// answered, once it probed it. `None` when no adapter drives the display,
+/// or DXGI reports no driver version for it, so that the host asks again.
+#[cfg(feature = "windows-helper")]
+pub(crate) fn named_adapter(display: &crate::Display) -> Option<crate::oop::server::NamedAdapter> {
+    use windows::{Win32::Graphics::Dxgi::IDXGIDevice, core::Interface};
+    let adapter = display_adapter(display.id).ok()?;
+    let desc = unsafe { adapter.GetDesc1() }.ok()?;
+    // Asked of `IDXGIDevice`, as DXGI documents: the version of the
+    // Direct3D 9 user-mode driver, which every component of a WDDM 2.3 or
+    // later driver package shares. An adapter without one, such as a
+    // driver that answers `DXGI_ERROR_UNSUPPORTED`, has no key.
+    let driver = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }.ok()?;
+    let key = crate::oop::proto::AdapterKey::new(
+        desc.VendorId,
+        desc.DeviceId,
+        desc.SubSysId,
+        desc.Revision,
+        u64::try_from(driver).ok()?,
+    )?;
+    let luid = luid_value(desc.AdapterLuid);
+    let h265 = PROBED
+        .lock()
+        .iter()
+        .find(|(probed, _)| *probed == luid)
+        .map(|&(_, usable)| usable);
+    Some(crate::oop::server::NamedAdapter { key, h265 })
+}
+
 /// Whether the GPU that drives display `id` has a hardware H.265 encoder this
 /// pipeline can use: an MFT for that adapter that activates, takes the Main
 /// 4:2:0 output and NV12 input types at 1920x1080@60 with B-frames off, and
 /// starts streaming, without encoding a frame. Probed once per adapter LUID
 /// and kept for the process; a display no adapter drives is not kept.
 pub fn h265_available(id: u32) -> bool {
-    static PROBED: parking_lot::Mutex<Vec<(u64, bool)>> = parking_lot::const_mutex(Vec::new());
     let probe = || -> Result<bool> {
         let adapter = display_adapter(id)?;
         let luid = luid_value(unsafe { adapter.GetDesc1().map_err(error)? }.AdapterLuid);
