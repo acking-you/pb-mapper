@@ -1,0 +1,95 @@
+# 2026-11-24 14:14:19 start, load averages: 3.16 2.63 2.39
+running 1 test
+test platform::macos::tests::video_toolbox_rate_model_follow_h264 ... follow codec=H264 size=1920x1080 low_latency=true nominal_fps=60 bits_per_frame=66667
+follow codec=H264 size=1920x1080 low_latency=true model=both pace=60 submitted=240 units=240 dropped=0 produced_over_target=1.01 bits_per_picture_over_bpf=1.01 bits_per_unit_over_bpf=1.01
+follow codec=H264 size=1920x1080 low_latency=true model=nominal pace=30 submitted=120 units=120 dropped=0 produced_over_target=1.99 bits_per_picture_over_bpf=1.99 bits_per_unit_over_bpf=1.99
+follow codec=H264 size=1920x1080 low_latency=true model=nominal pace=15 submitted=60 units=60 dropped=0 produced_over_target=3.91 bits_per_picture_over_bpf=3.91 bits_per_unit_over_bpf=3.91
+follow codec=H264 size=1920x1080 low_latency=true model=nominal pace=10 submitted=40 units=40 dropped=0 produced_over_target=5.96 bits_per_picture_over_bpf=5.96 bits_per_unit_over_bpf=5.96
+follow codec=H264 size=1920x1080 low_latency=true model=nominal pace=10 forced_idr_bits=991960 idr_over_bpf=14.9 idr_psnr=28.27
+follow codec=H264 size=1920x1080 low_latency=true model=nominal pace=5 submitted=20 units=20 dropped=0 produced_over_target=11.42 bits_per_picture_over_bpf=11.42 bits_per_unit_over_bpf=11.42
+follow codec=H264 size=1920x1080 low_latency=true model=nominal pace=5 forced_idr_bits=1193048 idr_over_bpf=17.9 idr_psnr=27.88
+follow codec=H264 size=1920x1080 low_latency=true model=timestamp pace=30 submitted=120 units=120 dropped=0 produced_over_target=1.02 bits_per_picture_over_bpf=1.02 bits_per_unit_over_bpf=1.02
+follow codec=H264 size=1920x1080 low_latency=true model=timestamp pace=15 submitted=60 units=60 dropped=0 produced_over_target=0.99 bits_per_picture_over_bpf=0.99 bits_per_unit_over_bpf=0.99
+follow codec=H264 size=1920x1080 low_latency=true model=timestamp pace=10 submitted=40 units=40 dropped=0 produced_over_target=0.99 bits_per_picture_over_bpf=0.99 bits_per_unit_over_bpf=0.99
+follow codec=H264 size=1920x1080 low_latency=true model=timestamp pace=10 forced_idr_bits=867072 idr_over_bpf=13.0 idr_psnr=27.64
+follow codec=H264 size=1920x1080 low_latency=true model=timestamp pace=5 submitted=20 units=9 dropped=11 produced_over_target=0.50 bits_per_picture_over_bpf=0.50 bits_per_unit_over_bpf=1.12
+follow codec=H264 size=1920x1080 low_latency=true model=timestamp pace=5 forced_idr_bits=1239352 idr_over_bpf=18.6 idr_psnr=27.86
+follow codec=H264 size=1920x1080 low_latency=false nominal_fps=60 bits_per_frame=66667
+follow codec=H264 size=1920x1080 low_latency=false model=both pace=60 submitted=240 units=240 dropped=0 produced_over_target=1.00 bits_per_picture_over_bpf=1.00 bits_per_unit_over_bpf=1.00
+follow codec=H264 size=1920x1080 low_latency=false model=nominal pace=30 submitted=120 units=120 dropped=0 produced_over_target=1.87 bits_per_picture_over_bpf=1.87 bits_per_unit_over_bpf=1.87
+follow codec=H264 size=1920x1080 low_latency=false model=nominal pace=15 submitted=60 units=60 dropped=0 produced_over_target=3.00 bits_per_picture_over_bpf=3.00 bits_per_unit_over_bpf=3.00
+follow codec=H264 size=1920x1080 low_latency=false model=nominal pace=10 submitted=40 units=40 dropped=0 produced_over_target=4.63 bits_per_picture_over_bpf=4.63 bits_per_unit_over_bpf=4.63
+follow codec=H264 size=1920x1080 low_latency=false model=nominal pace=10 forced_idr_bits=3101896 idr_over_bpf=46.5 idr_psnr=31.62
+follow codec=H264 size=1920x1080 low_latency=false model=nominal pace=5 submitted=20 units=20 dropped=0 produced_over_target=6.25 bits_per_picture_over_bpf=6.25 bits_per_unit_over_bpf=6.25
+follow codec=H264 size=1920x1080 low_latency=false model=nominal pace=5 forced_idr_bits=1565936 idr_over_bpf=23.5 idr_psnr=29.27
+follow codec=H264 size=1920x1080 low_latency=false model=timestamp pace=30 submitted=120 units=120 dropped=0 produced_over_target=0.99 bits_per_picture_over_bpf=0.99 bits_per_unit_over_bpf=0.99
+follow codec=H264 size=1920x1080 low_latency=false model=timestamp pace=15 submitted=60 units=60 dropped=0 produced_over_target=0.79 bits_per_picture_over_bpf=0.79 bits_per_unit_over_bpf=0.79
+follow codec=H264 size=1920x1080 low_latency=false model=timestamp pace=10 submitted=40 units=40 dropped=0 produced_over_target=0.80 bits_per_picture_over_bpf=0.80 bits_per_unit_over_bpf=0.80
+follow codec=H264 size=1920x1080 low_latency=false model=timestamp pace=10 forced_idr_bits=975008 idr_over_bpf=14.6 idr_psnr=26.05
+follow codec=H264 size=1920x1080 low_latency=false model=timestamp pace=5 submitted=20 units=20 dropped=0 produced_over_target=0.59 bits_per_picture_over_bpf=0.59 bits_per_unit_over_bpf=0.59
+follow codec=H264 size=1920x1080 low_latency=false model=timestamp pace=5 forced_idr_bits=389896 idr_over_bpf=5.8 idr_psnr=22.60
+follow codec=H264 size=2560x1440 low_latency=true nominal_fps=60 bits_per_frame=102641
+follow codec=H264 size=2560x1440 low_latency=true model=both pace=60 submitted=240 units=240 dropped=0 produced_over_target=1.01 bits_per_picture_over_bpf=1.01 bits_per_unit_over_bpf=1.01
+follow codec=H264 size=2560x1440 low_latency=true model=nominal pace=30 submitted=120 units=120 dropped=0 produced_over_target=1.98 bits_per_picture_over_bpf=1.98 bits_per_unit_over_bpf=1.98
+follow codec=H264 size=2560x1440 low_latency=true model=nominal pace=15 submitted=60 units=60 dropped=0 produced_over_target=4.03 bits_per_picture_over_bpf=4.03 bits_per_unit_over_bpf=4.03
+follow codec=H264 size=2560x1440 low_latency=true model=nominal pace=10 submitted=40 units=40 dropped=0 produced_over_target=5.93 bits_per_picture_over_bpf=5.93 bits_per_unit_over_bpf=5.93
+follow codec=H264 size=2560x1440 low_latency=true model=nominal pace=10 forced_idr_bits=1868792 idr_over_bpf=18.2 idr_psnr=27.11
+follow codec=H264 size=2560x1440 low_latency=true model=nominal pace=5 submitted=20 units=20 dropped=0 produced_over_target=11.92 bits_per_picture_over_bpf=11.92 bits_per_unit_over_bpf=11.92
+follow codec=H264 size=2560x1440 low_latency=true model=nominal pace=5 forced_idr_bits=1591760 idr_over_bpf=15.5 idr_psnr=27.92
+follow codec=H264 size=2560x1440 low_latency=true model=timestamp pace=30 submitted=120 units=120 dropped=0 produced_over_target=0.99 bits_per_picture_over_bpf=0.99 bits_per_unit_over_bpf=0.99
+follow codec=H264 size=2560x1440 low_latency=true model=timestamp pace=15 submitted=60 units=60 dropped=0 produced_over_target=1.01 bits_per_picture_over_bpf=1.01 bits_per_unit_over_bpf=1.01
+follow codec=H264 size=2560x1440 low_latency=true model=timestamp pace=10 submitted=40 units=40 dropped=0 produced_over_target=1.00 bits_per_picture_over_bpf=1.00 bits_per_unit_over_bpf=1.00
+follow codec=H264 size=2560x1440 low_latency=true model=timestamp pace=10 forced_idr_bits=1496672 idr_over_bpf=14.6 idr_psnr=25.71
+follow codec=H264 size=2560x1440 low_latency=true model=timestamp pace=5 submitted=20 units=6 dropped=14 produced_over_target=0.60 bits_per_picture_over_bpf=0.60 bits_per_unit_over_bpf=2.00
+follow codec=H264 size=2560x1440 low_latency=true model=timestamp pace=5 forced_idr_bits=1743544 idr_over_bpf=17.0 idr_psnr=28.24
+follow codec=H264 size=2560x1440 low_latency=false nominal_fps=60 bits_per_frame=102641
+follow codec=H264 size=2560x1440 low_latency=false model=both pace=60 submitted=240 units=239 dropped=0 produced_over_target=1.00 bits_per_picture_over_bpf=1.00 bits_per_unit_over_bpf=1.00
+follow codec=H264 size=2560x1440 low_latency=false model=nominal pace=30 submitted=120 units=120 dropped=0 produced_over_target=1.87 bits_per_picture_over_bpf=1.87 bits_per_unit_over_bpf=1.87
+follow codec=H264 size=2560x1440 low_latency=false model=nominal pace=15 submitted=60 units=60 dropped=0 produced_over_target=3.02 bits_per_picture_over_bpf=3.02 bits_per_unit_over_bpf=3.02
+follow codec=H264 size=2560x1440 low_latency=false model=nominal pace=10 submitted=40 units=40 dropped=0 produced_over_target=4.64 bits_per_picture_over_bpf=4.64 bits_per_unit_over_bpf=4.64
+follow codec=H264 size=2560x1440 low_latency=false model=nominal pace=10 forced_idr_bits=5179704 idr_over_bpf=50.5 idr_psnr=31.19
+follow codec=H264 size=2560x1440 low_latency=false model=nominal pace=5 submitted=20 units=20 dropped=0 produced_over_target=6.13 bits_per_picture_over_bpf=6.13 bits_per_unit_over_bpf=6.13
+follow codec=H264 size=2560x1440 low_latency=false model=nominal pace=5 forced_idr_bits=2880112 idr_over_bpf=28.1 idr_psnr=29.34
+follow codec=H264 size=2560x1440 low_latency=false model=timestamp pace=30 submitted=120 units=120 dropped=0 produced_over_target=0.98 bits_per_picture_over_bpf=0.98 bits_per_unit_over_bpf=0.98
+follow codec=H264 size=2560x1440 low_latency=false model=timestamp pace=15 submitted=60 units=60 dropped=0 produced_over_target=0.80 bits_per_picture_over_bpf=0.80 bits_per_unit_over_bpf=0.80
+follow codec=H264 size=2560x1440 low_latency=false model=timestamp pace=10 submitted=40 units=40 dropped=0 produced_over_target=0.82 bits_per_picture_over_bpf=0.82 bits_per_unit_over_bpf=0.82
+follow codec=H264 size=2560x1440 low_latency=false model=timestamp pace=10 forced_idr_bits=1918040 idr_over_bpf=18.7 idr_psnr=26.42
+follow codec=H264 size=2560x1440 low_latency=false model=timestamp pace=5 submitted=20 units=20 dropped=0 produced_over_target=0.56 bits_per_picture_over_bpf=0.56 bits_per_unit_over_bpf=0.56
+follow codec=H264 size=2560x1440 low_latency=false model=timestamp pace=5 forced_idr_bits=946072 idr_over_bpf=9.2 idr_psnr=24.68
+follow codec=H264 size=3840x2160 low_latency=true nominal_fps=60 bits_per_frame=188563
+follow codec=H264 size=3840x2160 low_latency=true model=both pace=60 submitted=192 units=192 dropped=0 produced_over_target=1.01 bits_per_picture_over_bpf=1.26 bits_per_unit_over_bpf=1.26
+follow codec=H264 size=3840x2160 low_latency=true model=nominal pace=30 submitted=120 units=120 dropped=0 produced_over_target=2.01 bits_per_picture_over_bpf=2.01 bits_per_unit_over_bpf=2.01
+follow codec=H264 size=3840x2160 low_latency=true model=nominal pace=15 submitted=60 units=60 dropped=0 produced_over_target=4.02 bits_per_picture_over_bpf=4.02 bits_per_unit_over_bpf=4.02
+follow codec=H264 size=3840x2160 low_latency=true model=nominal pace=10 submitted=40 units=40 dropped=0 produced_over_target=5.91 bits_per_picture_over_bpf=5.91 bits_per_unit_over_bpf=5.91
+follow codec=H264 size=3840x2160 low_latency=true model=nominal pace=10 forced_idr_bits=3073784 idr_over_bpf=16.3 idr_psnr=27.14
+follow codec=H264 size=3840x2160 low_latency=true model=nominal pace=5 submitted=20 units=20 dropped=0 produced_over_target=11.75 bits_per_picture_over_bpf=11.75 bits_per_unit_over_bpf=11.75
+follow codec=H264 size=3840x2160 low_latency=true model=nominal pace=5 forced_idr_bits=3496832 idr_over_bpf=18.5 idr_psnr=26.08
+follow codec=H264 size=3840x2160 low_latency=true model=timestamp pace=30 submitted=120 units=120 dropped=0 produced_over_target=1.01 bits_per_picture_over_bpf=1.01 bits_per_unit_over_bpf=1.01
+follow codec=H264 size=3840x2160 low_latency=true model=timestamp pace=15 submitted=60 units=60 dropped=0 produced_over_target=1.02 bits_per_picture_over_bpf=1.02 bits_per_unit_over_bpf=1.02
+follow codec=H264 size=3840x2160 low_latency=true model=timestamp pace=10 submitted=40 units=40 dropped=0 produced_over_target=1.05 bits_per_picture_over_bpf=1.05 bits_per_unit_over_bpf=1.05
+follow codec=H264 size=3840x2160 low_latency=true model=timestamp pace=10 forced_idr_bits=5135144 idr_over_bpf=27.2 idr_psnr=28.13
+follow codec=H264 size=3840x2160 low_latency=true model=timestamp pace=5 submitted=20 units=2 dropped=18 produced_over_target=0.36 bits_per_picture_over_bpf=0.36 bits_per_unit_over_bpf=3.64
+follow codec=H264 size=3840x2160 low_latency=true model=timestamp pace=5 forced_idr_bits=5358888 idr_over_bpf=28.4 idr_psnr=28.12
+follow codec=H264 size=3840x2160 low_latency=false nominal_fps=60 bits_per_frame=188563
+follow codec=H264 size=3840x2160 low_latency=false model=both pace=60 submitted=240 units=240 dropped=0 produced_over_target=1.00 bits_per_picture_over_bpf=1.00 bits_per_unit_over_bpf=1.00
+follow codec=H264 size=3840x2160 low_latency=false model=nominal pace=30 submitted=120 units=119 dropped=0 produced_over_target=1.87 bits_per_picture_over_bpf=1.87 bits_per_unit_over_bpf=1.88
+follow codec=H264 size=3840x2160 low_latency=false model=nominal pace=15 submitted=60 units=60 dropped=0 produced_over_target=3.01 bits_per_picture_over_bpf=3.01 bits_per_unit_over_bpf=3.01
+follow codec=H264 size=3840x2160 low_latency=false model=nominal pace=10 submitted=40 units=40 dropped=0 produced_over_target=4.64 bits_per_picture_over_bpf=4.64 bits_per_unit_over_bpf=4.64
+follow codec=H264 size=3840x2160 low_latency=false model=nominal pace=10 forced_idr_bits=9434712 idr_over_bpf=50.0 idr_psnr=30.89
+follow codec=H264 size=3840x2160 low_latency=false model=nominal pace=5 submitted=20 units=20 dropped=0 produced_over_target=5.91 bits_per_picture_over_bpf=5.91 bits_per_unit_over_bpf=5.91
+follow codec=H264 size=3840x2160 low_latency=false model=nominal pace=5 forced_idr_bits=8205168 idr_over_bpf=43.5 idr_psnr=29.47
+follow codec=H264 size=3840x2160 low_latency=false model=timestamp pace=30 submitted=120 units=120 dropped=0 produced_over_target=0.99 bits_per_picture_over_bpf=0.99 bits_per_unit_over_bpf=0.99
+follow codec=H264 size=3840x2160 low_latency=false model=timestamp pace=15 submitted=60 units=60 dropped=0 produced_over_target=0.80 bits_per_picture_over_bpf=0.80 bits_per_unit_over_bpf=0.80
+follow codec=H264 size=3840x2160 low_latency=false model=timestamp pace=10 submitted=40 units=40 dropped=0 produced_over_target=0.90 bits_per_picture_over_bpf=0.90 bits_per_unit_over_bpf=0.90
+follow codec=H264 size=3840x2160 low_latency=false model=timestamp pace=10 forced_idr_bits=3564960 idr_over_bpf=18.9 idr_psnr=26.17
+follow codec=H264 size=3840x2160 low_latency=false model=timestamp pace=5 submitted=20 units=20 dropped=0 produced_over_target=0.59 bits_per_picture_over_bpf=0.59 bits_per_unit_over_bpf=0.59
+follow codec=H264 size=3840x2160 low_latency=false model=timestamp pace=5 forced_idr_bits=3275744 idr_over_bpf=17.4 idr_psnr=27.30
+follow_summary codec=H264 size=1920x1080 low_latency=true timestamp_error_smaller_everywhere=true timestamp_within_25_percent=[30:true 15:true 10:true 5:false]
+follow_summary codec=H264 size=1920x1080 low_latency=false timestamp_error_smaller_everywhere=true timestamp_within_25_percent=[30:true 15:true 10:true 5:false]
+follow_summary codec=H264 size=2560x1440 low_latency=true timestamp_error_smaller_everywhere=true timestamp_within_25_percent=[30:true 15:true 10:true 5:false]
+follow_summary codec=H264 size=2560x1440 low_latency=false timestamp_error_smaller_everywhere=true timestamp_within_25_percent=[30:true 15:true 10:true 5:false]
+follow_summary codec=H264 size=3840x2160 low_latency=true timestamp_error_smaller_everywhere=true timestamp_within_25_percent=[30:true 15:true 10:true 5:false]
+follow_summary codec=H264 size=3840x2160 low_latency=false timestamp_error_smaller_everywhere=true timestamp_within_25_percent=[30:true 15:true 10:true 5:false]
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 258 filtered out; finished in 359.08s
+# 2026-11-24 14:20:18 end, load averages: 3.60 3.40 2.93

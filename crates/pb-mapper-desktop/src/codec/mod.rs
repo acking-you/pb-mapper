@@ -5,6 +5,9 @@ pub(crate) mod annexb;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod avcc;
 pub(crate) mod pipeline;
+// Sending a dropped picture again: the macOS encoder's, tested everywhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) mod resubmit;
 // Which rate model a pace sweep fits: measurement support, which the macOS
 // encoder's measurement uses and video_bench includes by path; tested
 // everywhere.

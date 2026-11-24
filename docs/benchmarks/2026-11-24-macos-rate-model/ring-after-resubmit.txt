@@ -1,0 +1,83 @@
+# 2026-11-24 14:31:47 start, load averages: 2.89 2.34 2.52
+running 1 test
+test platform::macos::vt_measure::video_toolbox_resubmit ... codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=1 delay_ms=none carried_by=none dropped_total=59
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=2 delay_ms=none carried_by=none dropped_total=70
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=3 delay_ms=none carried_by=none dropped_total=82
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=4 delay_ms=540.3 carried_by=repeat dropped_total=94
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=5 delay_ms=23.2 carried_by=resubmit dropped_total=103
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=6 delay_ms=39.9 carried_by=resubmit dropped_total=115
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=7 delay_ms=23.2 carried_by=resubmit dropped_total=127
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=8 delay_ms=6.8 carried_by=picture dropped_total=140
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=9 delay_ms=290.6 carried_by=repeat dropped_total=155
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=10 delay_ms=39.9 carried_by=resubmit dropped_total=171
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=11 delay_ms=23.4 carried_by=resubmit dropped_total=185
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 k=12 delay_ms=5.8 carried_by=picture dropped_total=199
+codec=H264 size=1920x1080 pace=60 bitrate=1000000 summary trials=12 under_250ms=7 at_least_250ms_or_none=5 by_picture=2 by_resubmit=5 by_repeat=2 max_ms=600.0
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=1 delay_ms=290.6 carried_by=repeat dropped_total=54
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=2 delay_ms=6.6 carried_by=picture dropped_total=56
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=3 delay_ms=23.1 carried_by=resubmit dropped_total=59
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=4 delay_ms=6.8 carried_by=picture dropped_total=62
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=5 delay_ms=6.0 carried_by=picture dropped_total=65
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=6 delay_ms=6.5 carried_by=picture dropped_total=68
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=7 delay_ms=6.3 carried_by=picture dropped_total=71
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=8 delay_ms=5.8 carried_by=picture dropped_total=73
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=9 delay_ms=5.9 carried_by=picture dropped_total=77
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=10 delay_ms=5.8 carried_by=picture dropped_total=78
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=11 delay_ms=5.3 carried_by=picture dropped_total=79
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 k=12 delay_ms=6.0 carried_by=picture dropped_total=83
+codec=H264 size=1920x1080 pace=60 bitrate=2000000 summary trials=12 under_250ms=11 at_least_250ms_or_none=1 by_picture=10 by_resubmit=1 by_repeat=1 max_ms=290.6
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=1 delay_ms=22.1 carried_by=resubmit dropped_total=20
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=2 delay_ms=6.9 carried_by=picture dropped_total=21
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=3 delay_ms=5.9 carried_by=picture dropped_total=22
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=4 delay_ms=6.0 carried_by=picture dropped_total=22
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=5 delay_ms=6.2 carried_by=picture dropped_total=22
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=6 delay_ms=6.0 carried_by=picture dropped_total=23
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=7 delay_ms=6.0 carried_by=picture dropped_total=24
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=8 delay_ms=6.1 carried_by=picture dropped_total=24
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=9 delay_ms=6.4 carried_by=picture dropped_total=24
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=10 delay_ms=5.9 carried_by=picture dropped_total=25
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=11 delay_ms=6.3 carried_by=picture dropped_total=26
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 k=12 delay_ms=6.2 carried_by=picture dropped_total=26
+codec=H264 size=1920x1080 pace=60 bitrate=4000000 summary trials=12 under_250ms=12 at_least_250ms_or_none=0 by_picture=11 by_resubmit=1 by_repeat=0 max_ms=22.1
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=1 delay_ms=none carried_by=none dropped_total=59
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=2 delay_ms=none carried_by=none dropped_total=70
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=3 delay_ms=none carried_by=none dropped_total=82
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=4 delay_ms=540.2 carried_by=repeat dropped_total=94
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=5 delay_ms=23.3 carried_by=resubmit dropped_total=103
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=6 delay_ms=39.9 carried_by=resubmit dropped_total=115
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=7 delay_ms=23.5 carried_by=resubmit dropped_total=127
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=8 delay_ms=6.6 carried_by=picture dropped_total=139
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=9 delay_ms=290.6 carried_by=repeat dropped_total=154
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=10 delay_ms=40.0 carried_by=resubmit dropped_total=168
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=11 delay_ms=22.7 carried_by=resubmit dropped_total=182
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 k=12 delay_ms=6.8 carried_by=picture dropped_total=196
+codec=H265 size=1920x1080 pace=60 bitrate=1000000 summary trials=12 under_250ms=7 at_least_250ms_or_none=5 by_picture=2 by_resubmit=5 by_repeat=2 max_ms=600.0
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=1 delay_ms=290.5 carried_by=repeat dropped_total=54
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=2 delay_ms=6.3 carried_by=picture dropped_total=56
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=3 delay_ms=22.5 carried_by=resubmit dropped_total=59
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=4 delay_ms=6.4 carried_by=picture dropped_total=62
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=5 delay_ms=6.9 carried_by=picture dropped_total=65
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=6 delay_ms=6.2 carried_by=picture dropped_total=68
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=7 delay_ms=6.1 carried_by=picture dropped_total=71
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=8 delay_ms=6.4 carried_by=picture dropped_total=73
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=9 delay_ms=6.0 carried_by=picture dropped_total=77
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=10 delay_ms=6.0 carried_by=picture dropped_total=78
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=11 delay_ms=5.9 carried_by=picture dropped_total=79
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 k=12 delay_ms=6.0 carried_by=picture dropped_total=83
+codec=H265 size=1920x1080 pace=60 bitrate=2000000 summary trials=12 under_250ms=11 at_least_250ms_or_none=1 by_picture=10 by_resubmit=1 by_repeat=1 max_ms=290.5
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=1 delay_ms=22.9 carried_by=resubmit dropped_total=18
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=2 delay_ms=6.4 carried_by=picture dropped_total=19
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=3 delay_ms=6.2 carried_by=picture dropped_total=20
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=4 delay_ms=6.2 carried_by=picture dropped_total=20
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=5 delay_ms=5.7 carried_by=picture dropped_total=20
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=6 delay_ms=6.0 carried_by=picture dropped_total=21
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=7 delay_ms=6.2 carried_by=picture dropped_total=22
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=8 delay_ms=6.3 carried_by=picture dropped_total=22
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=9 delay_ms=5.9 carried_by=picture dropped_total=22
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=10 delay_ms=6.6 carried_by=picture dropped_total=23
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=11 delay_ms=6.6 carried_by=picture dropped_total=24
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 k=12 delay_ms=6.4 carried_by=picture dropped_total=24
+codec=H265 size=1920x1080 pace=60 bitrate=4000000 summary trials=12 under_250ms=12 at_least_250ms_or_none=0 by_picture=11 by_resubmit=1 by_repeat=0 max_ms=22.9
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 261 filtered out; finished in 180.02s
+# 2026-11-24 14:34:47 end, load averages: 1.39 1.93 2.31
