@@ -9,7 +9,9 @@ exactly 1:1.
 
 A 12-core Apple M6 with 24 GiB RAM, macOS 27.0 (26A425), Flutter 3.50.1 (CI
 pins 3.44.9). The baseline is `1515eda` (master); the measured head is
-`e4f4627`. The runs are `flutter test` runs, so a debug build on the
+`e4f4627`, and `793e226`, which fixes what review found, prints the same
+`PROBE` and `SUMMARY` lines, all 76 of them, when run again. The runs are
+`flutter test` runs, so a debug build on the
 rasteriser `flutter test` uses by default: what is measured is pixel values,
 not time, and neither the build mode nor this machine's speed enters them.
 
@@ -42,7 +44,8 @@ Two cases:
   ratio, and a mouse hovered at 16 seeded positions in it; the view follows
   the pointer.
 - **Near-1 fit**: Fit window in a stage of 1950×1100 device pixels (1950×1100,
-  1560×880, 1300×733.4 and 975×550 logical), where fitting would enlarge the
+  1560×880, 1300×733.4 and 975×550 logical; at 1.5 that is 1100.1 device
+  pixels high), where fitting would enlarge the
   picture by 1.6%.
 
 At `1515eda`, `configure()` sets the viewport through the API of the time:
@@ -96,6 +99,11 @@ which is whole after the change and fractional before.
   `desktop_ui_host`, viewed at Original size in a smaller window, with
   Screenshot.app crops while the pointer moves. This Mac has no `ffmpeg` to
   make the clip, and the check moves the real pointer and captures the
-  screen of an interactive session.
+  screen of an interactive session. When the review fixes were made, the
+  screen was locked with its display asleep, and a remote desktop host was
+  sharing it, so a viewer window here would have shown in that host's
+  picture too. The probe above draws a `RawImage` in `flutter test`'s own
+  rasteriser, not the native `Texture` (on macOS a `CVPixelBuffer` drawn by
+  Impeller over Metal), so no run here covers a native presenter.
 - Windows at 125% and 150% display scaling, and the Linux viewer, which need
   those devices.
