@@ -1053,7 +1053,11 @@ does not require Flutter or a POCOX runtime.
   or protocol. `VideoLimits::for_viewer(refresh_hz)` derives the limits:
   1920×1080 at the refresh rate, up to 120 FPS, and 60 FPS on Android whatever
   mode the phone reports at connect (it may be a power-saving 30 or 48 Hz; the
-  presenter asks for the highest mode while the viewer shows).
+  presenter asks for the highest mode while the viewer shows). A fractional
+  rate rounds to whole frames, so a 59.94 or 119.88 Hz display asks 60 or
+  120. Afterwards `set_display_refresh(hz)` follows the display the viewer's
+  window is on, within `limits.max_fps`, with the existing `FpsCap` (see the
+  fps cap below).
   These are requested limits, not measured delivery or display guarantees.
   `set_quality` switches the preset live without reconnecting, and `pause` and
   `resume` stop and restart video while the viewer is hidden. The private
@@ -2922,6 +2926,61 @@ take, while probes above it keep their wait. At the preset's ceiling the cap
 is removed. Only backlog lowers it, so a phone that keeps up, or a static
 desktop, never ratchets the host down.
 
+The display the viewer's window is on bounds all of this: a frame that
+display has no refresh for is superseded unseen. The app on macOS, Windows
+and Linux connects at the fastest display's refresh rate (the `decoders`
+probe's `display_max_hz`, or the window's display where that is faster), so
+that `limits.max_fps` allows the fastest screen the window may move to. It
+then tells the viewer the rate of its window's display, the hot op
+`display_refresh` (`Viewer::set_display_refresh`): once after connect, when
+that differs from the connect's, and whenever it changes, because the window
+moved to another display, a display's mode changed or the app came back to
+the front. The rate rounds and clamps as at connect, 30 to 120, so 59.94 Hz
+asks 60. Below `limits.max_fps` it is the cap's ceiling under every preset:
+backlog lowers beneath it, raises return to it, and removing the backlog cap
+sends it, not `limits.max_fps`, which would clear the host's limit. A new
+rate goes to the host at the next 250 ms tick with the existing `FpsCap`,
+whatever the backlog's hold and spacing, and also while paused or before the
+consumer is judged; a change undone before that tick sends nothing. A backlog
+cap stays beneath a display that got faster. So a Smooth session whose window
+moves from a 120 Hz to a 60 Hz display stops encoding, sending and decoding
+the frames the display would drop, and returns to 120 when it moves back,
+without a reconnect. Balanced and Quality, whose ceilings are 60 and 30,
+change only on a display slower than that, but the host keeps the display's
+limit for a switch to Smooth. A frame rate the user chose (`fps_override`)
+ignores the display: the frames it brings are fresher. Android ignores it,
+as it ignores the display at connect, and iOS sends none.
+
+Where the window's display rate comes from:
+
+- macOS and Linux: Flutter's view display (`FlutterView.display.refreshRate`)
+  and its metrics changes. The macOS embedder updates the view's display
+  when the window moves to another screen and the display list when a
+  screen's mode changes, and both are metrics changes; on a Mac the rate is
+  the display link's nominal one, rounded. On Linux it is GDK's, in
+  millihertz; whether the embedder moves the view to another monitor's
+  display with the window is still to be checked on a device, and where it
+  does not, nothing is sent and the session keeps its connect's rate. A
+  metrics change that leaves the rate, such as each step of a resize, sends
+  nothing.
+- Windows: Flutter's display reads the mode's whole hertz
+  (`dmDisplayFrequency`), 59 for a 59.94 Hz mode, so the app asks the
+  runner's `refresh_hz` (`pb_mapper/desktop_video`, no arguments): the
+  monitor of Flutter's view (`MonitorFromWindow`, nearest for a window
+  across two), its GDI device name (`GetMonitorInfoW`), and the active
+  display path whose source has that name
+  (`QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS)`,
+  `DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME`), whose target rate is exact
+  (60000/1001); without the paths, as outside the console session, the
+  mode's whole hertz. The app waits at most 200 ms for it, then takes
+  Flutter's. The runner calls `display_changed` on the same channel when the
+  view moves onto another monitor (`WM_MOVE`) or any display's mode
+  changes (`WM_DISPLAYCHANGE`), and the app reads `refresh_hz` again then,
+  when Flutter's rate changes, and when it comes back to the front. Asking
+  60 instead of 59 no longer holds a 60 Hz host a frame a second below its
+  display's rate while content moves; asking 120 instead of 119 does the
+  same at 120.
+
 One limiter covers every keyframe request: the decoder's, the sink's backlog
 episodes and overflow drops, and the user's. While waiting for an IDR it asks at once (or after a 1 s hold that
 follows a new generation, a host recovery or a resume), then after 0.5, 1, 2
@@ -3210,7 +3269,7 @@ so read at the display's rate, and a still one on the timer only.
 | Process timers | 1 ms, with power throttling opted out, while a session captures |
 | IDR | host minimum interval 300 ms; viewer minimum 500 ms, backoff to 4 s; 1 s hold after a discontinuity |
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued, drained until the IDR or a head under 125 ms; IDR grace 500 ms; stall watchdog 700 ms |
-| fps cap | tick 250 ms; capacity from ≥ 4 busy ticks of the last 8; × 0.9 direct, × 0.8 relay; minimum 5; after 3 s, +5 per 30 fps of ceiling or a quarter of the cap, up to 95% of the capacity; probes of 10% watched 3 s (not by the queue within the IDR grace; a pause takes one back), backoff 3 s doubling to 60 s; turnaround late past 2 frame intervals (≥ 40 ms) over its 10 s floor; ≥ 1 s between changes but for a probe taken back |
+| fps cap | tick 250 ms; capacity from ≥ 4 busy ticks of the last 8; × 0.9 direct, × 0.8 relay; minimum 5; after 3 s, +5 per 30 fps of ceiling or a quarter of the cap, up to 95% of the capacity; probes of 10% watched 3 s (not by the queue within the IDR grace; a pause takes one back), backoff 3 s doubling to 60 s; turnaround late past 2 frame intervals (≥ 40 ms) over its 10 s floor; ≥ 1 s between changes but for a probe taken back; within the window's display rate (rounded, 30 to 120), a change of which goes at the next tick |
 | Input | viewer queue 512 events or 256 KiB, batches of 16; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input |
 | Cursor | sampled every 16 ms, or once a period of a faster pace down to 8 ms; the shape looked at 2 ms and 8 ms after a shape-reading controller's newest move, one look pending, a sooner one an earlier move left kept; the controller's own move never reported; an injected move is the pointer until the OS shows it, at most 250 ms after the last (`SETTLE`); a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated, the pointer shows on the shared display and the OS pointer changed (a failed read again after 250 ms), an image over 1024 px a side never, 1 to 256 px a side sent, 64 slots on each end |
 | Codec | `Accepted` waits at most 3 s for the backend's display and H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3; Windows H.264 in Constrained High, then High, then Baseline, `QualityVsSpeed` 0, no scenario |
@@ -3473,7 +3532,8 @@ left out; while the connection is down the core rows show dashes.
     in use, low-latency decoding and the refresh rate asked for.
   - Windows: the counts, the release-to-consume mean, the convert time
     (Convert and copy: from opening a decoded picture to the GPU finishing
-    its copy), the fastest display's refresh, and low latency only where the
+    its copy), the refresh of the display the viewer window is on, exactly
+    (59.94, the rate the viewer follows), and low latency only where the
     decoder's codec API confirms it. Its decoder thread's CPU comes as
     cycles, which the panel does not show.
   - macOS and iOS: the counts, the decode time (VideoToolbox decoding a unit,
@@ -3695,8 +3755,9 @@ channel reports, while a read asks for timings, `timings.surface_consume`
 (from opening a decoded picture for the converter to the GPU finishing the
 copy, the wait and any decode work still queued on the GPU included), each
 `{samples, mean_ms, max_ms}` since the timings began. It always reports
-`refreshHz` (the fastest display's refresh, read as `decoders` reads it),
-and while a decoder thread exists `decoderCycles` (its CPU cycles since it
+`refreshHz`, the exact refresh of the display Flutter's view is on, as
+`refresh_hz` answers it (the fastest display's, read as `decoders` reads it,
+where that says nothing), and while a decoder thread exists `decoderCycles` (its CPU cycles since it
 started, from `QueryThreadCycleTime`). It reports `lowLatency` only when
 the decoder's `ICodecAPI` took `CODECAPI_AVLowLatencyMode`, and otherwise
 leaves it out: the decoder's attribute store, through which the mode is
@@ -4434,6 +4495,7 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | Windows service-owned background host | Final build 922 passed upgrade restart, live direct/relay delivery with its UI exited, and persistent Stop/Enable with the same invitation; OS boot, standalone SCM restart and sleep/resume acceptance pending |
 | Mac display lit when it sleeps | The wake limiter, the closed-lid rule and the 1 s left to a display that turns off under capture are unit-tested on every platform, and the online display list, the lid read and finding the shared display run in the macOS CI job; a session that starts on a sleeping display, a resume after the display slept, a display put to sleep during a session (H.264 and JPEG), `pmset -g assertions`, a locked Mac staying dark (whether the lock is reported within 1 s of the display turning off) and a MacBook with its lid closed, outstanding on a device |
 | Mac capture interval, pause, start, kept capture and filled frame | The interval rule, a strict gate over every common refresh, that no interval outlasts the one before, when it changes and the one change in flight are unit-tested on every platform; the filled-frame flag and the live expected frame rate in the macOS CI job; the kept source for a frame-rate change in the worker tests; on an M6 with its screen locked, the display lookup took a p50 of 13.6 to 13.7 ms with the on-screen windows only against 33.1 ms with every window ([measurements](benchmarks/2026-11-24-mac-capture-cadence/README.md)). ScreenCaptureKit's gate (`sck_cadence`), whether it delivers a change it held back (`sck_held_back_change`, which decides whether a slower pace and a pause may slow the stream further), the frame rate, GPU and WindowServer cost before and after, a last picture arriving within one interval, the start with many windows on screen, two viewers with one pausing, and the filled edge outstanding on a device |
+| Viewer following its window's display | The cap's display rule (lowered and raised at the next tick, backlog beneath it, a recovery sending the display's rate, a chosen frame rate ignoring it), the rounding of 59.94 and 119.88, the FFI op and the app following its window on Windows, macOS and Linux with a fake runner are tested on every platform; in a loopback session on an M6 a Smooth host followed a window moved to a 60 Hz display and back ([measurements](benchmarks/2026-11-24-viewer-refresh/README.md)). The Windows runner compiles in CI only; a window moved between displays on a Mac, a Windows viewer on a 59.94 or 119.88 Hz mode against a 60 or 120 Hz host, and whether the Linux embedder updates the view's display on a move are outstanding on a device |
 | Windows display and system kept awake while capturing | The keeper's timing and the watchdog's loop are unit-tested on every platform and its power request is created in the Windows CI job; a viewer past the display-off timeout, `powercfg /requests` during capture, a network stall and a pause, and waking a dark display, in the app and through the service, outstanding on a device |
 | Same owner's locked login / password entry | Session identity and desktop transition handling implemented; actual password-entry acceptance pending |
 | Pre-login boot, SAS, control across user switching | Unsupported; service waits for its approved owner's login |
