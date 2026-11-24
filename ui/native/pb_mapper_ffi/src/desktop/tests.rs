@@ -297,10 +297,11 @@ fn hot_ops_never_wait_for_a_slow_disconnect() {
     });
 }
 
-/// `display_refresh` hands the viewer its window's display rate exactly:
-/// 59.94 Hz on a 60 fps session asks nothing of the host, where a whole
-/// hertz read as 59 would cap it below its display, and a 30 Hz display
-/// caps it at 30. A rate that is no positive number is refused.
+/// `display_refresh` hands the viewer its window's display rate exactly: a
+/// 50 Hz display caps a 60 fps session at 50, and 59.94 Hz then sends the
+/// session's 60, which clears the cap, where a whole hertz read as 59 would
+/// hold the host below its display; a 30 Hz display caps it at 30. A rate
+/// that is no positive number is refused.
 #[test]
 fn display_refresh_caps_the_host_at_the_window_display() {
     let root = TempRoot::new("desktop-display-refresh");
@@ -319,27 +320,28 @@ fn display_refresh_caps_the_host_at_the_window_display() {
         let refused = hot(handle, json!({"op": "display_refresh", "hz": hz}));
         assert_eq!(refused["code"], "INVALID_ARGUMENT", "{hz}");
     }
-    let refresh = |hz: f64| hot(handle, json!({"op": "display_refresh", "hz": hz}));
-    assert_eq!(refresh(59.94), json!({"success": true, "data": {}}));
-    // Two viewer ticks with nothing to send, then a slower display.
-    std::thread::sleep(Duration::from_millis(600));
-    assert_eq!(refresh(30.0)["success"], true);
-    let first_cap = handle.runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let length = host.read_u32().await.unwrap();
-                let mut record = vec![0; length as usize];
-                host.read_exact(&mut record).await.unwrap();
-                let message: Value = serde_json::from_slice(&record).unwrap();
-                if message["op"] == "fps_cap" {
-                    return message["fps"].clone();
+    // Each rate is told once the host has the one before.
+    let mut caps = Vec::new();
+    for hz in [50.0, 59.94, 30.0] {
+        let told = hot(handle, json!({"op": "display_refresh", "hz": hz}));
+        assert_eq!(told, json!({"success": true, "data": {}}));
+        caps.push(handle.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let length = host.read_u32().await.unwrap();
+                    let mut record = vec![0; length as usize];
+                    host.read_exact(&mut record).await.unwrap();
+                    let message: Value = serde_json::from_slice(&record).unwrap();
+                    if message["op"] == "fps_cap" {
+                        return message["fps"].clone();
+                    }
                 }
-            }
-        })
-        .await
-        .unwrap()
-    });
-    assert_eq!(first_cap, 30);
+            })
+            .await
+            .unwrap()
+        }));
+    }
+    assert_eq!(caps, [50, 60, 30]);
     drop(host);
     call_json(handle, json!({"op": "disconnect"}));
 }
