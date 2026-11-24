@@ -1,10 +1,12 @@
-# run 1, before: base 26b91fc's sources with only slow_link.rs from the branch
-running 1 test
-test slow_link::lan_rtt_keeps_120 ... lan_rtt_keeps_120 encoder=serial_11ms one_way_ms=18 seconds=8..18 received_fps_mean=90.8 encoder_dwell_ms_p50=39 encoder_dwell_ms=[39, 39, 39, 39, 39, 39, 40, 39, 39, 40] received_fps=[90.4293, 90.693634, 91.308044, 90.57204, 91.425644, 90.56277, 90.6655, 91.65674, 90.51413, 90.59997] pace_fps=[120, 120, 120, 120, 120, 120, 120, 120, 120, 120] skipped_per_s=[28.941673, 28.989906, 30.0, 28.927958, 28.99288, 28.942026, 28.977423, 28.96328, 28.972708, 28.968544] expired_encoder_outputs=0 state=Streaming
-lan_rtt_keeps_120 encoder=pipelined_45ms one_way_ms=18 seconds=8..18 received_fps_mean=80.0 encoder_dwell_ms_p50=45 encoder_dwell_ms=[45, 45, 45, 45, 45, 45, 45, 45, 45, 46] received_fps=[79.61663, 79.82902, 80.53825, 80.57681, 79.59496, 80.56208, 80.6623, 79.460335, 79.49459, 79.46156] pace_fps=[120, 120, 120, 120, 120, 120, 120, 120, 120, 120] skipped_per_s=[39.876312, 39.93745, 39.929413, 39.94931, 39.897366, 39.891605, 39.95782, 39.980553, 39.900578, 39.950394] expired_encoder_outputs=0 state=Streaming
+# before, run 1: base 26b91fc with the branch's slow_link.rs; release lib tests, as cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture --test-threads=1 slow_link::lan_rtt_keeps_120
+# 2026-11-24T13:59:48Z load average before: 4.45 3.39 3.31
 
-thread 'slow_link::lan_rtt_keeps_120' (8423545) panicked at crates/pb-mapper-desktop/src/slow_link.rs:1401:13:
-[39, 39, 39, 39, 39, 39, 40, 39, 39, 40]
+running 1 test
+test slow_link::lan_rtt_keeps_120 ... lan_rtt_keeps_120 encoder=serial_11ms one_way_ms=18 seconds=8..48 received_fps_mean=90.9 encoder_dwell_ms_p50=39 encoder_dwell_ms_mean=39.0 seconds_over_25ms=40 skipped_per_s_mean=29.1 encoder_dwell_ms=[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 40, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39] received_fps=[91.273384, 90.50642, 91.5697, 90.6758, 90.5927, 90.645, 91.325775, 90.599236, 91.58102, 90.51305, 90.57529, 91.27116, 90.59806, 91.37795, 90.4636, 91.45213, 90.32934, 91.290535, 90.609375, 91.518234, 90.34406, 91.7401, 90.38264, 90.50351, 91.62331, 90.449356, 90.469444, 91.30813, 90.42035, 91.45862, 90.663055, 91.35976, 90.418106, 91.39397, 90.57476, 91.47511, 90.4206, 90.65468, 91.53831, 90.5705] pace_fps=[120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120] skipped_per_s=[29.0, 28.990437, 29.0, 29.0, 29.953766, 27.981728, 29.0, 29.0, 28.95614, 28.983948, 29.0, 29.930254, 29.0, 28.989613, 29.0, 29.0, 28.96082, 29.0, 28.990658, 30.0, 28.989609, 29.0, 28.93371, 28.984762, 29.0, 28.950356, 28.988588, 28.948513, 29.0, 29.0, 30.0, 29.0, 28.97266, 28.998234, 28.999983, 28.966463, 29.0, 28.981037, 28.989132, 29.0] expired_encoder_outputs=0 state=Streaming
+lan_rtt_keeps_120 encoder=pipelined_45ms one_way_ms=18 seconds=8..48 received_fps_mean=78.6 encoder_dwell_ms_p50=45 encoder_dwell_ms_mean=45.2 seconds_over_25ms=40 skipped_per_s_mean=39.5 encoder_dwell_ms=[45, 45, 46, 46, 45, 45, 45, 45, 46, 45, 45, 46, 45, 45, 45, 45, 46, 46, 45, 45, 45, 45, 46, 45, 45, 45, 45, 45, 45, 45, 45, 45, 45, 46, 45, 45, 45, 45, 45, 45] received_fps=[79.56819, 79.52847, 80.75387, 68.39373, 68.39373, 73.42812, 79.63927, 79.50728, 58.771595, 80.576454, 79.39797, 80.72661, 80.60463, 79.82429, 79.67049, 79.648094, 79.49852, 78.31158, 80.60294, 79.73854, 79.497444, 79.65228, 79.7019, 80.64959, 79.62784, 80.6073, 79.71651, 79.6667, 80.79816, 79.6368, 80.52178, 79.601364, 79.58716, 79.75686, 79.77437, 80.718506, 79.68327, 79.73065, 80.71116, 79.6813] pace_fps=[120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120] skipped_per_s=[39.8079, 40.0, 39.99121, 39.99121, 30.0, 40.0, 39.88881, 29.0, 39.923264, 39.966965, 39.98829, 40.0, 39.996414, 39.950645, 39.95652, 39.882042, 41.0, 40.0, 39.915825, 40.0, 39.94766, 39.888515, 39.967194, 39.978592, 39.92179, 39.950954, 40.0, 39.95066, 40.0, 39.893574, 39.940964, 39.963627, 39.958565, 39.964737, 39.982475, 39.904846, 39.98375, 39.93941, 39.950974, 40.991432] expired_encoder_outputs=0 state=Streaming
+
+thread 'slow_link::lan_rtt_keeps_120' (8667840) panicked at crates/pb-mapper-desktop/src/slow_link.rs:1407:13:
+[39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 40, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39, 39]
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 FAILED
 
@@ -13,6 +15,6 @@ failures:
 failures:
     slow_link::lan_rtt_keeps_120
 
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 391 filtered out; finished in 36.40s
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 391 filtered out; finished in 96.57s
 
-error: test failed, to rerun pass `-p pb-mapper-desktop --lib`
+# exit 101

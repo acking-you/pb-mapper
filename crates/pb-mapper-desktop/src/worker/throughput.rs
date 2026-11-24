@@ -457,8 +457,8 @@ mod tests {
     /// skipped ticks are not full; four units inside are, and cap the pace at
     /// 95% of what it delivered, which the guard keeps once the dwell fell.
     /// The cap then holds: through quiet seconds whose dwell shows no more
-    /// served, a still desktop's seconds and a pace asked below it; and
-    /// probes only 30 s after it was measured. A probe that filled the
+    /// served, a heavy picture, a still desktop's seconds and a pace asked
+    /// below it; and probes only 30 s after it was measured. A probe that filled the
     /// encoder again lowers it, and the next waits twice as long.
     #[test]
     fn a_full_encoder_is_capped_and_holds_what_it_measured() {
@@ -483,7 +483,9 @@ mod tests {
             ),
             None
         );
-        // A still desktop's liveness repeats, and a startup hold's pace.
+        // A heavy picture's skipped ticks, with most units waiting behind
+        // none; a still desktop's liveness repeats; a startup hold's pace.
+        assert_eq!(cap.roll(&second(2, 83, 12), 120, 10, at), None);
         assert_eq!(cap.roll(&second(0, 4, 2), 120, 10, at), None);
         assert_eq!(cap.roll(&second(0, 15, 11), 15, 10, at), None);
         assert_eq!(cap.cap(), Some(85));
