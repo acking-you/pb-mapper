@@ -334,7 +334,8 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 // A new picture its source dated anchors the next tick on
                 // its present.
                 let picture = self.backend.submitted_picture();
-                self.pacer.consume(now, picture.map(|picture| picture.at));
+                self.pacer
+                    .consume(now, picture.map(|picture| (picture.at, picture.presents)));
                 self.window.captured(now, picture);
                 if keyframe {
                     // Handed over: an IDR still in the encoder at the next

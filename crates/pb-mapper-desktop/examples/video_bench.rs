@@ -729,7 +729,10 @@ mod bench {
                             tally.present_waits.push(waited.as_secs_f64() * 1e3);
                         }
                         // As thread C: a dated picture anchors the next tick.
-                        pacer.consume(now, presented.map(|presented| presented.at));
+                        pacer.consume(
+                            now,
+                            presented.map(|presented| (presented.at, presented.presents)),
+                        );
                         poll_due = None;
                     } else {
                         tally.polls += 1;
