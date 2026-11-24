@@ -50,10 +50,11 @@
 //!   which a session does not. Run it beside a GPU-saturating 3D load.
 //! - `--dump-source <path>`: write the NV12 picture each submit gave the
 //!   encoder, read back from the GPU (`height` luma rows, then `height / 2`
-//!   rows of interleaved chroma, `width` bytes each, the size the
-//!   `encoder=` line's `max_size` and the first unit's `size` show), one
-//!   per submitted unit, so that frame n of `--output` decodes to frame n
-//!   of this file while `encoded` equals `submitted`: the reference for
+//!   rows of interleaved chroma, `width` bytes each, at the encoded size
+//!   the `first_access_unit` line's `size` shows), one per submitted unit
+//!   (`source_pictures`), so that frame n of `--output` decodes to frame n
+//!   of this file unless the encoder discarded a late unit; the last few
+//!   may still be in the encoder when the run ends. The reference for
 //!   ffmpeg's PSNR and SSIM. Reading a picture back waits for the GPU, so
 //!   time the encoder in a run without it. Not with `--backend`.
 //!
