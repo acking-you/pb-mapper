@@ -27,11 +27,16 @@ worker::tests::a_refinement worker::tests::an_armed`, on an injected clock:
   or two that did not lower the QP after it do, and so do a QP at the
   floor, 15 repeats or 1 s of them; a new picture or keyframe ends it, the
   outputs of an interrupted burst say nothing of the next, and liveness
-  follows unchanged.
+  follows unchanged. Keyframes of a still picture, however many, never
+  bring its refinement repeats past 15 until a new picture fills its
+  budget; and after a liveness repeat a pace that rises starts no burst
+  on the picture that stood still.
 - `codec::present_waiter`: thread C's rule for when it needs the Windows
   encoder names a refinement repeat sooner than liveness, waits for the
   capture thread's look as any repeat does, and never asks to be called at
-  once with nothing to do, burst or not.
+  once with nothing to do, burst or not. A capture thread that a
+  refinement repeat asks again after each look goes on looking well past
+  the time it stops on its own unasked.
 - `worker::tests::a_refinement_burst_keeps_the_tick_armed_for_the_next_present`:
   thread C, with a fake armed capture thread whose encoder refines, sends
   the refinement repeats 200 ms after the picture a period apart, then the
@@ -123,9 +128,12 @@ budget per frame) first, then AMD and Intel:
   all; the same runs set `REFINE_QP_FLOOR` (and show whether the encoder
   sets `MFSampleExtension_VideoEncodeQP` at all, and in its low 16 bits),
   `REFINE_MAX`, `REFINE_MAX_TIME` and `REFINE_AFTER`.
-- **The rate model stays `nominal`.** `video_bench --pace 60,30,15,5
-  --refine on`, and a Smooth session's `rate_model` with refinement on:
-  no `desktop_rate_model_latched`.
+- **The rate model stays `nominal`.** A session with refinement on (a
+  build that lists the encoder), paced at three quarters of nominal or
+  less, where the latch reads, on a page that scrolls for a second and
+  stands still for a second, again and again for a minute: no
+  `desktop_rate_model_latched`. `video_bench --pace 60,30,15,5` cannot
+  show this: its content changes every refresh, so no burst runs in it.
 - **Typing pays nothing.** In a session with refinement on (a build with
   the encoder listed), characters typed every 250 to 400 ms on a still
   page: no burst after any of them (`refined` stays 0 in the encoder's
@@ -134,6 +142,13 @@ budget per frame) first, then AMD and Intel:
   than 1 ms on average, a soft tick (a fresh picture may follow a
   refinement repeat a quarter period later instead of three quarters) is
   a follow-up of the next pacer change.
+- **Two viewers, one lagging.** With refinement on, two viewers of a
+  still page after a scroll, one of them on a link too slow for the
+  other's frame rate: the lagging viewer's queue overflows into an IDR
+  (`HostResync`), and each such IDR may start a burst, but the picture's
+  refinement repeats stop at 15 in all (`refined` in the encoder's
+  statistics), and the lagging viewer catches up as it does without
+  refinement.
 - **Behind the helper**, the background service's capture worker, which
   takes a session's settings (so `video_bench --backend` cannot force a
   burst): with a build that lists the encoder, a viewer of the service
