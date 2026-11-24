@@ -432,7 +432,9 @@ Nothing in the SDK crates knows it exists.
     low-latency rate control with QP up to 51, and its dropped pictures
     counted) fused
     in `video.rs`, which pushes, holds VideoToolbox to two units in
-    flight and keeps both for a new frame-rate limit; `cadence.rs` (the
+    flight and keeps both for a new frame-rate limit; `frame.rs` (a size
+    not a multiple of 16 coded padded to one, the capture drawn into its
+    top left and the SPS cropping the rest); `cadence.rs` (the
     interval between pictures from the refresh and the pace, and when it
     changes); `desktop.rs`
     (displays by UUID, the lock and console check), `geometry.rs` (points
@@ -508,7 +510,9 @@ Nothing in the SDK crates knows it exists.
   - `codec/`: neutral Annex B scanning and keyframe detection
     (`annexb.rs`, which keeps the parameter sets and sends an H.264 SPS
     rewritten when it leaves picture reordering open), the H.264 SPS
-    reader and writer that rewrite uses (`sps.rs`), length-prefixed
+    reader and writer that rewrite uses, which also crops an H.264 or
+    H.265 SPS to the top left of a padded picture for the macOS encoder
+    (`sps.rs`), length-prefixed
     (AVCC/HVCC) samples to Annex B (`avcc.rs`, for VideoToolbox), and the
     encoder rules both platforms
     share (`pipeline.rs`: late output, first-submit and output waits,

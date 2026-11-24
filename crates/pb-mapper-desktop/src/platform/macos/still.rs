@@ -4,7 +4,7 @@
 //! fails the still and is lit (`power.rs`), at once at a session's start or
 //! a resume, a moment later when it turned off between two stills.
 
-use super::{capture, cf, power, wake::SleepWatch};
+use super::{capture, cf, frame::Frame, power, wake::SleepWatch};
 use crate::{
     BackendError, Display, FailureKind, Result, error, platform::StillCapture, qos::scaled_size,
 };
@@ -70,7 +70,7 @@ impl SckStill {
         self.watch.awake(now);
         let filter = self.filter(display.id)?;
         let (width, height) = scaled_size(display.width, display.height, MAX_SIZE.0, MAX_SIZE.1);
-        let prepared = capture::configuration(width, height, false);
+        let prepared = capture::configuration(Frame::exact(width, height), false);
         let (sender, receiver) = mpsc::sync_channel(1);
         // `backgroundColor` is not retained. The block keeps one retain
         // until ScreenCaptureKit releases it, which is after the callback,

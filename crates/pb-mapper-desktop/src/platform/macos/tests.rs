@@ -7,6 +7,7 @@
 use super::{
     cf, desktop,
     encoder::{Admit, Encoder, Options},
+    frame::Frame,
     layout,
     modes::MacModes,
     power,
@@ -72,8 +73,7 @@ fn keyframes_come_only_when_asked_and_carry_their_parameter_sets() {
     let waiter = Waiter::new(&wake).unwrap();
     let mut encoder = Encoder::new(
         VideoCodec::H264,
-        640,
-        360,
+        Frame::exact(640, 360),
         30,
         2_000_000,
         &Waker(wake.clone()),
@@ -165,8 +165,7 @@ fn a_busy_submit_thread_leaves_the_tick_armed() {
     let waiter = Waiter::new(&wake).unwrap();
     let mut encoder = Encoder::new(
         VideoCodec::H264,
-        640,
-        360,
+        Frame::exact(640, 360),
         30,
         2_000_000,
         &Waker(wake.clone()),
@@ -217,8 +216,7 @@ fn the_submit_thread_wakes_thread_c_once_the_call_it_refused_ends() {
     let waiter = Waiter::new(&wake).unwrap();
     let mut encoder = Encoder::new(
         VideoCodec::H264,
-        640,
-        360,
+        Frame::exact(640, 360),
         30,
         2_000_000,
         &Waker(wake.clone()),
@@ -264,8 +262,7 @@ fn an_encoder_dropped_mid_encode_neither_hangs_nor_calls_back() {
         // A multiple of 16: VideoToolbox encodes inside the call.
         let mut encoder = Encoder::new(
             VideoCodec::H264,
-            1920,
-            1088,
+            Frame::exact(1920, 1088),
             60,
             8_000_000,
             &Waker(wake.clone()),
@@ -344,8 +341,14 @@ fn an_encode_refused_on_the_submit_thread_surfaces_from_drain() {
         }
         let wake = Wake::new();
         let waiter = Waiter::new(&wake).unwrap();
-        let mut encoder =
-            Encoder::new(codec, 640, 360, 30, 2_000_000, &Waker(wake.clone())).unwrap();
+        let mut encoder = Encoder::new(
+            codec,
+            Frame::exact(640, 360),
+            30,
+            2_000_000,
+            &Waker(wake.clone()),
+        )
+        .unwrap();
         let picture = picture(640, 360);
         encoder.tear_down();
         encoder.encode(&picture, true, Unit::Fresh).unwrap();
@@ -386,8 +389,7 @@ fn a_bitrate_set_during_an_encode_returns_at_once_and_reaches_the_session() {
     let waiter = Waiter::new(&wake).unwrap();
     let mut encoder = Encoder::new(
         VideoCodec::H264,
-        3840,
-        2160,
+        Frame::exact(3840, 2160),
         60,
         10_000_000,
         &Waker(wake.clone()),
@@ -449,7 +451,14 @@ fn a_low_latency_session_lets_rate_control_reach_qp_51() {
             quality: false,
             max_qp,
         };
-        Encoder::tuned(VideoCodec::H264, 640, 360, 30, 2_000_000, &waker, options)
+        Encoder::tuned(
+            VideoCodec::H264,
+            Frame::exact(640, 360),
+            30,
+            2_000_000,
+            &waker,
+            options,
+        )
     };
     let (bound, unbound) = match (low_latency(true), low_latency(false)) {
         (Ok(bound), Ok(unbound)) => (bound, unbound),
@@ -531,6 +540,645 @@ fn core_media_takes_every_sps_rewrite() {
         rewrites += 1;
     }
     assert_eq!(rewrites, 7);
+}
+
+/// A Core Media format of `codec` from `sets`, parameter sets with their
+/// NAL headers (H.265's VPS, SPS and PPS), as the Mac viewer builds its
+/// decoder's; the status Core Media refuses them with otherwise.
+fn parameter_set_format(
+    codec: VideoCodec,
+    sets: &[&[u8]],
+) -> std::result::Result<CFRetained<objc2_core_media::CMFormatDescription>, i32> {
+    use objc2_core_media::{
+        CMFormatDescription, CMVideoFormatDescriptionCreateFromH264ParameterSets,
+        CMVideoFormatDescriptionCreateFromHEVCParameterSets,
+    };
+    let pointers: Vec<NonNull<u8>> = sets.iter().map(|set| NonNull::from(&set[0])).collect();
+    let sizes: Vec<usize> = sets.iter().map(|set| set.len()).collect();
+    let mut out: *const CMFormatDescription = std::ptr::null();
+    // SAFETY: parameter sets the arrays point to and size, which outlive the
+    // call, and an out pointer to a local.
+    let status = unsafe {
+        match codec {
+            VideoCodec::H265 => CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                None,
+                sets.len(),
+                NonNull::from(&pointers[0]),
+                NonNull::from(&sizes[0]),
+                4,
+                None,
+                NonNull::from(&mut out),
+            ),
+            VideoCodec::H264 | VideoCodec::Jpeg => {
+                CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                    None,
+                    sets.len(),
+                    NonNull::from(&pointers[0]),
+                    NonNull::from(&sizes[0]),
+                    4,
+                    NonNull::from(&mut out),
+                )
+            }
+        }
+    };
+    if status != 0 {
+        return Err(status);
+    }
+    // SAFETY: a Create-rule result.
+    Ok(unsafe { CFRetained::from_raw(NonNull::new(out.cast_mut()).unwrap()) })
+}
+
+/// The size a format says its pictures are.
+fn dimensions(format: &objc2_core_media::CMFormatDescription) -> (u32, u32) {
+    // SAFETY: a video format description.
+    let dimensions = unsafe { objc2_core_media::CMVideoFormatDescriptionGetDimensions(format) };
+    (dimensions.width as u32, dimensions.height as u32)
+}
+
+/// The NAL units of `unit`, Annex B behind four-byte start codes as the
+/// encoder writes it.
+fn nal_units(unit: &[u8]) -> Vec<&[u8]> {
+    const START: [u8; 4] = [0, 0, 0, 1];
+    let mut rest = unit.strip_prefix(&START[..]).unwrap();
+    let mut units = Vec::new();
+    while let Some(at) = rest.windows(4).position(|code| code == START) {
+        units.push(&rest[..at]);
+        rest = &rest[at + 4..];
+    }
+    units.push(rest);
+    units
+}
+
+/// Whether `nal`, a NAL unit of `codec`, is a parameter set a format takes:
+/// H.264's SPS and PPS, H.265's VPS, SPS and PPS.
+fn parameter_set(codec: VideoCodec, nal: &[u8]) -> bool {
+    match codec {
+        VideoCodec::H265 => matches!((nal[0] >> 1) & 0x3f, 32..=34),
+        VideoCodec::H264 | VideoCodec::Jpeg => matches!(nal[0] & 0x1f, 7 | 8),
+    }
+}
+
+/// The first unit `encoder` makes of `picture` as a keyframe, waited for on
+/// `waiter`. A unit VideoToolbox drops or outputs too late to keep (a cold
+/// software encoder on a busy runner can take that long for its first)
+/// leaves nothing, and the picture is submitted again, as thread C would,
+/// up to four times in all.
+fn keyframe(
+    encoder: &mut Encoder,
+    picture: &CVPixelBuffer,
+    waiter: &Waiter,
+) -> crate::EncodedFrame {
+    for _ in 0..4 {
+        encoder.encode(picture, true, Unit::Fresh).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            // Read before the queue, as in the test above.
+            let idle = encoder.pending() == 0;
+            if let Some(unit) = encoder.drain().unwrap() {
+                assert!(unit.format.keyframe);
+                return unit;
+            }
+            if idle {
+                break;
+            }
+            assert!(Instant::now() < deadline, "no output for the keyframe");
+            waiter
+                .wait(deadline.min(Instant::now() + Duration::from_millis(10)))
+                .unwrap();
+        }
+    }
+    panic!("no keyframe kept in four submits");
+}
+
+/// Core Media reads each of `codec::sps`'s padded samples at the size
+/// VideoToolbox coded, and its sets with the SPS cropped (`crop_sets`) at
+/// the content's: what the Mac viewer builds its decoder from, and what
+/// every decoder shows.
+#[test]
+fn core_media_shows_a_cropped_sps_at_its_content_size() {
+    use crate::codec::sps::{
+        crop_sets,
+        tests::{PADDED, padded_sets},
+    };
+    for sample in &PADDED {
+        let sets = padded_sets(sample);
+        let sets: Vec<&[u8]> = sets.iter().map(Vec::as_slice).collect();
+        let cropped = crop_sets(sample.codec, &sets, sample.content).unwrap();
+        let cropped: Vec<&[u8]> = cropped.iter().map(Vec::as_slice).collect();
+        for (sets, size) in [(&sets, sample.coded), (&cropped, sample.content)] {
+            let format = parameter_set_format(sample.codec, sets)
+                .unwrap_or_else(|status| panic!("{}: status {status}", sample.name));
+            assert_eq!(dimensions(&format), size, "{}", sample.name);
+        }
+    }
+}
+
+/// A padded frame's stream draws the display into its content, the top
+/// left of a picture of the coded size; a frame of its own size is filled
+/// whole, as before, with no destination set.
+#[test]
+fn a_padded_capture_draws_into_the_top_left() {
+    if !super::capture::available() {
+        return;
+    }
+    assert!(super::capture::places());
+    let padded = super::capture::configuration(Frame::padded(3024, 1964), true);
+    let exact = super::capture::configuration(Frame::exact(2560, 1440), true);
+    // SAFETY: the configurations are ours, read only.
+    unsafe {
+        assert_eq!(
+            (padded.config.width(), padded.config.height()),
+            (3024, 1968)
+        );
+        let rect = padded.config.destinationRect();
+        assert_eq!(
+            (
+                rect.origin.x,
+                rect.origin.y,
+                rect.size.width,
+                rect.size.height
+            ),
+            (0.0, 0.0, 3024.0, 1964.0)
+        );
+        assert_eq!((exact.config.width(), exact.config.height()), (2560, 1440));
+        let rect = exact.config.destinationRect();
+        assert_eq!((rect.size.width, rect.size.height), (0.0, 0.0));
+    }
+}
+
+/// `picture`, NV12 of a padded frame: mid grey content with a white last
+/// row and last column, black to the right of it and below, grey chroma.
+fn mark(picture: &CVPixelBuffer, content: (usize, usize)) {
+    let (width, height) = content;
+    // SAFETY: locked around the writes.
+    assert_eq!(
+        unsafe { CVPixelBufferLockBaseAddress(picture, CVPixelBufferLockFlags(0)) },
+        0
+    );
+    for plane in 0..2 {
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(picture, plane);
+        let rows = CVPixelBufferGetHeightOfPlane(picture, plane);
+        let base = CVPixelBufferGetBaseAddressOfPlane(picture, plane).cast::<u8>();
+        // SAFETY: the locked plane's rows, `stride` bytes each.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(base, stride * rows) };
+        for (y, row) in bytes.chunks_exact_mut(stride).enumerate() {
+            if plane == 1 {
+                row.fill(128);
+                continue;
+            }
+            row.fill(16);
+            if y < height {
+                let level = if y + 1 == height { 235 } else { 128 };
+                row[..width].fill(level);
+                row[width - 1] = 235;
+            }
+        }
+    }
+    // SAFETY: locked above.
+    unsafe { CVPixelBufferUnlockBaseAddress(picture, CVPixelBufferLockFlags(0)) };
+}
+
+/// `unit`, an Annex B keyframe of `codec` with its parameter sets in front,
+/// decoded by VideoToolbox's decoder into NV12 at the size its format says,
+/// as the Mac viewer decodes, from a format built from those sets.
+fn decode(codec: VideoCodec, unit: &[u8]) -> CFRetained<CVPixelBuffer> {
+    use objc2_core_media::{
+        CMBlockBuffer, CMSampleBuffer, CMTime, kCMBlockBufferAssureMemoryNowFlag,
+    };
+    use objc2_core_video::{CVImageBuffer, kCVPixelBufferPixelFormatTypeKey};
+    use objc2_video_toolbox::{
+        VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord,
+        VTDecompressionSession,
+    };
+    use std::{ffi::c_void, sync::Mutex};
+
+    type Slot = Mutex<Option<CFRetained<CVPixelBuffer>>>;
+    /// The decoder's callback: the picture into the slot `refcon` is.
+    unsafe extern "C-unwind" fn decoded(
+        refcon: *mut c_void,
+        _: *mut c_void,
+        status: i32,
+        _: VTDecodeInfoFlags,
+        image: *mut CVImageBuffer,
+        _: CMTime,
+        _: CMTime,
+    ) {
+        // SAFETY: the slot `decode` passed, alive through the decode.
+        let slot = unsafe { &*refcon.cast::<Slot>() };
+        if let Some(image) = NonNull::new(image).filter(|_| status == 0) {
+            // SAFETY: the decoder's picture, valid during the call.
+            *slot.lock().unwrap() = Some(unsafe { CFRetained::retain(image) });
+        }
+    }
+
+    let nals = nal_units(unit);
+    let sets: Vec<&[u8]> = nals
+        .iter()
+        .copied()
+        .filter(|nal| parameter_set(codec, nal))
+        .collect();
+    let format = parameter_set_format(codec, &sets).unwrap();
+    let mut data = Vec::new();
+    for nal in nals.iter().filter(|nal| !parameter_set(codec, nal)) {
+        data.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+        data.extend_from_slice(nal);
+    }
+    let mut block = std::ptr::null_mut();
+    // SAFETY: a block of `data.len()` bytes the call allocates now, and an
+    // out pointer to a local.
+    let status = unsafe {
+        CMBlockBuffer::create_with_memory_block(
+            None,
+            std::ptr::null_mut(),
+            data.len(),
+            None,
+            std::ptr::null(),
+            0,
+            data.len(),
+            kCMBlockBufferAssureMemoryNowFlag,
+            NonNull::from(&mut block),
+        )
+    };
+    assert_eq!(status, 0);
+    // SAFETY: a Create-rule result.
+    let block = unsafe { CFRetained::from_raw(NonNull::new(block).unwrap()) };
+    // SAFETY: `data` fills the block it was made for.
+    let status = unsafe {
+        CMBlockBuffer::replace_data_bytes(
+            NonNull::new(data.as_mut_ptr().cast()).unwrap(),
+            &block,
+            0,
+            data.len(),
+        )
+    };
+    assert_eq!(status, 0);
+    let mut sample = std::ptr::null_mut();
+    let size = data.len();
+    // SAFETY: one untimed sample of the block's bytes, in `format`.
+    let status = unsafe {
+        CMSampleBuffer::create_ready(
+            None,
+            Some(&block),
+            Some(&format),
+            1,
+            0,
+            std::ptr::null(),
+            1,
+            &size,
+            NonNull::from(&mut sample),
+        )
+    };
+    assert_eq!(status, 0);
+    // SAFETY: a Create-rule result.
+    let sample = unsafe { CFRetained::from_raw(NonNull::new(sample).unwrap()) };
+    let nv12 = cf::number(i64::from(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange));
+    // SAFETY: a static key.
+    let attributes = cf::dictionary(&[(unsafe { kCVPixelBufferPixelFormatTypeKey }, &nv12)]);
+    let slot: Slot = Mutex::new(None);
+    let record = VTDecompressionOutputCallbackRecord {
+        decompressionOutputCallback: Some(decoded),
+        decompressionOutputRefCon: std::ptr::from_ref(&slot).cast_mut().cast(),
+    };
+    let mut session = std::ptr::null_mut();
+    // SAFETY: the format and attributes outlive the call, the record names
+    // a callback and the slot, which outlives the session, and an out
+    // pointer to a local.
+    let status = unsafe {
+        VTDecompressionSession::create(
+            None,
+            &format,
+            None,
+            Some(&attributes),
+            &record,
+            NonNull::from(&mut session),
+        )
+    };
+    assert_eq!(status, 0);
+    // SAFETY: a Create-rule result.
+    let session = unsafe { CFRetained::from_raw(NonNull::new(session).unwrap()) };
+    let mut info = VTDecodeInfoFlags(0);
+    // SAFETY: a synchronous decode of the sample, its flags out to a local;
+    // the session is invalidated before the slot goes.
+    unsafe {
+        assert_eq!(
+            session.decode_frame(
+                &sample,
+                VTDecodeFrameFlags(0),
+                std::ptr::null_mut(),
+                &mut info
+            ),
+            0
+        );
+        assert_eq!(session.wait_for_asynchronous_frames(), 0);
+        session.invalidate();
+    }
+    slot.into_inner()
+        .unwrap()
+        .expect("the decoder output the keyframe")
+}
+
+/// A padded frame decodes to its content alone, as every viewer's decoder
+/// shows it: a 13-inch MacBook Air's 2940x1912, coded at 2944x1920 with
+/// black to its right and below, grey with a white last row and column,
+/// encoded by a padded session and decoded by VideoToolbox from the
+/// parameter sets in front of the keyframe, comes out 2940x1912 with the
+/// white row and column at its edges. H.265 runs where this Mac encodes
+/// it.
+#[test]
+fn a_padded_frame_decodes_to_its_content() {
+    let frame = Frame::padded(2940, 1912);
+    assert_eq!(frame.coded, (2944, 1920));
+    let content = (2940usize, 1912usize);
+    let picture = surface(2944, 1920);
+    mark(&picture, content);
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    for codec in [VideoCodec::H264, VideoCodec::H265] {
+        if !super::encoder::encodes(codec) {
+            report(format_args!(
+                "{}: no {codec:?} encoder on this Mac",
+                module_path!()
+            ));
+            continue;
+        }
+        let mut encoder = Encoder::new(codec, frame, 30, 20_000_000, &Waker(wake.clone())).unwrap();
+        let unit = keyframe(&mut encoder, &picture, &waiter);
+        assert_eq!((unit.format.width, unit.format.height), frame.content);
+        let decoded = decode(codec, &unit.bytes);
+        assert_eq!(
+            (
+                CVPixelBufferGetWidth(&decoded),
+                CVPixelBufferGetHeight(&decoded)
+            ),
+            content,
+            "{codec:?}"
+        );
+        // SAFETY: locked around the reads.
+        assert_eq!(
+            unsafe { CVPixelBufferLockBaseAddress(&decoded, CVPixelBufferLockFlags::ReadOnly) },
+            0
+        );
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(&decoded, 0);
+        let base = CVPixelBufferGetBaseAddressOfPlane(&decoded, 0).cast::<u8>();
+        // SAFETY: the locked luma plane's `content.1` rows, `stride` bytes
+        // each.
+        let luma = unsafe { std::slice::from_raw_parts(base, stride * content.1) };
+        let row = |y: usize| &luma[y * stride..y * stride + content.0 - 1];
+        let column = |x: usize| (0..content.1 - 1).map(move |y| luma[y * stride + x]);
+        let mean = |values: &mut dyn Iterator<Item = u8>| {
+            let (sum, count) = values.fold((0u64, 0u64), |(sum, count), value| {
+                (sum + u64::from(value), count + 1)
+            });
+            sum / count
+        };
+        let (last_row, row_above) = (
+            mean(&mut row(content.1 - 1).iter().copied()),
+            mean(&mut row(content.1 - 2).iter().copied()),
+        );
+        let (last_column, column_before) = (
+            mean(&mut column(content.0 - 1)),
+            mean(&mut column(content.0 - 2)),
+        );
+        // SAFETY: locked above.
+        unsafe { CVPixelBufferUnlockBaseAddress(&decoded, CVPixelBufferLockFlags::ReadOnly) };
+        assert!(
+            last_row >= 200 && last_column >= 200,
+            "{codec:?}: last row {last_row}, last column {last_column}"
+        );
+        assert!(
+            (100..=160).contains(&row_above) && (100..=160).contains(&column_before),
+            "{codec:?}: row above {row_above}, column before {column_before}"
+        );
+    }
+}
+
+/// A padded session reads its SPS's crop at its first keyframe and not for
+/// the units after it, which carry no parameter sets; a later keyframe
+/// reads it again only for a format VideoToolbox made anew (which this
+/// test reports): never more crops than formats.
+#[test]
+fn a_padded_session_crops_its_parameter_sets_once_per_format() {
+    use super::encoder::CropReads;
+    let once = CropReads {
+        crops: 1,
+        formats: 1,
+    };
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    let frame = Frame::padded(640, 360);
+    let picture = surface(640, 368);
+    mark(&picture, (640, 360));
+    let mut encoder =
+        Encoder::new(VideoCodec::H264, frame, 30, 2_000_000, &Waker(wake.clone())).unwrap();
+    keyframe(&mut encoder, &picture, &waiter);
+    assert_eq!(encoder.crop_reads(), once);
+    for _ in 0..3 {
+        encoder.encode(&picture, false, Unit::Repeat).unwrap();
+        // Out, kept or not, and drained.
+        wait_for(&waiter, Duration::from_secs(3), || {
+            while let Some(unit) = encoder.drain().unwrap() {
+                assert!(
+                    unit.format.keyframe
+                        || !nal_units(&unit.bytes)
+                            .into_iter()
+                            .any(|nal| parameter_set(VideoCodec::H264, nal)),
+                    "a P-frame carried parameter sets"
+                );
+            }
+            encoder.pending() == 0
+        });
+    }
+    assert_eq!(encoder.crop_reads(), once);
+    keyframe(&mut encoder, &picture, &waiter);
+    let reads = encoder.crop_reads();
+    assert_eq!(
+        reads.crops, reads.formats,
+        "cropped again for a kept format"
+    );
+    assert!((1..=2).contains(&reads.formats), "{reads:?}");
+    report(format_args!(
+        "{}: a second keyframe came with {} format",
+        module_path!(),
+        if reads.formats == 1 {
+            "the same"
+        } else {
+            "a new"
+        }
+    ));
+}
+
+/// What a padded session sends a viewer is what a session at the content's
+/// own size sent before: VideoToolbox's own parameter sets at that size,
+/// byte for byte, the crop at the right and at the bottom with every other
+/// bit, for a size padded at the bottom (1920x1080), at the right (a
+/// 14-inch MacBook Pro's 3024x1964 fitted to 1440p, 2216x1440) and at both
+/// (a 13-inch MacBook Air's 2940x1912), in each configuration a session
+/// takes: H.264 with low-latency rate control and without, and H.265 with
+/// it, where this Mac makes them. A session that says it encodes in
+/// software (a virtual Mac's H.264 may, as on a CI runner) is reported and
+/// not compared: `codec::sps`'s tests pin the crop whatever wrote the SPS,
+/// and these bytes are the hardware encoder's.
+#[test]
+fn a_padded_session_sends_the_parameter_sets_of_its_content_size() {
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    for (width, height) in [(1920, 1080), (2216, 1440), (2940, 1912)] {
+        let content = (width as usize, height as usize);
+        let (exact, padded) = (Frame::exact(width, height), Frame::padded(width, height));
+        let exact_picture = surface(content.0, content.1);
+        mark(&exact_picture, content);
+        let padded_picture = surface(padded.coded.0 as usize, padded.coded.1 as usize);
+        mark(&padded_picture, content);
+        for (codec, low_latency) in [
+            (VideoCodec::H264, true),
+            (VideoCodec::H264, false),
+            (VideoCodec::H265, true),
+        ] {
+            if !super::encoder::encodes(codec) {
+                continue;
+            }
+            let label = format!("{codec:?} low latency {low_latency} at {width}x{height}");
+            let built = |frame: Frame| {
+                Encoder::with_low_latency(
+                    codec,
+                    frame,
+                    30,
+                    8_000_000,
+                    &Waker(wake.clone()),
+                    low_latency,
+                )
+            };
+            let sets = |mut encoder: Encoder, picture: &CVPixelBuffer| {
+                let unit = keyframe(&mut encoder, picture, &waiter);
+                nal_units(&unit.bytes)
+                    .into_iter()
+                    .filter(|nal| parameter_set(codec, nal))
+                    .map(<[u8]>::to_vec)
+                    .collect::<Vec<_>>()
+            };
+            // A session `Encoder::new` would not make here, such as one
+            // with low-latency rate control where it is refused.
+            let own = match built(exact) {
+                Ok(encoder) if encoder.software() => {
+                    report(format_args!("{label}: a software encoder, not compared"));
+                    continue;
+                }
+                Ok(encoder) => sets(encoder, &exact_picture),
+                Err(failure) => {
+                    report(format_args!("{label}: refused, {failure}"));
+                    continue;
+                }
+            };
+            let cropped = sets(built(padded).unwrap(), &padded_picture);
+            assert!(!own.is_empty(), "{label}");
+            assert_eq!(cropped, own, "{label}");
+        }
+    }
+}
+
+/// A padded session whose SPS will not crop to its content fails as a
+/// capture, not as its codec, so that thread C retries it instead of
+/// turning H.265 off, and turns padding off for the process, so that the
+/// retry codes the content's own size.
+#[test]
+fn an_sps_that_will_not_crop_fails_the_capture_and_turns_padding_off() {
+    use crate::{FailureKind, failure_kind};
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    // An odd number of rows to crop, which no 4:2:0 SPS can say.
+    let frame = Frame {
+        coded: (640, 368),
+        content: (640, 361),
+    };
+    let codec = if super::encoder::encodes(VideoCodec::H265) {
+        VideoCodec::H265
+    } else {
+        VideoCodec::H264
+    };
+    let picture = surface(640, 368);
+    mark(&picture, (640, 361));
+    let mut encoder = Encoder::new(codec, frame, 30, 2_000_000, &Waker(wake.clone())).unwrap();
+    let failure = 'failed: {
+        for _ in 0..4 {
+            encoder.encode(&picture, true, Unit::Fresh).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let idle = encoder.pending() == 0;
+                match encoder.drain() {
+                    Err(failure) => break 'failed failure,
+                    Ok(Some(_)) => panic!("{codec:?}: a unit went out uncropped"),
+                    Ok(None) if idle => break,
+                    Ok(None) => {
+                        assert!(Instant::now() < deadline, "no output for the keyframe");
+                        waiter
+                            .wait(deadline.min(Instant::now() + Duration::from_millis(10)))
+                            .unwrap();
+                    }
+                }
+            }
+        }
+        panic!("{codec:?}: no keyframe in four submits");
+    };
+    assert_eq!(
+        failure_kind(&failure),
+        Some(FailureKind::CaptureFailed),
+        "{codec:?}: {failure}"
+    );
+    assert!(!super::encoder::pads());
+}
+
+/// The parameter sets VideoToolbox writes in front of a keyframe at the
+/// coded sizes a Mac host pads 1920x1080, 3024x1964 and 3340x2160 to, in
+/// the three configurations a session takes: H.264 with low-latency rate
+/// control (Constrained High asked for), H.264 without it (High), and H.265
+/// with it (Main). `codec::sps`'s `PADDED` samples are this output, from
+/// the M6 Mac of docs/benchmarks/2026-11-24-mac-vt-padded-capture:
+/// `cargo test -p pb-mapper-desktop --lib -- --ignored --nocapture
+/// video_toolbox_parameter_sets`.
+#[test]
+#[ignore = "a recording: prints the parameter sets codec::sps's padded samples are"]
+fn video_toolbox_parameter_sets() {
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    let hex = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    for (codec, low_latency) in [
+        (VideoCodec::H264, true),
+        (VideoCodec::H264, false),
+        (VideoCodec::H265, true),
+    ] {
+        for (width, height) in [(1920, 1088), (3024, 1968), (3344, 2160)] {
+            let label = format!("codec={codec:?} low_latency={low_latency} size={width}x{height}");
+            let built = Encoder::with_low_latency(
+                codec,
+                Frame::exact(width, height),
+                60,
+                20_000_000,
+                &Waker(wake.clone()),
+                low_latency,
+            );
+            let mut encoder = match built {
+                Ok(encoder) => encoder,
+                Err(failure) => {
+                    report(format_args!("{label} refused: {failure}"));
+                    continue;
+                }
+            };
+            let picture = surface(width as usize, height as usize);
+            paint(&picture, 0);
+            let unit = keyframe(&mut encoder, &picture, &waiter);
+            let sets: Vec<String> = nal_units(&unit.bytes)
+                .into_iter()
+                .filter(|nal| parameter_set(codec, nal))
+                .map(hex)
+                .collect();
+            report(format_args!("{label} sets={}", sets.join(" ")));
+        }
+    }
 }
 
 /// Thread C's waits end on time where the kernel coalesces the process's
@@ -682,7 +1330,7 @@ fn capture_without_a_pointer_stays_opaque() {
     if !super::capture::available() {
         return;
     }
-    let prepared = super::capture::configuration(64, 64, true);
+    let prepared = super::capture::configuration(Frame::exact(64, 64), true);
     let black = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
     // SAFETY: the configuration is ours and holds its background for these
     // reads; the dynamic range is read only where its selector exists.
@@ -715,8 +1363,7 @@ fn an_expected_frame_rate_set_live_reaches_the_session() {
     let waiter = Waiter::new(&wake).unwrap();
     let mut encoder = Encoder::new(
         VideoCodec::H264,
-        1280,
-        720,
+        Frame::exact(1280, 720),
         120,
         4_000_000,
         &Waker(wake.clone()),
@@ -853,8 +1500,7 @@ fn rate_model_sweep(codec: VideoCodec, width: u32, height: u32, low_latency: boo
     let built = tracing::subscriber::with_default(opened, || {
         Encoder::with_low_latency(
             codec,
-            width,
-            height,
+            Frame::exact(width, height),
             NOMINAL_FPS,
             BITRATE,
             &Waker(wake.clone()),
@@ -1030,8 +1676,7 @@ fn follow_sweep(codec: VideoCodec, width: u32, height: u32, low_latency: bool) -
     let at_nominal = (bpf * f64::from(NOMINAL_FPS)) as u32;
     let encoder = match Encoder::tuned(
         codec,
-        width,
-        height,
+        Frame::exact(width, height),
         NOMINAL_FPS,
         at_nominal,
         &Waker(wake.clone()),
@@ -1269,7 +1914,20 @@ pub(super) fn surface(width: usize, height: usize) -> CFRetained<CVPixelBuffer> 
 /// half, a still ramp on the right, grey chroma, and fresh grain of ±16 over
 /// all of the luma, which no reference predicts.
 fn paint(picture: &CVPixelBuffer, frame: u64) {
+    let size = (
+        CVPixelBufferGetWidth(picture),
+        CVPixelBufferGetHeight(picture),
+    );
+    paint_content(picture, frame, size);
+}
+
+/// `paint` into the top-left `content` of `picture`, a padded frame, and
+/// black around it, as ScreenCaptureKit fills its background: the content
+/// is the picture `paint` paints at that size.
+fn paint_content(picture: &CVPixelBuffer, frame: u64, content: (usize, usize)) {
     let width = CVPixelBufferGetWidth(picture);
+    let (content_width, content_height) = content;
+    assert!(content_width <= width && content_height <= CVPixelBufferGetHeight(picture));
     let mut grain = frame.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     // SAFETY: locked around the writes.
     assert_eq!(
@@ -1290,6 +1948,12 @@ fn paint(picture: &CVPixelBuffer, frame: u64) {
                 row.fill(128);
                 continue;
             }
+            // Video range's black.
+            row.fill(16);
+            if y >= content_height {
+                continue;
+            }
+            let row = &mut row[..content_width];
             text_and_ramp(row, y, frame);
             for chunk in row.chunks_mut(8) {
                 grain ^= grain << 13;
@@ -1392,6 +2056,98 @@ fn video_toolbox_in_flight() {
     }
 }
 
+/// Rounds `video_toolbox_padded` runs, each pair's order alternating.
+const PADDED_ROUNDS: usize = 5;
+
+/// What coding a frame padded to a multiple of 16 gains VideoToolbox at
+/// sizes a Mac host pads: 1920x1080, a 14-inch MacBook Pro's 3024x1964
+/// fitted to 1440p (2216x1440) and at Native, a 13-inch MacBook Air's
+/// 2940x1912, and a 16-inch MacBook Pro's 3456x2234 fitted to 4K
+/// (3340x2160). At each size, for both codecs, paced at 60 and 120 as
+/// thread C paces with `VT_IN_FLIGHT` units, three arms: a session at the
+/// content's own size on pictures of that size (unpadded), the content in
+/// the top left of a padded frame, black around it, whose SPS crops it
+/// (padded), and a session at the content's own size on pictures of that
+/// size whose buffers say they extend to the padded size (extended, their
+/// extension filled from their edges): what a host already had where
+/// ScreenCaptureKit's own pictures extend so, which `macos_capture_layout`
+/// says. Over `PADDED_ROUNDS` rounds, each starting the arms one further
+/// along. Each case prints `video_toolbox_submit_blocking`'s line; at the
+/// end each size, codec and pace prints the medians of its rounds: units
+/// out a second, their dwell's p50 and the VideoToolbox call's p50 on the
+/// submit thread, for each arm. Run it as that one is:
+/// `cargo test --release -p pb-mapper-desktop --lib -- --ignored
+/// --nocapture --test-threads=1 video_toolbox_padded`.
+#[test]
+#[ignore = "a measurement: about 30 minutes of encoding, in release mode"]
+fn video_toolbox_padded() {
+    const ARMS: [&str; 3] = ["unpadded", "padded", "extended"];
+    let sizes = [
+        (1920, 1080),
+        (2216, 1440),
+        (2940, 1912),
+        (3024, 1964),
+        (3340, 2160),
+    ];
+    let codecs = [VideoCodec::H264, VideoCodec::H265];
+    let paces = [60, 120];
+    // Each case's rounds, by arm, in the order of the loops.
+    let mut cases: Vec<(String, [Vec<PacedSummary>; 3])> = Vec::new();
+    for round in 0..PADDED_ROUNDS {
+        let mut case = 0;
+        for (width, height) in sizes {
+            let (exact, padded) = (Frame::exact(width, height), Frame::padded(width, height));
+            let rings = [
+                (exact, painted_frame(exact)),
+                (padded, painted_frame(padded)),
+                (exact, painted_extended(padded)),
+            ];
+            for codec in codecs {
+                for pace in paces {
+                    if cases.len() == case {
+                        let label = format!(
+                            "codec={codec:?} size={width}x{height} coded={}x{} pace={pace}",
+                            padded.coded.0, padded.coded.1
+                        );
+                        cases.push((label, Default::default()));
+                    }
+                    let runs: Vec<_> = (0..ARMS.len())
+                        .map(|step| (round + step) % ARMS.len())
+                        .map(|arm| {
+                            let (frame, ring) = &rings[arm];
+                            (arm, paced_frame(codec, ring, *frame, pace, VT_IN_FLIGHT))
+                        })
+                        .collect();
+                    // A case runs all three arms or none.
+                    if runs.iter().all(|(_, summary)| summary.is_some()) {
+                        for (arm, summary) in runs {
+                            cases[case].1[arm].extend(summary);
+                        }
+                    }
+                    case += 1;
+                }
+            }
+        }
+    }
+    let median = |runs: &[PacedSummary], read: fn(&PacedSummary) -> f64| {
+        let mut values: Vec<f64> = runs.iter().map(read).collect();
+        values.sort_by(f64::total_cmp);
+        values.get(values.len() / 2).copied().unwrap_or(f64::NAN)
+    };
+    for (label, arms) in &cases {
+        let mut line = format!("summary {label} rounds={}", arms[0].len());
+        for (name, runs) in ARMS.iter().zip(arms) {
+            line += &format!(
+                " {name}_units_per_s={:.1} {name}_dwell_p50_ms={:.2} {name}_vt_call_p50_us={:.0}",
+                median(runs, |run| run.units_per_s),
+                median(runs, |run| run.dwell_p50_ms),
+                median(runs, |run| f64::from(run.vt_call_p50_us)),
+            );
+        }
+        report(format_args!("{line}"));
+    }
+}
+
 /// The pictures each paced case encodes in turn.
 const PAINTED: usize = 8;
 /// How long a paced case runs before, and while, it is measured.
@@ -1404,13 +2160,88 @@ const SUBMIT_DEPTH: usize = VT_IN_FLIGHT;
 
 /// `PAINTED` IOSurface pictures of the pattern, painted once.
 fn painted(width: usize, height: usize) -> Vec<CFRetained<CVPixelBuffer>> {
+    painted_frame(Frame::exact(width as u32, height as u32))
+}
+
+/// `PAINTED` IOSurface pictures of `frame`'s coded size, the pattern at its
+/// content's size in their top left, painted once.
+fn painted_frame(frame: Frame) -> Vec<CFRetained<CVPixelBuffer>> {
+    let size = |(width, height): (u32, u32)| (width as usize, height as usize);
+    let (coded, content) = (size(frame.coded), size(frame.content));
     (0..PAINTED)
-        .map(|frame| {
-            let picture = surface(width, height);
-            paint(&picture, frame as u64);
+        .map(|index| {
+            let picture = surface(coded.0, coded.1);
+            paint_content(&picture, index as u64, content);
             picture
         })
         .collect()
+}
+
+/// `PAINTED` IOSurface pictures of `frame`'s content size, the pattern
+/// painted once, each saying it extends to `frame`'s coded size at its
+/// right and bottom (`kCVPixelBufferExtendedPixelsRightKey` and
+/// `...BottomKey`), its extension filled from its edges.
+fn painted_extended(frame: Frame) -> Vec<CFRetained<CVPixelBuffer>> {
+    use objc2_core_video::{
+        CVPixelBufferFillExtendedPixels, kCVPixelBufferExtendedPixelsBottomKey,
+        kCVPixelBufferExtendedPixelsRightKey,
+    };
+    let (width, height) = (frame.content.0 as usize, frame.content.1 as usize);
+    let extension = (
+        frame.coded.0 - frame.content.0,
+        frame.coded.1 - frame.content.1,
+    );
+    let right = cf::number(i64::from(extension.0));
+    let bottom = cf::number(i64::from(extension.1));
+    let none = cf::dictionary(&[]);
+    // SAFETY: static keys.
+    let attributes = unsafe {
+        cf::dictionary(&[
+            (kCVPixelBufferIOSurfacePropertiesKey, &none),
+            (kCVPixelBufferExtendedPixelsRightKey, &right),
+            (kCVPixelBufferExtendedPixelsBottomKey, &bottom),
+        ])
+    };
+    (0..PAINTED)
+        .map(|index| {
+            let mut out = std::ptr::null_mut();
+            // SAFETY: `out` is a local the call fills; the attributes
+            // outlive it.
+            let status = unsafe {
+                CVPixelBufferCreate(
+                    None,
+                    width,
+                    height,
+                    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                    Some(&attributes),
+                    NonNull::from(&mut out),
+                )
+            };
+            assert_eq!(status, 0);
+            // SAFETY: a Create-rule result.
+            let picture = unsafe { CFRetained::from_raw(NonNull::new(out).unwrap()) };
+            assert_eq!(extended(&picture), extension);
+            paint_content(&picture, index as u64, (width, height));
+            assert_eq!(CVPixelBufferFillExtendedPixels(&picture), 0);
+            picture
+        })
+        .collect()
+}
+
+/// The pixels `picture` says it extends by at its right and its bottom.
+fn extended(picture: &CVPixelBuffer) -> (u32, u32) {
+    let (mut left, mut right, mut top, mut bottom) = (0usize, 0usize, 0usize, 0usize);
+    // SAFETY: out pointers to locals.
+    unsafe {
+        objc2_core_video::CVPixelBufferGetExtendedPixels(
+            picture,
+            &mut left,
+            &mut right,
+            &mut top,
+            &mut bottom,
+        )
+    };
+    (right as u32, bottom as u32)
 }
 
 /// One paced case's samples, in microseconds, and counts.
@@ -1449,18 +2280,54 @@ pub(super) fn quantile(samples: &mut [u32], share: f64) -> u32 {
     samples.get(index).copied().unwrap_or(0)
 }
 
-/// One case of `codec` at `pace` over `ring`, its gate at `depth`.
+/// One case of `codec` at `pace` over `ring`, its gate at `depth`, the
+/// session at the ring's own size.
 fn paced_case(codec: VideoCodec, ring: &[CFRetained<CVPixelBuffer>], pace: u32, depth: usize) {
+    let width = CVPixelBufferGetWidth(&ring[0]) as u32;
+    let height = CVPixelBufferGetHeight(&ring[0]) as u32;
+    paced_frame(codec, ring, Frame::exact(width, height), pace, depth);
+}
+
+/// What a paced case measured: units out a second, their dwell's p50 in
+/// milliseconds, and the p50 of the VideoToolbox encode calls the submit
+/// thread made, in microseconds: milliseconds where VideoToolbox encodes
+/// inside the call, tens of microseconds where it encodes in the
+/// background.
+#[derive(Clone, Copy, Debug)]
+struct PacedSummary {
+    units_per_s: f64,
+    dwell_p50_ms: f64,
+    vt_call_p50_us: u32,
+}
+
+/// One case of `codec` at `pace` over `ring`, pictures of `frame`'s coded
+/// size, the session coding `frame`, its gate at `depth`; `None` where this
+/// Mac makes no such session. The bitrate is scaled by the content's size,
+/// as a session's QoS scales it by the size its units say.
+fn paced_frame(
+    codec: VideoCodec,
+    ring: &[CFRetained<CVPixelBuffer>],
+    frame: Frame,
+    pace: u32,
+    depth: usize,
+) -> Option<PacedSummary> {
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     };
-    let width = CVPixelBufferGetWidth(&ring[0]) as u32;
-    let height = CVPixelBufferGetHeight(&ring[0]) as u32;
-    let label = format!("codec={codec:?} size={width}x{height} pace={pace} depth={depth}");
+    let (width, height) = frame.content;
+    let coded = if frame.cropped() {
+        format!(" coded={}x{}", frame.coded.0, frame.coded.1)
+    } else {
+        match extended(&ring[0]) {
+            (0, 0) => String::new(),
+            (right, bottom) => format!(" extended={right}x{bottom}"),
+        }
+    };
+    let label = format!("codec={codec:?} size={width}x{height}{coded} pace={pace} depth={depth}");
     if !super::encoder::encodes(codec) {
         report(format_args!("{label} skipped: no hardware encoder"));
-        return;
+        return None;
     }
     let scale = (f64::from(width) * f64::from(height) / (1920.0 * 1080.0))
         .powf(0.75)
@@ -1468,12 +2335,11 @@ fn paced_case(codec: VideoCodec, ring: &[CFRetained<CVPixelBuffer>], pace: u32, 
     let bitrate = (66_667.0 * scale * f64::from(pace)) as u32;
     let wake = Wake::new();
     let waiter = Waiter::new(&wake).unwrap();
-    let mut encoder = match Encoder::new(codec, width, height, pace, bitrate, &Waker(wake.clone()))
-    {
+    let mut encoder = match Encoder::new(codec, frame, pace, bitrate, &Waker(wake.clone())) {
         Ok(encoder) => encoder,
         Err(failure) => {
             report(format_args!("{label} refused: {failure}"));
-            return;
+            return None;
         }
     };
     // The reader: an input every millisecond, queued, and thread C woken.
@@ -1502,9 +2368,14 @@ fn paced_case(codec: VideoCodec, ring: &[CFRetained<CVPixelBuffer>], pace: u32, 
     let mut pacer = crate::pacer::Pacer::new(pace, start);
     let mut paced = Paced::default();
     let (mut frame, mut keyframe) = (0, true);
+    let mut probed = false;
     loop {
         let now = Instant::now();
         let measuring = now >= from;
+        if measuring && !probed {
+            encoder.probe(|probe| probe.calls.clear());
+            probed = true;
+        }
         paced.lane(&inputs, measuring);
         while let Some(unit) = encoder.drain().unwrap() {
             if measuring {
@@ -1550,6 +2421,7 @@ fn paced_case(codec: VideoCodec, ring: &[CFRetained<CVPixelBuffer>], pace: u32, 
     }
     stop.store(true, Ordering::Relaxed);
     reader.join().unwrap();
+    let mut vt_calls = encoder.probe(|probe| std::mem::take(&mut probe.calls));
     let seconds = MEASURED.as_secs_f64();
     let Paced {
         submitted,
@@ -1560,8 +2432,13 @@ fn paced_case(codec: VideoCodec, ring: &[CFRetained<CVPixelBuffer>], pace: u32, 
         mut waits,
         mut dwell,
     } = paced;
+    let summary = PacedSummary {
+        units_per_s: f64::from(units) / seconds,
+        dwell_p50_ms: f64::from(quantile(&mut dwell, 0.5)) / 1000.0,
+        vt_call_p50_us: quantile(&mut vt_calls, 0.5),
+    };
     report(format_args!(
-        "{label} bitrate={bitrate} submitted_per_s={:.1} units_per_s={:.1} skipped_per_s={:.1} armed_per_s={:.1} call_p50_us={} call_p99_us={} call_max_us={} input_wait_p50_us={} input_wait_p99_us={} input_wait_max_us={} dwell_p50_ms={:.2} dwell_p95_ms={:.2}",
+        "{label} bitrate={bitrate} submitted_per_s={:.1} units_per_s={:.1} skipped_per_s={:.1} armed_per_s={:.1} call_p50_us={} call_p99_us={} call_max_us={} input_wait_p50_us={} input_wait_p99_us={} input_wait_max_us={} vt_call_p50_us={} dwell_p50_ms={:.2} dwell_p95_ms={:.2}",
         f64::from(submitted) / seconds,
         f64::from(units) / seconds,
         f64::from(skipped) / seconds,
@@ -1572,9 +2449,11 @@ fn paced_case(codec: VideoCodec, ring: &[CFRetained<CVPixelBuffer>], pace: u32, 
         quantile(&mut waits, 0.5),
         quantile(&mut waits, 0.99),
         quantile(&mut waits, 1.0),
+        summary.vt_call_p50_us,
         f64::from(quantile(&mut dwell, 0.5)) / 1000.0,
         f64::from(quantile(&mut dwell, 0.95)) / 1000.0,
     ));
+    Some(summary)
 }
 
 /// `MacDesktop` reads WindowServer for every check the injection boundary,
@@ -1967,6 +2846,148 @@ fn capture_unavailable() -> Option<&'static str> {
     }
 }
 
+/// Encode calls `encode_call_p50` times.
+const CALLS: usize = 30;
+
+/// The p50 of `CALLS` VideoToolbox encode calls on `encoder`'s submit
+/// thread, in microseconds, `picture` encoded each time after a keyframe
+/// of it, one unit at a time: milliseconds where VideoToolbox encodes
+/// inside its call, tens of microseconds where it encodes it in the
+/// background.
+fn encode_call_p50(encoder: &mut Encoder, picture: &CVPixelBuffer, waiter: &Waiter) -> u32 {
+    keyframe(encoder, picture, waiter);
+    encoder.probe(|probe| probe.calls.clear());
+    for _ in 0..CALLS {
+        encoder.encode(picture, false, Unit::Repeat).unwrap();
+        wait_for(waiter, Duration::from_secs(3), || {
+            while encoder.drain().unwrap().is_some() {}
+            encoder.pending() == 0
+        });
+    }
+    let mut calls = encoder.probe(|probe| std::mem::take(&mut probe.calls));
+    quantile(&mut calls, 0.5)
+}
+
+/// What padding gains a host, which only ScreenCaptureKit's own pictures
+/// say: a stream of the main display at sizes a Mac host pads (a 14-inch
+/// MacBook Pro's 3024x1964 and a 13-inch MacBook Air's 2940x1912 at Native,
+/// and 1920x1080), at the size itself and padded to 16. For each, the first
+/// picture's layout as `macos_capture_layout` traces it (its size, the
+/// pixels it says it extends by at its right and bottom, each plane's rows
+/// and bytes per row) and the p50 of an H.264 session's encode calls on it
+/// (`encode_call_p50`), beside a picture of the same size made here, which
+/// VideoToolbox encodes in the background. Where the stream's own picture
+/// is encoded inside the call, VideoToolbox already had its fast path at
+/// that size and padding gains nothing. The padded picture must hold the
+/// display in its top left alone (`destinationRect`): its padding stays
+/// black, and the means of the content's last row and column are printed.
+///
+/// The main display must be awake and unlocked; the test says why when it
+/// cannot run: `cargo test --release -p pb-mapper-desktop --lib --
+/// --ignored --nocapture --test-threads=1 sck_padded_capture`.
+#[test]
+#[ignore = "a device check: a few seconds of capture, with Screen Recording"]
+fn sck_padded_capture() {
+    use super::capture::Stream;
+    use objc2_core_graphics::CGMainDisplayID;
+
+    if let Some(why) = capture_unavailable() {
+        let _ = writeln!(std::io::stderr(), "skipped sck_padded_capture: {why}");
+        return;
+    }
+    let id = CGMainDisplayID();
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    for (width, height) in [(3024, 1964), (2940, 1912), (1920, 1080)] {
+        for frame in [Frame::exact(width, height), Frame::padded(width, height)] {
+            let stream =
+                Stream::start(id, frame, Duration::from_millis(16), &Waker(wake.clone())).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let picture = loop {
+                if let Some(taken) = stream.take(false).unwrap() {
+                    break taken.picture;
+                }
+                assert!(Instant::now() < deadline, "no picture from the stream");
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            drop(stream);
+            let (coded, content) = (frame.coded, frame.content);
+            assert_eq!(
+                (
+                    CVPixelBufferGetWidth(&picture) as u32,
+                    CVPixelBufferGetHeight(&picture) as u32
+                ),
+                coded
+            );
+            let (right, bottom) = extended(&picture);
+            let layout = format!(
+                "{}x{} extended_right={right} extended_bottom={bottom} luma_rows={} luma_bytes_per_row={} chroma_rows={} chroma_bytes_per_row={}",
+                coded.0,
+                coded.1,
+                CVPixelBufferGetHeightOfPlane(&picture, 0),
+                CVPixelBufferGetBytesPerRowOfPlane(&picture, 0),
+                CVPixelBufferGetHeightOfPlane(&picture, 1),
+                CVPixelBufferGetBytesPerRowOfPlane(&picture, 1),
+            );
+            let edges = frame.cropped().then(|| padded_edges(&picture, frame));
+            let mut encoder = Encoder::new(
+                VideoCodec::H264,
+                frame,
+                60,
+                20_000_000,
+                &Waker(wake.clone()),
+            )
+            .unwrap();
+            let captured = encode_call_p50(&mut encoder, &picture, &waiter);
+            let line = if frame.cropped() {
+                format!("padded {layout} call_p50_us={captured} edges {edges:?}")
+            } else {
+                let made = surface(coded.0 as usize, coded.1 as usize);
+                paint(&made, 0);
+                let made = encode_call_p50(&mut encoder, &made, &waiter);
+                format!("unpadded {layout} call_p50_us={captured} made_here_call_p50_us={made}")
+            };
+            report(format_args!(
+                "sck_padded_capture size={}x{} {line}",
+                content.0, content.1
+            ));
+        }
+    }
+}
+
+/// The luma means of `picture`'s content's last row and last column; its
+/// padding must be video-range black.
+fn padded_edges(picture: &CVPixelBuffer, frame: Frame) -> (u64, u64) {
+    let (width, height) = (frame.content.0 as usize, frame.content.1 as usize);
+    let (coded_width, coded_height) = (frame.coded.0 as usize, frame.coded.1 as usize);
+    // SAFETY: locked around the reads.
+    assert_eq!(
+        unsafe { CVPixelBufferLockBaseAddress(picture, CVPixelBufferLockFlags::ReadOnly) },
+        0
+    );
+    let stride = CVPixelBufferGetBytesPerRowOfPlane(picture, 0);
+    let base = CVPixelBufferGetBaseAddressOfPlane(picture, 0).cast::<u8>();
+    // SAFETY: the locked luma plane's rows, `stride` bytes each.
+    let luma = unsafe { std::slice::from_raw_parts(base, stride * coded_height) };
+    let at = |x: usize, y: usize| u64::from(luma[y * stride + x]);
+    let mean = |values: Vec<u64>| values.iter().sum::<u64>() / values.len().max(1) as u64;
+    let last_row = mean((0..width).map(|x| at(x, height - 1)).collect());
+    let last_column = mean((0..height).map(|y| at(width - 1, y)).collect());
+    let padding = (0..coded_height)
+        .flat_map(|y| (0..coded_width).map(move |x| (x, y)))
+        .filter(|&(x, y)| x >= width || y >= height)
+        .map(|(x, y)| at(x, y))
+        .max()
+        .unwrap_or(16);
+    // SAFETY: locked above.
+    unsafe { CVPixelBufferUnlockBaseAddress(picture, CVPixelBufferLockFlags::ReadOnly) };
+    assert!(
+        padding <= 20,
+        "the padding is not black: luma up to {padding}"
+    );
+    (last_row, last_column)
+}
+
 /// How long each arm of `sck_cadence` counts, after `CADENCE_SETTLE`.
 const CADENCE_RUN: Duration = Duration::from_secs(5);
 const CADENCE_SETTLE: Duration = Duration::from_secs(1);
@@ -2042,7 +3063,7 @@ fn sck_cadence() {
     let wake = Wake::new();
     let waker = Waker(wake.clone());
     for (label, interval) in arms.iter().chain(arms.iter().rev()) {
-        let stream = Stream::start(id, width, height, *interval, &waker).unwrap();
+        let stream = Stream::start(id, Frame::exact(width, height), *interval, &waker).unwrap();
         std::thread::sleep(CADENCE_SETTLE);
         let _ = stream.display_times();
         let (before, server) = (stream.counts(), window_server_cpu());
@@ -2138,7 +3159,8 @@ fn sck_held_back_change() {
     let wake = Wake::new();
     let waker = Waker(wake.clone());
     for interval in [15, 25, 100, 500].map(Duration::from_millis) {
-        let stream = Stream::start_with_pointer(id, width, height, interval, &waker).unwrap();
+        let stream =
+            Stream::start_with_pointer(id, Frame::exact(width, height), interval, &waker).unwrap();
         std::thread::sleep(CADENCE_SETTLE);
         let (mut arrived, mut longest, mut unseen) = (0, Duration::ZERO, 0);
         for trial in 0..HELD_TRIALS {
