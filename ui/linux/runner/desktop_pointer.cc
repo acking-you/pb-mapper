@@ -5,16 +5,18 @@
 // bitmap this computer's own cursor, which then moves with the hardware and
 // changes the moment Dart sets it, with no Flutter frame.
 //
-// `cursor_create {id, rgba, width, height, hot_x, hot_y}` makes a GdkCursor
-// from straight RGBA in physical pixels, `cursor_set {id}` sets it on the
-// window the engine sets its own cursors on (the toplevel's, fl_view.cc), so
-// it stays until Dart activates a system cursor, and `cursor_delete {id}`
-// frees it.
+// `cursor_create {id, rgba, width, height, hot_x, hot_y, scale}` makes a
+// GdkCursor from straight RGBA in physical pixels, made for `scale` of them a
+// logical pixel, replacing any cursor held as `id`; `cursor_set {id}` sets it
+// on the window the engine sets its own cursors on (the toplevel's,
+// fl_view.cc), so it stays until Dart activates a system cursor, and
+// `cursor_delete {id}` frees it.
 #define G_LOG_DOMAIN "pb-mapper-pointer"
 
 #include "desktop_pointer.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -25,6 +27,8 @@ namespace {
 constexpr char kChannel[] = "pb_mapper/desktop_pointer";
 // No side Dart sends is longer: 128 logical pixels at the display's scale.
 constexpr int64_t kMaxSide = 1024;
+// No display's scale is larger.
+constexpr double kMaxScale = 8;
 
 int64_t Number(FlValue* map, const char* key) {
   FlValue* value = fl_value_lookup_string(map, key);
@@ -32,6 +36,23 @@ int64_t Number(FlValue* map, const char* key) {
     throw std::runtime_error(std::string("Missing desktop pointer field ") + key);
   }
   return fl_value_get_int(value);
+}
+
+// The device pixel ratio Dart made the bitmap for, as GDK takes a cursor
+// surface's scale: a whole number (the Wayland backend truncates it, and
+// GTK 3's own scale factors are whole).
+int Scale(FlValue* map) {
+  FlValue* value = fl_value_lookup_string(map, "scale");
+  double scale = 0;
+  if (value && fl_value_get_type(value) == FL_VALUE_TYPE_FLOAT) {
+    scale = fl_value_get_float(value);
+  } else if (value && fl_value_get_type(value) == FL_VALUE_TYPE_INT) {
+    scale = static_cast<double>(fl_value_get_int(value));
+  }
+  if (!std::isfinite(scale) || scale <= 0 || scale > kMaxScale) {
+    throw std::runtime_error("Invalid cursor scale");
+  }
+  return std::max(1, static_cast<int>(std::lround(scale)));
 }
 
 class DesktopPointer {
@@ -84,11 +105,19 @@ class DesktopPointer {
           fl_value_get_length(rgba) != static_cast<size_t>(width * height * 4)) {
         throw std::runtime_error("Invalid cursor pixels");
       }
-      if (found != cursors_.end()) throw std::runtime_error("Cursor id in use");
-      GdkCursor* cursor = MakeCursor(fl_value_get_uint8_list(rgba), static_cast<int>(width),
-                                     static_cast<int>(height), static_cast<int>(hot_x), static_cast<int>(hot_y));
+      const int scale = Scale(args);
+      GdkCursor* cursor =
+          MakeCursor(fl_value_get_uint8_list(rgba), static_cast<int>(width), static_cast<int>(height),
+                     static_cast<int>(hot_x), static_cast<int>(hot_y), scale);
       if (!cursor) throw std::runtime_error("Cannot create the cursor");
-      cursors_[id] = cursor;
+      if (found != cursors_.end()) {
+        // An id held already is one a hot restart of Dart's counter reuses:
+        // the old cursor goes (a window showing it keeps its own reference).
+        g_object_unref(found->second);
+        found->second = cursor;
+      } else {
+        cursors_[id] = cursor;
+      }
     } else if (set) {
       if (found == cursors_.end()) throw std::runtime_error("Unknown cursor");
       GtkWidget* toplevel = gtk_widget_get_toplevel(GTK_WIDGET(view_));
@@ -103,14 +132,18 @@ class DesktopPointer {
     fl_method_call_respond_success(call, nullptr, nullptr);
   }
 
-  // The bitmap at the view's scale: a cairo ARGB32 surface (premultiplied,
-  // one native-endian word a pixel) of whole logical pixels, padded with
-  // transparent ones where the size is not (a Wayland cursor buffer must be
-  // a multiple of its scale), its hotspot in logical pixels.
-  GdkCursor* MakeCursor(const uint8_t* rgba, int width, int height, int hot_x, int hot_y) const {
-    const int scale = std::max(1, gtk_widget_get_scale_factor(GTK_WIDGET(view_)));
-    const int padded_width = (width + scale - 1) / scale * scale;
-    const int padded_height = (height + scale - 1) / scale * scale;
+  // The bitmap at `scale`: a cairo ARGB32 surface (premultiplied, one
+  // native-endian word a pixel) of whole logical pixels, its hotspot on a
+  // whole logical pixel too. GDK keeps a cursor's hotspot in whole logical
+  // pixels on X11 and Wayland, and a Wayland cursor buffer must be a
+  // multiple of its scale, so transparent pixels pad the bitmap on the left
+  // and top until the hotspot falls on a logical pixel's corner, and on the
+  // right and bottom to whole logical pixels.
+  GdkCursor* MakeCursor(const uint8_t* rgba, int width, int height, int hot_x, int hot_y, int scale) const {
+    const int pad_x = (scale - hot_x % scale) % scale;
+    const int pad_y = (scale - hot_y % scale) % scale;
+    const int padded_width = (pad_x + width + scale - 1) / scale * scale;
+    const int padded_height = (pad_y + height + scale - 1) / scale * scale;
     cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, padded_width, padded_height);
     if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
       cairo_surface_destroy(surface);
@@ -121,12 +154,16 @@ class DesktopPointer {
     const int stride = cairo_image_surface_get_stride(surface);
     for (int y = 0; y < padded_height; ++y) {
       auto* row = reinterpret_cast<uint32_t*>(data + static_cast<size_t>(y) * static_cast<size_t>(stride));
+      const int source_y = y - pad_y;
       for (int x = 0; x < padded_width; ++x) {
-        if (x >= width || y >= height) {
+        const int source_x = x - pad_x;
+        if (source_x < 0 || source_y < 0 || source_x >= width || source_y >= height) {
           row[x] = 0;
           continue;
         }
-        const uint8_t* pixel = rgba + (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4;
+        const uint8_t* pixel =
+            rgba +
+            (static_cast<size_t>(source_y) * static_cast<size_t>(width) + static_cast<size_t>(source_x)) * 4;
         const uint32_t alpha = pixel[3];
         const uint32_t red = (pixel[0] * alpha + 127) / 255;
         const uint32_t green = (pixel[1] * alpha + 127) / 255;
@@ -136,10 +173,11 @@ class DesktopPointer {
     }
     cairo_surface_mark_dirty(surface);
     cairo_surface_set_device_scale(surface, scale, scale);
-    // GDK draws the surface into a cursor of its own.
-    GdkCursor* cursor =
-        gdk_cursor_new_from_surface(gtk_widget_get_display(GTK_WIDGET(view_)), surface,
-                                    static_cast<double>(hot_x) / scale, static_cast<double>(hot_y) / scale);
+    // GDK draws the surface into a cursor of its own. Both hotspot
+    // coordinates are whole numbers, which GDK keeps exactly.
+    GdkCursor* cursor = gdk_cursor_new_from_surface(gtk_widget_get_display(GTK_WIDGET(view_)), surface,
+                                                    static_cast<double>((hot_x + pad_x) / scale),
+                                                    static_cast<double>((hot_y + pad_y) / scale));
     cairo_surface_destroy(surface);
     return cursor;
   }

@@ -115,11 +115,19 @@ DesktopPointer::DesktopPointer(flutter::FlutterEngine* engine) {
         if (!rgba || rgba->size() != static_cast<size_t>(width * height * 4)) {
           throw std::runtime_error("Invalid cursor pixels");
         }
-        if (cursors_.find(id) != cursors_.end()) throw std::runtime_error("Cursor id in use");
         HCURSOR cursor = MakeCursor(*rgba, static_cast<int>(width), static_cast<int>(height),
                                     static_cast<int>(hot_x), static_cast<int>(hot_y));
         if (!cursor) throw std::runtime_error("Cannot create the cursor");
-        cursors_.emplace(id, cursor);
+        const auto held = cursors_.find(id);
+        if (held != cursors_.end()) {
+          // An id held already is one a hot restart of Dart's counter
+          // reuses: the old cursor goes.
+          const HCURSOR old = held->second;
+          held->second = cursor;
+          Destroy(old);
+        } else {
+          cursors_.emplace(id, cursor);
+        }
       } else if (method == "cursor_set") {
         const auto found = cursors_.find(id);
         if (found == cursors_.end()) throw std::runtime_error("Unknown cursor");

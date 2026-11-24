@@ -2,9 +2,9 @@ import 'package:flutter/services.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_pointer.dart';
 
 /// The runner's `pb_mapper/desktop_pointer` as a test sees it: every call,
-/// in order, as `create #n <w>x<h> @<x>,<y>`, `set #n` and `delete #n`, and
-/// the cursors it holds. `#n` is the n-th id this fake saw, so a test reads
-/// the same whatever ids earlier tests used.
+/// in order, as `create #n <w>x<h> @<x>,<y> dpr <ratio>`, `set #n` and
+/// `delete #n`, and the cursors it holds. `#n` is the n-th id this fake saw,
+/// so a test reads the same whatever ids earlier tests used.
 class FakeDesktopPointer implements DesktopPointerCursors {
   final calls = <String>[];
 
@@ -17,12 +17,17 @@ class FakeDesktopPointer implements DesktopPointerCursors {
 
   int _name(int id) => _names.putIfAbsent(id, () => _names.length + 1);
 
+  /// Like the runners, replaces a cursor it holds as [id].
   @override
-  Future<void> create(int id, PointerBitmap bitmap) async {
+  Future<void> create(
+    int id,
+    PointerBitmap bitmap, {
+    required double devicePixelRatio,
+  }) async {
     final n = _name(id);
     calls.add(
       'create #$n ${bitmap.width}x${bitmap.height} '
-      '@${bitmap.hotX},${bitmap.hotY}',
+      '@${bitmap.hotX},${bitmap.hotY} dpr $devicePixelRatio',
     );
     if (fail) throw PlatformException(code: 'desktop_pointer');
     held[n] = bitmap;

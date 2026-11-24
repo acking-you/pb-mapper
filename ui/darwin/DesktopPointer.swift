@@ -15,6 +15,8 @@
   private let pointerChannel = "pb_mapper/desktop_pointer"
   /// No side Dart sends is longer: 128 logical pixels at the display's scale.
   private let maxSide = 1024
+  /// No display's scale is larger.
+  private let maxScale = 8.0
   /// FlutterView's own: it keeps the cursor last activated and sets it again
   /// on every cursorUpdate: (FlutterView.mm), which would undo ours.
   private let didUpdateMouseCursor = NSSelectorFromString("didUpdateMouseCursor:")
@@ -24,8 +26,9 @@
     init(_ message: String) { self.message = message }
   }
 
-  /// `cursor_create {id, rgba, width, height, hot_x, hot_y}` makes a cursor
-  /// from straight RGBA in physical pixels, `cursor_set {id}` shows it, and
+  /// `cursor_create {id, rgba, width, height, hot_x, hot_y, scale}` makes a
+  /// cursor from straight RGBA in physical pixels, made for `scale` of them a
+  /// point, replacing any cursor held as `id`; `cursor_set {id}` shows it, and
   /// `cursor_delete {id}` frees it. A shown cursor stays until Dart activates
   /// a system one through the engine, which tells the view in turn.
   final class DesktopPointerPlugin: NSObject, FlutterPlugin {
@@ -80,11 +83,15 @@
         guard let rgba = (args["rgba"] as? FlutterStandardTypedData)?.data,
           rgba.count == width * height * 4
         else { throw PointerError("Invalid cursor pixels") }
-        guard cursors[id] == nil else { throw PointerError("Cursor id in use") }
-        guard let cursor = makeCursor(rgba, width, height, hotX, hotY) else {
+        guard let scale = (args["scale"] as? NSNumber)?.doubleValue,
+          scale.isFinite, scale > 0, scale <= maxScale
+        else { throw PointerError("Invalid cursor scale") }
+        guard let cursor = makeCursor(rgba, width, height, hotX, hotY, CGFloat(scale)) else {
           throw PointerError("Cannot create the cursor")
         }
-        cursors[id] = cursor
+        // An id held already is one a hot restart of Dart's counter reuses:
+        // the old cursor goes.
+        if let old = cursors.updateValue(cursor, forKey: id), old === shown { shown = nil }
       case "cursor_set":
         guard let cursor = cursors[id] else { throw PointerError("Unknown cursor") }
         show(cursor)
@@ -112,12 +119,13 @@
       }
     }
 
-    /// The bitmap at the window's scale: an image of `width / scale` by
-    /// `height / scale` points holding every pixel, its hotspot in points from
-    /// the top left.
-    private func makeCursor(_ rgba: Data, _ width: Int, _ height: Int, _ hotX: Int, _ hotY: Int)
-      -> NSCursor?
-    {
+    /// The bitmap at `scale`, the device pixel ratio Dart made it for, not the
+    /// window's now, which may differ for a moment after the window moves to
+    /// another display: an image of `width / scale` by `height / scale` points
+    /// holding every pixel, its hotspot in points from the top left.
+    private func makeCursor(
+      _ rgba: Data, _ width: Int, _ height: Int, _ hotX: Int, _ hotY: Int, _ scale: CGFloat
+    ) -> NSCursor? {
       guard let provider = CGDataProvider(data: rgba as CFData),
         let space = CGColorSpace(name: CGColorSpace.sRGB),
         let image = CGImage(
@@ -126,8 +134,6 @@
           bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
           provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
       else { return nil }
-      let scale = max(
-        1, registrar?.view?.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1)
       let size = NSSize(width: CGFloat(width) / scale, height: CGFloat(height) / scale)
       let rep = NSBitmapImageRep(cgImage: image)
       rep.size = size

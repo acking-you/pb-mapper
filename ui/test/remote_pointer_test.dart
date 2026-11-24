@@ -456,7 +456,7 @@ void main() {
         final custom = log.take();
         expect(custom, [
           'cursor_create {id: ${pointer.debugBitmapIds.last}, width: 64, '
-              'height: 64, hot_x: 32, hot_y: 32, bytes: 16384}',
+              'height: 64, hot_x: 32, hot_y: 32, scale: 2.0, bytes: 16384}',
           'cursor_set {id: ${pointer.debugBitmapIds.last}}',
         ]);
         expect(pointer.value.paint, RemotePointerPaint.none);
@@ -478,7 +478,7 @@ void main() {
       h.viewport.zoomAt(const Offset(960, 540), 1.5);
       expect(log.take(), [
         'cursor_create {id: ${pointer.debugBitmapIds.last}, width: 96, '
-            'height: 96, hot_x: 48, hot_y: 48, bytes: 36864}',
+            'height: 96, hot_x: 48, hot_y: 48, scale: 2.0, bytes: 36864}',
         'cursor_set {id: ${pointer.debugBitmapIds.last}}',
       ]);
 
@@ -503,7 +503,7 @@ void main() {
       );
       await scene.report(shape: 1);
       if (defaultTargetPlatform == TargetPlatform.macOS) {
-        expect(runner.take(), ['create #1 64x64 @32,32', 'set #1']);
+        expect(runner.take(), ['create #1 64x64 @32,32 dpr 2.0', 'set #1']);
         expect(scene.log.take(), isEmpty);
       } else {
         expect(runner.take(), isEmpty);
@@ -516,6 +516,45 @@ void main() {
       TargetPlatform.macOS,
       TargetPlatform.windows,
     }),
+  );
+
+  testWidgets(
+    'a bitmap is kept per device pixel ratio: the same pixels at another '
+    'ratio are another size on a Mac',
+    (tester) async {
+      final runner = FakeDesktopPointer();
+      final scene = await _Scene.open(tester, native: runner);
+      scene.h.api.cursorShapes[1] = _shape(
+        DesktopCursorKind.custom,
+        side: 32,
+        hot: 16,
+      );
+      await scene.report(shape: 1);
+      expect(runner.take(), ['create #1 64x64 @32,32 dpr 2.0', 'set #1']);
+
+      // The window moves to a display at 1x: the same logical size, so
+      // half the pixels.
+      tester.view
+        ..physicalSize = const Size(1920, 1080)
+        ..devicePixelRatio = 1;
+      await tester.pump();
+      expect(runner.take(), ['create #2 32x32 @16,16 dpr 1.0', 'set #2']);
+
+      // Zoomed in twice there: as many pixels as the first bitmap, made
+      // for 2x, which would show half as large; a new one, made for 1x.
+      scene.h.viewport.zoomAt(const Offset(960, 540), 2);
+      expect(runner.take(), ['create #3 64x64 @32,32 dpr 1.0', 'set #3']);
+
+      // Back on the 2x display, unzoomed: the first is shown again.
+      scene.h.viewport.zoomAt(const Offset(960, 540), 0.5);
+      tester.view
+        ..physicalSize = const Size(3840, 2160)
+        ..devicePixelRatio = 2;
+      await tester.pump();
+      expect(runner.take(), ['set #2', 'set #1']);
+      await scene.close();
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
   );
 
   testWidgets(

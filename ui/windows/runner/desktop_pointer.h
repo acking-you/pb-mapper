@@ -14,8 +14,10 @@
 // The `pb_mapper/desktop_pointer` channel (ui/lib/src/ffi/desktop_pointer.dart):
 // a remote computer's pointer bitmap as this computer's own cursor, which
 // moves with the hardware and changes the moment Dart sets it.
-// `cursor_create {id, rgba, width, height, hot_x, hot_y}` makes one from
-// straight RGBA in physical pixels, `cursor_set {id}` shows it with
+// `cursor_create {id, rgba, width, height, hot_x, hot_y, scale}` makes one
+// from straight RGBA in physical pixels, replacing any cursor held as `id`
+// (`scale`, the device pixel ratio Dart made it for, does not matter here: a
+// Windows cursor is physical pixels), `cursor_set {id}` shows it with
 // ::SetCursor on this, the platform thread, and `cursor_delete {id}` frees
 // it. The engine answers WM_SETCURSOR over the client area without setting a
 // cursor, so the one set here stays until Dart activates a system cursor.

@@ -17,8 +17,18 @@ import '../state/desktop_models.dart';
 /// region. The runner holds every cursor until [delete]; the caller bounds
 /// how many it keeps.
 abstract interface class DesktopPointerCursors {
-  /// Creates cursor [id] from [bitmap]. Throws where the runner cannot.
-  Future<void> create(int id, PointerBitmap bitmap);
+  /// Creates cursor [id] from [bitmap], made for [devicePixelRatio]
+  /// physical pixels a logical one: macOS and Linux show it that many times
+  /// smaller in logical pixels, whatever the window's scale is by then, and
+  /// Windows, whose cursors are physical pixels, as it is. A cursor the
+  /// runner already holds as [id] is replaced: a hot restart starts the ids
+  /// again while the runner keeps its cursors. Throws where the runner
+  /// cannot.
+  Future<void> create(
+    int id,
+    PointerBitmap bitmap, {
+    required double devicePixelRatio,
+  });
 
   /// Shows cursor [id]. Throws for an id [create] did not make.
   Future<void> set(int id);
@@ -49,15 +59,19 @@ final class _ChannelPointerCursors implements DesktopPointerCursors {
   static const _channel = MethodChannel('pb_mapper/desktop_pointer');
 
   @override
-  Future<void> create(int id, PointerBitmap bitmap) =>
-      _channel.invokeMethod<void>('cursor_create', {
-        'id': id,
-        'rgba': bitmap.rgba,
-        'width': bitmap.width,
-        'height': bitmap.height,
-        'hot_x': bitmap.hotX,
-        'hot_y': bitmap.hotY,
-      });
+  Future<void> create(
+    int id,
+    PointerBitmap bitmap, {
+    required double devicePixelRatio,
+  }) => _channel.invokeMethod<void>('cursor_create', {
+    'id': id,
+    'rgba': bitmap.rgba,
+    'width': bitmap.width,
+    'height': bitmap.height,
+    'hot_x': bitmap.hotX,
+    'hot_y': bitmap.hotY,
+    'scale': devicePixelRatio,
+  });
 
   @override
   Future<void> set(int id) =>

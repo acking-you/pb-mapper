@@ -202,7 +202,9 @@ final class RemotePointer extends ValueNotifier<RemotePointerLook> {
   /// The bitmaps the runner holds, the latest used last.
   final _bitmaps = <_NativeBitmap>[];
 
-  /// Shared by every viewer, so the runner never sees an id twice.
+  /// Shared by every viewer, so the runner never sees an id twice in one
+  /// run. A hot restart starts it again while the runner keeps its
+  /// cursors; the runner replaces a cursor whose id comes again.
   static int _nextBitmap = 1;
 
   /// The ids of the bitmaps the runner holds for this pointer, the latest
@@ -286,7 +288,7 @@ final class RemotePointer extends ValueNotifier<RemotePointerLook> {
     if (native == null || shape == null) return;
     final scale = _bitmapScale(shape);
     final shown = _shownBitmap;
-    if (shown != null && shown.fits(shape, scale)) return;
+    if (shown != null && shown.fits(shape, scale, _dpr)) return;
     final bitmap = _bitmapFor(native, shape, scale);
     _shownBitmap = bitmap;
     _shownKind = null;
@@ -309,7 +311,8 @@ final class RemotePointer extends ValueNotifier<RemotePointerLook> {
     return logical * _dpr;
   }
 
-  /// The runner's bitmap of [shape] at about [scale], made if it has none.
+  /// The runner's bitmap of [shape] at about [scale] for the current device
+  /// pixel ratio, made if it has none.
   _NativeBitmap _bitmapFor(
     DesktopPointerCursors native,
     DesktopCursorShape shape,
@@ -317,13 +320,17 @@ final class RemotePointer extends ValueNotifier<RemotePointerLook> {
   ) {
     for (var i = _bitmaps.length - 1; i >= 0; i--) {
       final held = _bitmaps[i];
-      if (!held.fits(shape, scale)) continue;
+      if (!held.fits(shape, scale, _dpr)) continue;
       if (i != _bitmaps.length - 1) _bitmaps.add(_bitmaps.removeAt(i));
       return held;
     }
-    final made = _NativeBitmap(_nextBitmap++, shape, scale);
+    final made = _NativeBitmap(_nextBitmap++, shape, scale, _dpr);
     native
-        .create(made.id, scalePointerBitmap(shape, scale))
+        .create(
+          made.id,
+          scalePointerBitmap(shape, scale),
+          devicePixelRatio: _dpr,
+        )
         .then<void>((_) {}, onError: _onNativeFailure);
     _bitmaps.add(made);
     while (_bitmaps.length > kNativeBitmapCache) {
@@ -361,16 +368,21 @@ final class RemotePointer extends ValueNotifier<RemotePointerLook> {
   }
 }
 
-/// One bitmap the runner holds: [shape] at [scale].
+/// One bitmap the runner holds: [shape] at [scale] physical pixels a host
+/// pixel, made for [devicePixelRatio], which on macOS and Linux fixes its
+/// size in logical pixels.
 final class _NativeBitmap {
-  _NativeBitmap(this.id, this.shape, this.scale);
+  _NativeBitmap(this.id, this.shape, this.scale, this.devicePixelRatio);
 
   final int id;
   final DesktopCursorShape shape;
   final double scale;
+  final double devicePixelRatio;
 
-  /// Shows [other] at [at], to within 2 %.
-  bool fits(DesktopCursorShape other, double at) =>
+  /// Shows [other] at [at], to within 2 %, at [dpr]: the same physical
+  /// size at another ratio is another logical size.
+  bool fits(DesktopCursorShape other, double at, double dpr) =>
+      dpr == devicePixelRatio &&
       (at / scale - 1).abs() < 0.02 &&
       (identical(other, shape) || other.sameAs(shape));
 }
