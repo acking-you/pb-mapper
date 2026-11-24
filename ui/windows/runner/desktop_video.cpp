@@ -356,7 +356,12 @@ Map ProbeDecoders(IDXGIAdapter* adapter) {
     }
     if (SUCCEEDED(com)) CoUninitialize();
   }
-  return {{Value("h264"), h264}, {Value("h265"), h265}, {Value("display_max_hz"), Value(DisplayMaxHz())}};
+  // `window_refresh`: this runner answers `refresh_hz` and calls
+  // `display_changed`, so Dart follows the window's display through it.
+  return {{Value("h264"), h264},
+          {Value("h265"), h265},
+          {Value("display_max_hz"), Value(DisplayMaxHz())},
+          {Value("window_refresh"), Value(true)}};
 }
 
 struct SnapshotRequest {
@@ -1192,8 +1197,12 @@ struct DesktopVideo::Impl {
   flutter::FlutterEngine* engine;
   // Flutter's view, whose display the viewer presents on.
   HWND view;
-  // The monitor `view` was on when last looked at. Platform thread only.
+  // The monitor `view` was on when last looked at, once Dart follows it.
+  // Platform thread only.
   HMONITOR monitor = nullptr;
+  // Dart asked `refresh_hz`, so it listens for `display_changed`. Platform
+  // thread only.
+  bool following = false;
   flutter::PluginRegistrarWindows* registrar;
   std::unique_ptr<flutter::MethodChannel<Value>> channel;
   // Resolved by the first create: Dart has loaded the DLL by then.
@@ -1208,7 +1217,6 @@ struct DesktopVideo::Impl {
   std::thread probe;
   Impl(flutter::FlutterEngine* value, HWND window, HWND view_window)
       : engine(value), view(view_window), replies(std::make_shared<Replies>(window)) {
-    monitor = MonitorFromWindow(view, MONITOR_DEFAULTTONEAREST);
     registrar = flutter::PluginRegistrarManager::GetInstance()->GetRegistrar<flutter::PluginRegistrarWindows>(engine->GetRegistrarForPlugin("PbMapperDesktopVideo"));
     channel = std::make_unique<flutter::MethodChannel<Value>>(engine->messenger(), "pb_mapper/desktop_video", &flutter::StandardMethodCodec::GetInstance());
     channel->SetMethodCallHandler([this](const auto& call, auto result) {
@@ -1218,8 +1226,12 @@ struct DesktopVideo::Impl {
           return;
         }
         // The exact refresh of the display the view is on, which Dart sends
-        // the viewer; null when nothing says. No arguments.
+        // the viewer; null when nothing says. No arguments. Dart follows the
+        // display from the first call, so `display_changed` goes from then
+        // on, for a monitor other than this one.
         if (call.method_name() == "refresh_hz") {
+          following = true;
+          monitor = MonitorFromWindow(view, MONITOR_DEFAULTTONEAREST);
           const double hz = WindowRefreshHz(view);
           result->Success(hz > 1 ? Value(hz) : Value());
           return;
@@ -1296,10 +1308,12 @@ struct DesktopVideo::Impl {
       for (auto& reply : waiting) replies->Send(std::move(reply), answer);
     });
   }
-  // The window moved, or a display changed: when the view is on another
-  // monitor than before, or any display's mode changed, Dart is told
-  // (`display_changed`, no arguments) and reads `refresh_hz` again.
+  // The window moved, or a display changed: once Dart follows the display,
+  // when the view is on another monitor than before, or any display's mode
+  // changed, Dart is told (`display_changed`, no arguments) and reads
+  // `refresh_hz` again.
   void DisplayMaybeChanged(bool moved) {
+    if (!following) return;
     const HMONITOR now = MonitorFromWindow(view, MONITOR_DEFAULTTONEAREST);
     if (moved && now == monitor) return;
     monitor = now;

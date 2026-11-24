@@ -1334,9 +1334,14 @@ class DesktopStore {
       await _disconnectNative();
       if (_disposed || serial != _serial) return;
       final decoders = _decoders.value ?? await _probeDecoders();
-      // Only the runner's exact rate is waited for.
-      final windowHz = _displayRefresh.exact
-          ? await _displayRefresh.read()
+      // The window's display is the runner's to read where it said so.
+      // Watched from before the read on, so that a change during it or the
+      // connect is seen; only the runner's rate is waited for.
+      final runner = _displayRefresh.follows && decoders.windowRefresh;
+      _watchRefresh(runner: runner);
+      _refreshMissed = false;
+      final windowHz = runner
+          ? await _displayRefresh.read(runner: true)
           : _refreshHz();
       // Read after the waits: a change meanwhile applies to this attempt.
       final target = _target;
@@ -1351,7 +1356,6 @@ class DesktopStore {
       final connectHz = _displayRefresh.follows
           ? math.max(windowHz, decoders.displayMaxHz ?? windowHz)
           : windowHz;
-      _watchRefresh();
       final session = await _api.connect(
         target.invitation,
         computerId: target.computerId,
@@ -1375,9 +1379,17 @@ class DesktopStore {
       }
       _attemptSerial = null;
       _media = session;
-      // The connect told Rust its rate; the window's goes now if it differs.
+      // The connect told Rust its rate; the window's display, as it is now,
+      // goes if it differs: Flutter's read again, or the runner's read
+      // before the connect, and read again if the display may have changed
+      // while the connect ran.
       _sentRefreshHz = connectHz;
-      _offerRefresh(windowHz);
+      if (runner) {
+        _offerRefresh(windowHz);
+        if (_refreshMissed) unawaited(_followRefresh());
+      } else if (_displayRefresh.follows) {
+        _offerRefresh(_refreshHz());
+      }
       _stopHandled = false;
       _nativePaused = false;
       _controlSuppressed = false;
@@ -2448,11 +2460,25 @@ class DesktopStore {
   double? _sentRefreshHz;
   bool _refreshReading = false, _refreshAgain = false;
 
+  /// The window's display may have changed while no session could be told,
+  /// during a connect: the connect reads it again once one can.
+  bool _refreshMissed = false;
+
+  /// The runner reads the window's display ([DesktopDecoders.windowRefresh]).
+  bool _refreshFromRunner = false;
+
   /// From the first connect on, where the viewer follows its window's
-  /// display: whenever that may have changed, it is read again.
-  void _watchRefresh() {
-    if (!_displayRefresh.follows || _unwatchRefresh != null) return;
-    _unwatchRefresh = _displayRefresh.watch(() => unawaited(_followRefresh()));
+  /// display: whenever that may have changed, it is read again, from the
+  /// runner once a probe said it reads it.
+  void _watchRefresh({required bool runner}) {
+    if (!_displayRefresh.follows) return;
+    if (_unwatchRefresh != null && runner == _refreshFromRunner) return;
+    _unwatchRefresh?.call();
+    _refreshFromRunner = runner;
+    _unwatchRefresh = _displayRefresh.watch(
+      () => unawaited(_followRefresh()),
+      runner: runner,
+    );
   }
 
   /// Reads the window's display rate, one read at a time, and offers it to
@@ -2466,8 +2492,12 @@ class DesktopStore {
     try {
       do {
         _refreshAgain = false;
-        if (_disposed || _media == null) return;
-        _offerRefresh(await _displayRefresh.read());
+        if (_disposed) return;
+        if (_media == null) {
+          _refreshMissed = true;
+          return;
+        }
+        _offerRefresh(await _displayRefresh.read(runner: _refreshFromRunner));
       } while (_refreshAgain);
     } finally {
       _refreshReading = false;
@@ -2477,7 +2507,12 @@ class DesktopStore {
   /// Tells the session's viewer [hz] when that is not what it was told
   /// last (`display_refresh`).
   void _offerRefresh(double hz) {
-    if (_disposed || _media == null || hz == _sentRefreshHz) return;
+    if (_disposed) return;
+    if (_media == null) {
+      _refreshMissed = true;
+      return;
+    }
+    if (hz == _sentRefreshHz) return;
     try {
       _api.setDisplayRefresh(hz);
       _sentRefreshHz = hz;

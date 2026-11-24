@@ -8,28 +8,29 @@ import 'package:flutter/widgets.dart';
 /// viewer follows (the FFI's `display_refresh`): the computer it views is
 /// asked for no more frames a second than that display shows.
 ///
-/// Flutter's view reports its display's rate, and a metrics change when the
-/// window moves to another display or a display's mode changes. On Windows
-/// that rate is the mode's whole hertz, 59 for a 59.94 Hz mode, so there the
-/// runner's `refresh_hz` (`pb_mapper/desktop_video`) answers the display
-/// path's exact rate, and its `display_changed` says when the window moved
-/// to another monitor or a display's mode changed.
+/// Flutter's view reports its display's rate, and on macOS a metrics change
+/// when the window moves to another screen or a screen's mode changes.
+/// Elsewhere that is not enough: the Windows and Linux embedders move the
+/// view to another display only when its size or scale changes, Linux's
+/// never sees a mode change, and on Windows the rate is the mode's whole
+/// hertz, 59 for a 59.94 Hz mode. There the runner's `refresh_hz`
+/// (`pb_mapper/desktop_video`) answers the rate of the display the window is
+/// on now, exactly, and its `display_changed` says when the window may have
+/// moved to another monitor or a display's mode changed. A runner that does
+/// says so in its `decoders` answer (`DesktopDecoders.windowRefresh`), so
+/// nothing waits on a runner that never answers, such as a test's.
 class DisplayRefresh {
-  const DisplayRefresh({required this.follows, required this.exact});
+  const DisplayRefresh({required this.follows});
 
-  /// This platform's: followed on macOS, Windows and Linux, read exactly
-  /// from the runner on Windows. Android connects at 60 whatever its display
-  /// reports, and iOS keeps its connect-time rate.
+  /// This platform's: followed on macOS, Windows and Linux. Android connects
+  /// at 60 whatever its display reports, and iOS keeps its connect-time
+  /// rate.
   factory DisplayRefresh.platform() => DisplayRefresh(
     follows: Platform.isMacOS || Platform.isWindows || Platform.isLinux,
-    exact: Platform.isWindows,
   );
 
   /// The viewer follows the window's display as it changes.
   final bool follows;
-
-  /// The runner answers the display's exact rate (`refresh_hz`).
-  final bool exact;
 
   static const _channel = MethodChannel('pb_mapper/desktop_video');
 
@@ -49,11 +50,11 @@ class DisplayRefresh {
     }
   }
 
-  /// The window's display's rate: the runner's exact one where [exact],
-  /// within [runnerWait], else, and failing that, Flutter's.
-  Future<double> read() async {
+  /// The window's display's rate: the runner's where [runner] (it said it
+  /// answers), within [runnerWait], else, and failing that, Flutter's.
+  Future<double> read({required bool runner}) async {
     final flutter = flutterHz();
-    if (!exact) return flutter;
+    if (!runner) return flutter;
     try {
       final hz = await _channel
           .invokeMethod<double>('refresh_hz')
@@ -66,12 +67,12 @@ class DisplayRefresh {
 
   /// Calls [changed] whenever the window's display may refresh at another
   /// rate: Flutter's rate for it changed (a metrics change), the app came
-  /// back to the front, or, where [exact], the runner said the window moved
+  /// back to the front, or, where [runner], the runner said the window moved
   /// to another monitor or a display's mode changed. Returns what stops it.
-  VoidCallback watch(VoidCallback changed) {
+  VoidCallback watch(VoidCallback changed, {required bool runner}) {
     final watch = _Watch(changed);
     WidgetsBinding.instance.addObserver(watch);
-    if (exact) {
+    if (runner) {
       if (_runnerWatches.isEmpty) _channel.setMethodCallHandler(_fromRunner);
       _runnerWatches.add(watch);
     }
