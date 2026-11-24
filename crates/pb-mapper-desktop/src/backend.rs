@@ -59,7 +59,12 @@ pub trait Backend: 'static {
     }
     /// Start a fresh encoder for the room's codec, capture limits, context or
     /// recovery. Discard all pending output, even when the limits are identical.
-    /// Input coordinates stay in physical desktop pixels when scaling video.
+    /// A backend may instead keep an encoder that serves new limits as it is
+    /// (only the frame rate changed), pending output included: thread C asks
+    /// for an IDR after any limits change, and passes each change on as it
+    /// happens, an outage included, so the limits of the last call again
+    /// always ask for a fresh encoder. Input coordinates stay in physical
+    /// desktop pixels when scaling video.
     fn configure_video(&mut self, limits: VideoLimits, nominal_fps: u32) -> Result<()> {
         let _ = nominal_fps;
         limits.validate()
@@ -112,22 +117,40 @@ pub trait Backend: 'static {
         0
     }
     /// `Some(interval)`: thread C polls `drain_video` this often while units
-    /// are pending, and, while the desktop is active, a source that had no
-    /// picture to submit as often (see `submitted_video`). `None`: a push
-    /// source that wakes thread C itself.
+    /// are pending. `None`: a push encoder that wakes thread C itself.
     fn drain_poll(&self) -> Option<Duration> {
         Some(DRAIN_POLL)
+    }
+    /// `Some(interval)`: while the desktop is active, thread C asks a capture
+    /// that had no picture to submit again this often (see
+    /// `submitted_video`). `None`: a push capture that wakes thread C itself
+    /// for a new picture. Default: `drain_poll()`, which suits a source whose
+    /// capture and encoder are polled alike; one whose encoder pushes while
+    /// its capture is polled says so here.
+    fn capture_poll(&self) -> Option<Duration> {
+        self.drain_poll()
     }
     /// Whether the last `capture_video` handed a tick to the capture source,
     /// or spent it on a full encoder. A source with no new picture to encode
     /// can leave the tick armed, even when `capture_video` collected the
     /// previous tick's output. Thread C asks a push source again when it
     /// wakes thread C or at its `capture_idle_until`, and a pull source,
-    /// which names no time, after `drain_poll()` for 250 ms after an input
+    /// which names no time, after `capture_poll()` for 250 ms after an input
     /// thread C injected or a new picture, and a period later otherwise:
     /// never at once, which would spin thread C.
     fn submitted_video(&self) -> bool {
         true
+    }
+    /// When the display presented the picture the last `capture_video`
+    /// submitted, and how many presents it covers. Thread C anchors its next
+    /// tick on it, so a display presenting at the pace is taken as each
+    /// present lands. `None`, the default, for a call that submitted
+    /// nothing, a repeat of an unchanged picture (liveness or a keyframe),
+    /// and a picture the source cannot date; thread C then keeps an even
+    /// grid. A time later than the call began counts as its start, and one
+    /// more than a period old as `None`.
+    fn submitted_picture(&self) -> Option<Presented> {
+        None
     }
     /// When a push source that currently has nothing to submit next needs a
     /// tick, including for a `keyframe_due` if it has a picture to repeat.
@@ -173,6 +196,13 @@ pub trait Backend: 'static {
         }
         event.validate(&expected.display)?;
         self.input(event)
+    }
+    /// Every viewer paused (`true`), or one resumed after all had
+    /// (`false`, before the capture that follows): called once per change.
+    /// Thread C captures nothing while paused, so a pull source needs
+    /// nothing here; a push source may stop producing pictures meanwhile.
+    fn video_paused(&mut self, paused: bool) {
+        let _ = paused;
     }
     /// Renew held input only after the controller has presented a current frame.
     fn presented(&mut self, expected: &DesktopContext) -> Result<()> {
@@ -270,8 +300,14 @@ impl<B: Backend + ?Sized> Backend for Box<B> {
     fn drain_poll(&self) -> Option<Duration> {
         (**self).drain_poll()
     }
+    fn capture_poll(&self) -> Option<Duration> {
+        (**self).capture_poll()
+    }
     fn submitted_video(&self) -> bool {
         (**self).submitted_video()
+    }
+    fn submitted_picture(&self) -> Option<Presented> {
+        (**self).submitted_picture()
     }
     fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         (**self).capture_idle_until(keyframe_due)
@@ -287,6 +323,9 @@ impl<B: Backend + ?Sized> Backend for Box<B> {
     }
     fn input_in_context(&mut self, expected: &DesktopContext, event: &Input) -> Result<()> {
         (**self).input_in_context(expected, event)
+    }
+    fn video_paused(&mut self, paused: bool) {
+        (**self).video_paused(paused);
     }
     fn presented(&mut self, expected: &DesktopContext) -> Result<()> {
         (**self).presented(expected)
@@ -305,6 +344,28 @@ impl<B: Backend + ?Sized> Backend for Box<B> {
     }
     fn restore_display_mode(&mut self) -> Result<bool> {
         (**self).restore_display_mode()
+    }
+}
+
+/// When the display presented a picture a backend submitted
+/// ([`Backend::submitted_picture`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Presented {
+    /// When the display presented it, or, where the operating system says
+    /// only when a picture reached the capture, then.
+    pub at: Instant,
+    /// The presents it covers, at least 1: 1 when none was skipped, more
+    /// when newer ones replaced older before a capture took them.
+    pub presents: u32,
+}
+impl Presented {
+    /// A picture presented `at`, covering `presents` presents (at least 1).
+    pub fn new(at: Instant, presents: u32) -> Self {
+        Self {
+            at,
+            presents: presents.max(1),
+        }
     }
 }
 

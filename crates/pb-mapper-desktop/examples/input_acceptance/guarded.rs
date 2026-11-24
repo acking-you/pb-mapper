@@ -2,7 +2,8 @@
 use crate::fixture::State;
 use pb_mapper_desktop::{
     Backend, CursorPosition, CursorShape, Description, DesktopContext, Display, DoubleClickGuard,
-    EncodedFrame, Input, Mode, ModeList, Result, VideoCodec, VideoLimits, VideoRate, Waker,
+    EncodedFrame, Input, Mode, ModeList, Presented, Result, VideoCodec, VideoLimits, VideoRate,
+    Waker,
 };
 use std::{
     sync::{Arc, atomic::Ordering},
@@ -50,8 +51,17 @@ impl Backend for Guarded {
     fn drain_poll(&self) -> Option<Duration> {
         self.inner.drain_poll()
     }
+    fn capture_poll(&self) -> Option<Duration> {
+        self.inner.capture_poll()
+    }
     fn submitted_video(&self) -> bool {
         self.inner.submitted_video()
+    }
+    fn submitted_picture(&self) -> Option<Presented> {
+        self.inner.submitted_picture()
+    }
+    fn video_paused(&mut self, paused: bool) {
+        self.inner.video_paused(paused);
     }
     fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         self.inner.capture_idle_until(keyframe_due)
