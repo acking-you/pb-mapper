@@ -81,6 +81,11 @@ pub(crate) enum Request {
         sequence: u64,
         input: Input,
     },
+    /// The GPU and driver that drive the bound display, answered in
+    /// `adapter`: asked only for a viewer that decodes H.265, before `H265`,
+    /// which the host skips when a worker's probe on the same GPU and driver
+    /// answered it earlier in the host's process.
+    Adapter {},
     /// Whether the worker encodes H.265 on its display, which it probes in
     /// the interactive session: asked only for a viewer that decodes it.
     H265 {},
@@ -118,6 +123,7 @@ impl Request {
             | Self::Video { .. }
             | Self::Presented { .. }
             | Self::Input { .. }
+            | Self::Adapter {}
             | Self::H265 {}
             | Self::CursorShape {}
             | Self::Release {}
@@ -136,6 +142,7 @@ impl Request {
             | Self::Video { .. }
             | Self::Presented { .. }
             | Self::Input { .. }
+            | Self::Adapter {}
             | Self::H265 {}
             | Self::DisplayModes { .. }
             | Self::SetDisplayMode { .. }
@@ -152,6 +159,7 @@ impl Request {
             | Self::ConfigureVideo { .. }
             | Self::Presented { .. }
             | Self::Input { .. }
+            | Self::Adapter {}
             | Self::H265 {}
             | Self::DisplayModes { .. }
             | Self::SetDisplayMode { .. }
@@ -192,6 +200,14 @@ pub(crate) struct Response {
     /// In the `H265` response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub h265: Option<bool>,
+    /// In the `Adapter` response: the GPU and driver that drive the bound
+    /// display, when the worker can name them. In the `H265` response: the
+    /// GPU and driver whose probe `h265` is, under which alone the host
+    /// keeps it; absent when the worker answered without a probe (its
+    /// display undescribed, or no GPU found for it), and that answer holds
+    /// for its session alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<AdapterKey>,
     /// In the `DisplayModes` response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<ModeList>,
@@ -300,5 +316,138 @@ impl From<StartCaps> for BackendCaps {
             // corrects it and nothing corrects `Timestamp`.
             rate_model: RateModel::Nominal,
         }
+    }
+}
+
+/// A GPU and its driver, as a worker names the one that drives its display:
+/// the adapter's PCI identity (vendor, device, subsystem and revision) and
+/// its user-mode driver's version. What a worker's probe answered of that
+/// GPU holds for the next worker on it until its driver changes, which
+/// changes the key. An adapter's LUID would not do: it names the adapter
+/// only until the system restarts, and says nothing of its driver. A key
+/// names a vendor and a driver version, without which it could not tell a
+/// driver update: the worker builds one only through [`AdapterKey::new`],
+/// and the host decodes one only through the same check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawAdapterKey")]
+pub(crate) struct AdapterKey {
+    vendor_id: u32,
+    device_id: u32,
+    subsys_id: u32,
+    revision: u32,
+    /// Its four 16-bit parts, most significant first, as DXGI packs them.
+    driver_version: u64,
+}
+impl AdapterKey {
+    /// `None` without a vendor or a driver version.
+    pub(crate) fn new(
+        vendor_id: u32,
+        device_id: u32,
+        subsys_id: u32,
+        revision: u32,
+        driver_version: u64,
+    ) -> Option<Self> {
+        (vendor_id != 0 && driver_version != 0).then_some(Self {
+            vendor_id,
+            device_id,
+            subsys_id,
+            revision,
+            driver_version,
+        })
+    }
+}
+/// An [`AdapterKey`] as it crosses the pipe, before it is checked.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAdapterKey {
+    vendor_id: u32,
+    device_id: u32,
+    subsys_id: u32,
+    revision: u32,
+    driver_version: u64,
+}
+impl TryFrom<RawAdapterKey> for AdapterKey {
+    type Error = &'static str;
+    fn try_from(raw: RawAdapterKey) -> Result<Self, Self::Error> {
+        let RawAdapterKey {
+            vendor_id,
+            device_id,
+            subsys_id,
+            revision,
+            driver_version,
+        } = raw;
+        Self::new(vendor_id, device_id, subsys_id, revision, driver_version)
+            .ok_or("an adapter key without a vendor or a driver version")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Protocol 11: `Request::Adapter` takes no field, and a response names
+    /// an adapter, or leaves it out as every other answer does; either reads
+    /// back as it was sent.
+    #[test]
+    fn an_adapter_crosses_in_a_response_or_stays_out() {
+        let asked = serde_json::to_string(&Request::Adapter {}).unwrap();
+        assert_eq!(asked, r#"{"op":"adapter"}"#);
+        assert!(serde_json::from_str::<Request>(r#"{"op":"adapter","luid":7}"#).is_err());
+
+        let json = serde_json::to_string(&Response::default()).unwrap();
+        assert!(!json.contains("adapter"));
+        assert_eq!(
+            serde_json::from_str::<Response>(&json).unwrap().adapter,
+            None
+        );
+
+        // An NVIDIA GPU on driver 32.0.15.6094.
+        let driver = (32 << 48) | (15 << 16) | 6094;
+        let adapter = AdapterKey::new(0x10de, 0x2c05, 0x8a1e_1043, 0xa1, driver);
+        assert!(adapter.is_some());
+        let json = serde_json::to_string(&Response {
+            h265: Some(true),
+            adapter,
+            ..Response::default()
+        })
+        .unwrap();
+        assert!(json.contains(
+            r#""adapter":{"vendor_id":4318,"device_id":11269,"subsys_id":2317226051,"revision":161,"driver_version":9007199255730126}"#
+        ));
+        assert_eq!(
+            serde_json::from_str::<Response>(&json).unwrap().adapter,
+            adapter
+        );
+    }
+
+    /// The host decodes only a key the worker could have built: a vendor and
+    /// a driver version, each field within its width, and nothing else.
+    #[test]
+    fn an_adapter_key_is_checked_as_it_is_decoded() {
+        assert_eq!(AdapterKey::new(0, 1, 0, 0, 1), None);
+        assert_eq!(AdapterKey::new(0x8086, 1, 0, 0, 0), None);
+        let key = |fields: &str| serde_json::from_str::<AdapterKey>(&format!("{{{fields}}}"));
+        let valid =
+            r#""vendor_id":32902,"device_id":42880,"subsys_id":0,"revision":4,"driver_version":1"#;
+        assert_eq!(
+            key(valid).unwrap(),
+            AdapterKey::new(0x8086, 0xa780, 0, 4, 1).unwrap()
+        );
+        for invalid in [
+            r#""vendor_id":0,"device_id":1,"subsys_id":0,"revision":0,"driver_version":1"#,
+            r#""vendor_id":1,"device_id":1,"subsys_id":0,"revision":0,"driver_version":0"#,
+            r#""vendor_id":4294967296,"device_id":1,"subsys_id":0,"revision":0,"driver_version":1"#,
+            r#""vendor_id":1,"device_id":-1,"subsys_id":0,"revision":0,"driver_version":1"#,
+            r#""vendor_id":1,"device_id":1,"subsys_id":0,"revision":0"#,
+        ] {
+            assert!(key(invalid).is_err(), "{invalid}");
+        }
+        assert!(key(&format!(r#"{valid},"luid":7"#)).is_err());
+        // An answer whose key fails the check is refused whole.
+        let answer = serde_json::to_string(&Response::default()).unwrap().replace(
+            '}',
+            r#","adapter":{"vendor_id":0,"device_id":1,"subsys_id":0,"revision":0,"driver_version":1}}"#,
+        );
+        assert!(serde_json::from_str::<Response>(&answer).is_err());
     }
 }
