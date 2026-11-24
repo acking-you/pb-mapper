@@ -341,6 +341,8 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
                               session: _desktop.session,
                               stats: _desktop.stats,
                               decoder: _desktop.decoderStats,
+                              decoders: _desktop.decoders,
+                              prefs: widget.prefs,
                             ),
                           ),
                         ),

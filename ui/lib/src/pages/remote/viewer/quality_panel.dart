@@ -3,10 +3,12 @@ import 'package:flutter/material.dart';
 
 import '../../../common/l10n_extension.dart';
 import '../../../state/desktop_store.dart';
+import '../../../state/viewer_prefs.dart';
 import '../../../theme/app_icons.dart';
 import '../../../theme/fonts.dart';
 import '../../../theme/viewer_palette.dart';
 import '../remote_format.dart';
+import 'decoder_hint.dart';
 
 /// A codec as people write it; never localised.
 String codecLabel(String codec) => switch (codec) {
@@ -52,13 +54,17 @@ class _Row {
 /// native decoder reports them, the decoder's own figures. Its core rows
 /// show dashes while the connection is not up; a row whose figure is not
 /// reported (an older host, the relay, a platform without the key) is left
-/// out. It scrolls within the height it is given.
+/// out. It scrolls within the height it is given. While the session goes
+/// without a decoder an install would add here, it first says so
+/// ([DecoderHintCard]), until that is dismissed on this device.
 class QualityPanel extends StatelessWidget {
   const QualityPanel({
     super.key = const Key('viewer-quality-panel'),
     required this.session,
     required this.stats,
     this.decoder,
+    this.decoders,
+    this.prefs,
   });
 
   final ValueListenable<DesktopSessionView> session;
@@ -67,15 +73,24 @@ class QualityPanel extends StatelessWidget {
   /// The native decoder's figures; read only while this panel shows.
   final ValueListenable<DesktopDecoderStats?>? decoder;
 
+  /// What this device decodes, and the preferences that choose and dismiss
+  /// its install hint ([ViewerPrefs.decoderHint]); without both, no hint.
+  final ValueListenable<DesktopDecoders?>? decoders;
+  final ViewerPrefs? prefs;
+
   static const width = 256.0;
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: Listenable.merge([session, stats, ?decoder]),
+    listenable: Listenable.merge([session, stats, ?decoder, ?decoders, ?prefs]),
     builder: (context, _) {
       final s = session.value;
       final st = s.connected ? stats.value : DesktopStats.none;
       final dec = s.connected ? decoder?.value : null;
+      final prefs = this.prefs;
+      final hint = s.connected && prefs != null
+          ? prefs.decoderHint(decoders?.value, st.codec)
+          : null;
       final sections = [
         (context.l10n.qualityNetwork, _network(context, s, st)),
         (context.l10n.qualityPicture, _picture(context, s, st)),
@@ -102,6 +117,13 @@ class QualityPanel extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               _header(context),
+              // First, where it shows without scrolling the figures.
+              if (hint != null && prefs != null)
+                DecoderHintCard(
+                  hint: hint,
+                  command: decoderHintCommand(hint),
+                  onDismiss: () => prefs.dismissDecoderHint(hint),
+                ),
               for (final (title, rows) in sections)
                 if (rows.isNotEmpty) ...[
                   _SectionTitle(title),

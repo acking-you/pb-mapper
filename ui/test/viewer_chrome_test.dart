@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/decoder_hint.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_keyboard.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_viewer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/minimap.dart';
@@ -846,6 +847,242 @@ void main() {
     expect(find.byKey(const Key('quality-stream-rtt')), findsOneWidget);
     // A host that reads no arrival times reports no one-way queue.
     expect(find.byKey(const Key('quality-one-way-queue')), findsNothing);
+  });
+
+  testWidgets(
+    'a viewer on H.264 whose GPU decodes H.265 without a decoder installed '
+    'is told of the HEVC Video Extensions in the quality panel and under the '
+    'codec choices, only while the codec is Auto, until it dismisses them',
+    (tester) async {
+      _size(tester, const Size(1280, 800));
+      final api = FakeDesktopApi()
+        ..codec = 'h264'
+        ..decodersValue = const DesktopDecoders(
+          h264: DesktopDecoderLimit.largest,
+          installable: {'hevc'},
+        );
+      final store = DesktopStore(api, textures: FakeTextures().create);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = liveStatus(controlling: true);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(store.picture.value?.codec, 'h264');
+      final prefs = ViewerPrefs(persist: false);
+      await prefs.setQualityPanel(true);
+      await tester.pumpWidget(
+        _app(DesktopViewer(desktop: store, prefs: prefs, title: 'Office')),
+      );
+      // The panel's first sample of the session's figures.
+      await tester.pump(const Duration(seconds: 1));
+      final l10n = AppLocalizations.of(
+        tester.element(find.byType(QualityPanel)),
+      )!;
+      final card = find.byKey(const Key('quality-decoder-hint'));
+      expect(card, findsOneWidget);
+      expect(
+        find.descendant(of: card, matching: find.text(l10n.decoderHintHevc)),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('quality-decoder-hint-open')),
+          matching: find.text(l10n.decoderHintHevcAction),
+        ),
+        findsOneWidget,
+      );
+      // Nothing to type on Windows.
+      expect(
+        find.byKey(const Key('quality-decoder-hint-command')),
+        findsNothing,
+      );
+
+      // Under the codec choices too.
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: const Offset(640, 600));
+      Future<void> openCodecMenu() async {
+        await tester.tap(find.byKey(const Key('viewer-display')));
+        await tester.pump(const Duration(milliseconds: 400));
+        // A mouse opens a submenu by hovering it.
+        await mouse.moveTo(
+          tester.getCenter(find.byKey(const Key('display-codec'))),
+        );
+        await mouse.moveBy(const Offset(4, 0));
+        await tester.pump(const Duration(milliseconds: 400));
+      }
+
+      Future<void> closeMenu() async {
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pump(const Duration(milliseconds: 300));
+        await mouse.moveTo(const Offset(640, 600));
+        await tester.pump();
+      }
+
+      await openCodecMenu();
+      expect(find.byKey(const Key('codec-auto')), findsOneWidget);
+      expect(find.byKey(const Key('codec-hint-open')), findsOneWidget);
+      expect(find.byKey(const Key('codec-hint-dismiss')), findsOneWidget);
+      expect(find.byKey(const Key('codec-hint-copy')), findsNothing);
+      await closeMenu();
+      expect(find.byKey(const Key('codec-hint-open')), findsNothing);
+
+      // H.264 chosen: H.265 is not wanted, so nothing is suggested.
+      await prefs.setCodec(DesktopCodecPreference.h264);
+      await tester.pump();
+      expect(card, findsNothing);
+      await prefs.setCodec(DesktopCodecPreference.auto);
+      await tester.pump();
+      expect(card, findsOneWidget);
+
+      // Dismissed here: gone from the panel and the menu, and remembered.
+      await tester.tap(find.byKey(const Key('quality-decoder-hint-dismiss')));
+      await tester.pump();
+      expect(card, findsNothing);
+      expect(prefs.decoderHint(store.decoders.value, 'h264'), isNull);
+      await openCodecMenu();
+      expect(find.byKey(const Key('codec-auto')), findsOneWidget);
+      expect(find.byKey(const Key('codec-hint-open')), findsNothing);
+      await closeMenu();
+
+      await mouse.removePointer();
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 1));
+    },
+  );
+
+  testWidgets('a Linux hint without its decoders shows the install command '
+      "for this distribution, which it copies", (tester) async {
+    final copied = <Object?>[];
+    final messenger = tester.binding.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') copied.add(call.arguments);
+      return null;
+    });
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    final command = gstreamerInstallCommand('ID=ubuntu\nID_LIKE=debian\n')!;
+    var dismissed = false;
+    await tester.pumpWidget(
+      _app(
+        Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: QualityPanel.width,
+            child: DecoderHintCard(
+              hint: DecoderInstallHint.gstreamer,
+              command: command,
+              onDismiss: () => dismissed = true,
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(find.text(command), findsOneWidget);
+    await tester.tap(find.byKey(const Key('quality-decoder-hint-copy')));
+    await tester.pump();
+    expect(copied, [
+      {'text': command},
+    ]);
+    await tester.tap(find.byKey(const Key('quality-decoder-hint-dismiss')));
+    expect(dismissed, isTrue);
+    expect(tester.takeException(), isNull);
+    // The copy's toast closes on its own.
+    await tester.pump(const Duration(seconds: 5));
+  });
+
+  test("GStreamer's install command follows the distribution, or the one it "
+      'derives from, that the user guide covers', () {
+    const apt =
+        'sudo apt install gstreamer1.0-plugins-base '
+        'gstreamer1.0-plugins-bad gstreamer1.0-libav';
+    expect(gstreamerInstallCommand('NAME="Ubuntu"\nID=ubuntu\n'), apt);
+    // Linux Mint, by what it derives from.
+    expect(
+      gstreamerInstallCommand('ID=linuxmint\nID_LIKE="ubuntu debian"\n'),
+      apt,
+    );
+    expect(
+      gstreamerInstallCommand('ID="fedora"\n'),
+      startsWith('sudo dnf install gstreamer1-plugins-base '),
+    );
+    expect(
+      gstreamerInstallCommand('ID=manjaro\nID_LIKE=arch\n'),
+      'sudo pacman -S gst-plugins-base gst-plugins-bad gst-libav',
+    );
+    // One the guide does not cover: the guide's table alone.
+    expect(
+      gstreamerInstallCommand('ID="opensuse-tumbleweed"\nID_LIKE="suse"\n'),
+      isNull,
+    );
+  });
+
+  test('the HEVC Video Extensions open in the Store app, or on its web page '
+      "where Windows has none; Linux's hints open the guide in the app's "
+      'language', () async {
+    final opened = <Uri>[];
+    final asked = <Uri>[];
+    Future<bool> Function(Uri) opens(bool Function(Uri) app) => (uri) async {
+      opened.add(uri);
+      return app(uri);
+    };
+    Future<bool> Function(Uri) registered(bool store) => (uri) async {
+      asked.add(uri);
+      return store;
+    };
+    await openDecoderHint(
+      DecoderInstallHint.hevcExtension,
+      'en',
+      launch: opens((uri) => true),
+      canLaunch: registered(true),
+    );
+    expect(opened.single.scheme, 'ms-windows-store');
+    expect(opened.single.queryParameters['ProductId'], hevcExtensionStoreId);
+    final web = Uri.parse(
+      'https://apps.microsoft.com/detail/$hevcExtensionStoreId',
+    );
+    opened.clear();
+    // Registered, but it fails to open.
+    await openDecoderHint(
+      DecoderInstallHint.hevcExtension,
+      'en',
+      launch: opens((uri) => uri.scheme != 'ms-windows-store'),
+      canLaunch: registered(true),
+    );
+    expect(opened.last, web);
+    opened.clear();
+    // Not registered: never handed to the shell, whose own dialog would
+    // come first, and the web page is not asked about.
+    asked.clear();
+    await openDecoderHint(
+      DecoderInstallHint.hevcExtension,
+      'en',
+      launch: opens((uri) => true),
+      canLaunch: registered(false),
+    );
+    expect(opened.single, web);
+    expect(asked.single.scheme, 'ms-windows-store');
+    opened.clear();
+    asked.clear();
+    await openDecoderHint(
+      DecoderInstallHint.gstreamer,
+      'zh',
+      launch: opens((uri) => true),
+      canLaunch: registered(false),
+    );
+    expect(opened.single.path, endsWith('/docs/user-guide.zh-CN.md'));
+    opened.clear();
+    await openDecoderHint(
+      DecoderInstallHint.gpuDriver,
+      'en',
+      launch: opens((uri) => true),
+      canLaunch: registered(false),
+    );
+    expect(opened.single.path, endsWith('/docs/user-guide.md'));
+    expect(opened.single.fragment, 'remote-desktop-in-the-app');
+    expect(asked, isEmpty);
   });
 
   testWidgets('the chip keeps its width as the figures change', (tester) async {

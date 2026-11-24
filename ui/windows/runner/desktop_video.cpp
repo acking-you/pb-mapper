@@ -344,14 +344,23 @@ double WindowRefreshHz(HWND window) {
 // to the largest bound it takes, or null, and the fastest display refresh.
 // H.264 needs Media Foundation, whose in-box decoder takes every bound. H.265
 // needs a decoder MFT and DXVA's HEVC Main on Flutter's adapter, where the
-// decoder runs. Nothing here creates a decoder: a bad driver can hang there.
+// decoder runs. `installable` lists what an install would add: `hevc` where
+// the adapter decodes HEVC Main but no decoder MFT is registered, which
+// Microsoft's HEVC Video Extensions add (the app suggests them). Nothing here
+// creates a decoder: a bad driver can hang there.
 Map ProbeDecoders(IDXGIAdapter* adapter) {
   Value h264, h265;
+  flutter::EncodableList installable;
   if (MediaFoundationInstalled()) {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE))) {
       h264 = MaxSize(kMaxWidth, kMaxHeight);
-      if (!SyncDecoders(MFVideoFormat_HEVC).empty()) h265 = HevcLimit(adapter);
+      Value hevc = HevcLimit(adapter);
+      if (!SyncDecoders(MFVideoFormat_HEVC).empty()) {
+        h265 = std::move(hevc);
+      } else if (!hevc.IsNull()) {
+        installable.push_back(Value("hevc"));
+      }
       MFShutdown();
     }
     if (SUCCEEDED(com)) CoUninitialize();
@@ -360,6 +369,7 @@ Map ProbeDecoders(IDXGIAdapter* adapter) {
   // `display_changed`, so Dart follows the window's display through it.
   return {{Value("h264"), h264},
           {Value("h265"), h265},
+          {Value("installable"), Value(std::move(installable))},
           {Value("display_max_hz"), Value(DisplayMaxHz())},
           {Value("window_refresh"), Value(true)}};
 }
