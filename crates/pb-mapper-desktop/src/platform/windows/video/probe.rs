@@ -104,6 +104,7 @@ fn probe_h265(adapter: &IDXGIAdapter1) -> Result<()> {
             height: 1080,
             fps: 60,
             bitrate: 8_000_000,
+            options: super::EncoderOptions::default(),
         },
         // Nothing waits for the probe's events.
         None,
