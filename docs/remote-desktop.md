@@ -292,6 +292,78 @@ viewer's tests, on a fake clock). Fingers back on the touchpad, a new pan, a
 click, a wheel, focus or control lost and a new picture generation stop it,
 and a pinch flings nothing.
 
+### Holding the pointer for games and 3D views
+
+A game or a 3D view (Blender's orbit with continuous grab, a CAD view) hides
+the pointer, puts it back in the middle after each move and reads the
+mouse's own motion: on a Windows host through raw input, which a placed or
+absolute move never feeds, so such a program got no motion at all, and on
+both hosts every absolute move fought the recentring, the view jumping or
+stopping at the picture's edge. Toward a host that lists `relative_pointer`
+(Windows and macOS after 0.12.1, and the SDK examples' synthetic hosts), a
+desktop viewer on Windows, macOS or Linux can hold this computer's pointer
+over the picture and send the mouse's motion as it comes, as
+`Input::MoveBy { dx, dy }`: counts, at most 4 096 each way, positive right
+and down. The host moves its pointer by them, after its own pointer speed,
+and a program that reads the mouse gets them as they are. The modes are
+airhand's, chosen in **Shortcuts → Mouse** and kept by this device:
+
+- **Auto**, the default, holds the pointer when the host reports its pointer
+  hidden while a button is held (a game's camera turned with the right
+  button), or hidden through 300 ms of the mouse moving over the picture (a
+  first-person game); moves already go relative during those 300 ms. It lets
+  go once the host's pointer shows again with every button up: one that
+  shows for a moment while a button is held counts once all are up, so a
+  game that shows its pointer mid-drag is not let go and held again.
+  Windows hides its pointer while someone types and shows it at the next
+  move, well within 300 ms, so typing never holds it. A Mac host reports its
+  pointer shown whenever it is on the shared display (macOS says nothing
+  reliable of another app hiding it), so toward a Mac Auto never holds it:
+  choose Game there.
+- **Desktop** never holds it.
+- **Game** holds it from a click on the picture, which goes nowhere; until
+  then the mouse sends nothing, so the camera does not jump to wherever the
+  pointer comes in.
+
+Esc held for a second lets go, and the remote computer still gets that Esc,
+though not its repeats; so do this window losing the focus, a menu or a
+dialog taking the keyboard, and the end of control. Auto then holds the
+pointer again only after the next click, Game at the next click. While moves
+go relative, the viewer has no place of its own for the pointer: it follows
+every report of the host's pointer and paints it, in the host's shape, where
+this computer's hidden pointer would be, and a click lands where the host's
+pointer is.
+
+The runners hold the pointer (`lock` and `unlock` on
+`pb_mapper/desktop_pointer`) and post the mouse's raw motion, summed over
+each turn of their loop, as `lock_motion`, or `lock_lost` when they let go by
+themselves:
+
+- Windows confines the pointer to the pixel it is on (`ClipCursor`), hides it
+  (`ShowCursor`) and registers the top-level window for raw mouse input,
+  whose relative `WM_INPUT` it sums (a tablet's or a remote session's
+  absolute positions are skipped); legacy mouse messages still come, so a
+  click reaches Flutter where the pointer is. The window going inactive lets
+  go.
+- macOS dissociates the mouse from the pointer
+  (`CGAssociateMouseAndMouseCursorPosition(false)`), hides it
+  (`NSCursor.hide`) and sums each move's and drag's deltas, in this Mac's
+  pixels, from a local event monitor. The app going inactive lets go.
+- Linux, on X11, grabs the pointer with a blank cursor, selects XInput2's raw
+  motion (the device's unaccelerated counts) on the root window and warps
+  the pointer back to where it was held after each turn; on Wayland it locks
+  the pointer with `zwp_pointer_constraints_v1` and reads
+  `zwp_relative_pointer_v1`'s unaccelerated motion, from client code
+  `wayland-scanner` generates at build time. The toplevel losing the focus,
+  or the compositor ending the lock, lets go. A build without libXi, or
+  without the Wayland client, protocols and scanner, holds no pointer on
+  that display server, and neither does one whose server lacks them.
+
+Every path shows the pointer again and frees it on unlock, focus loss and
+teardown, and a runner that cannot hold the pointer leaves it free, as Esc
+would. None of it has run against a real game or 3D view yet
+([This revision: platforms](#this-revision-platforms)).
+
 ### Modifiers
 
 The modifier bar above a phone's keyboard latches Ctrl, Alt, Shift and Win
@@ -890,13 +962,21 @@ refused over such a grant (`HELPER_OUTDATED`, `HELPER_FOREIGN_APP`), since
 configuring it from here would replace its view-only, relay-only or paused
 policy, and under another service name its invitation.
 
-Protocol 12 is the current one, with the pipes
-`pb-mapper.desktop-helper.v12` and `pb-mapper.desktop-background.v12`. Its
-`Request::Input` may carry `Input::Scroll`, scrolling in 1/120 of a notch
-(see [Input and cursor](#input-and-cursor)), which the worker injects as
-`SendInput` wheel data, and the `Start` answer's caps say whether the worker
-scrolls that finely (`hires_wheel`), which the host then lists to its viewers
-as `wheel_hires`. Both ends refuse a scroll beyond 12 000 units each way.
+Protocol 13 is the current one, with the pipes
+`pb-mapper.desktop-helper.v13` and `pb-mapper.desktop-background.v13`. Its
+`Request::Input` may carry `Input::MoveBy`, the pointer moved by counts (see
+[Holding the pointer for games and 3D views](#holding-the-pointer-for-games-and-3d-views)),
+which the worker injects as one relative `SendInput` move, and the `Start`
+answer's caps say whether the worker moves the pointer so
+(`relative_pointer`), which the host then lists to its viewers. Both ends
+refuse a relative move beyond 4 096 counts each way.
+
+Protocol 12 added `Input::Scroll` to `Request::Input`, scrolling in 1/120 of
+a notch (see [Input and cursor](#input-and-cursor)), which the worker
+injects as `SendInput` wheel data, and the `Start` answer's caps say whether
+the worker scrolls that finely (`hires_wheel`), which the host then lists to
+its viewers as `wheel_hires`. Both ends refuse a scroll beyond 12 000 units
+each way.
 
 Protocol 11 added `Request::Adapter`, which the host sends only for a viewer
 that decodes H.265, just before it would ask `Request::H265`: the worker
@@ -1156,10 +1236,12 @@ does not require Flutter or a POCOX runtime.
   sends a batch of up to 16, stamps the presented frame and consecutive
   sequence numbers itself, and fails with a typed `InputError` (`NotFresh`,
   `NotControlling`, `Congestion`, `Closed`, `Invalid`, and `NotOffered` for
-  an `Input::PhysicalKey` toward a host that did not list `physical_keys` or
-  an `Input::Scroll` toward one that did not list `wheel_hires`, nothing of
+  an `Input::PhysicalKey` toward a host that did not list `physical_keys`,
+  an `Input::Scroll` toward one that did not list `wheel_hires` or an
+  `Input::MoveBy` toward one that did not list `relative_pointer`, nothing of
   the batch sent). A host's backend says it injects `Input::Scroll` with
-  `BackendCaps::hires_wheel`. `Input` and `Key` are `#[non_exhaustive]`. The
+  `BackendCaps::hires_wheel`, and `Input::MoveBy` with
+  `BackendCaps::relative_pointer`. `Input` and `Key` are `#[non_exhaustive]`. The
   host checks the same rule against its own ledger and rejects duplicate or
   reordered sequences.
   Permission revisions, desktop transitions and capture failures invalidate old
@@ -1311,6 +1393,21 @@ placing would not change. A program that puts the pointer back itself, as a
 game that recentres it does, can look the same; its window then gets placed
 moves, as every window did before. The desktop service's worker runs as
 SYSTEM, above every window's integrity level, with the same injector.
+
+A relative move (`Input::MoveBy`) is one `SendInput` event with
+`MOUSEEVENTF_MOVE` alone, and `MOUSEEVENTF_MOVE_NOCOALESCE` while a button is
+held: raw input gets the counts as a mouse's, and the system moves the
+pointer by them after the owner's pointer speed and Enhance pointer
+precision. It has no pixel to settle on: the cursor reports where the system
+put the pointer, and it closes the settle window of an absolute move before
+it, which then says nothing of whether moves take effect. While moves place
+the pointer, or when `SendInput` takes nothing, a relative move places it
+that many pixels from where it is. A pointer whose cursor handle is null, as
+after a game's `SetCursor(NULL)`, reads as hidden, though `GetCursorInfo`'s
+flags still say it shows (airhand's rule). A Mac host posts a relative move
+as a move, or a drag with a button held, from where the system has the
+pointer, by as many pixels, with the counts as the event's deltas, which an
+app that reads the mouse takes as they are.
 
 ### Adding an operating system
 
@@ -3097,13 +3194,21 @@ presentation is never forwarded.
 ### Input and cursor
 
 The viewer queues input in order behind a revoke barrier: at most 512 events or
-256 KiB, with consecutive pointer moves coalescing into the newest, and
+256 KiB, with consecutive pointer moves coalescing into the newest,
 consecutive scrolls (`Input::Scroll`) of one generation and continuity adding
-up into one, within a scroll's 12 000 units, so a touchpad's stream of events
-never fills the queue while the uplink stalls. A barrier (a
+up into one, within a scroll's 12 000 units, and consecutive relative moves
+(`Input::MoveBy`) of one generation adding up into one, within a move's
+4 096 counts each way, so neither a touchpad's nor a held mouse's stream of
+events fills the queue while the uplink stalls. A barrier (a
 release, a grant or a revoke) discards only the input queued before it, never
-input submitted after the call that set it, and a scroll never adds itself to
-one queued before a barrier: it then goes alone. It sends a
+input submitted after the call that set it, and a scroll or a relative move
+never adds itself to one queued before a barrier: it then goes alone. The app
+sends moves at most every 4 ms: an absolute move replaces the one waiting,
+relative moves waiting with it included, a relative move adds itself to those
+waiting (what waits goes at once rather than pass a move's bound), and a
+`NOT_FRESH` refusal keeps an absolute move for the next fresh picture but
+drops relative motion, and an absolute move relative motion followed, since
+motion the host missed is no motion to make later. It sends a
 pending presentation ahead of input, and revokes control rather than grow the
 queue. The host's reader checks the control policy and pushes input onto a
 bounded lane without waiting. The desktop-bound thread drains that lane before
@@ -3158,7 +3263,16 @@ once it ran the newest move still gets its own two, even when thread C was
 busy past it. A new shape found meanwhile cancels none of them, since it may
 answer an earlier move. A look reports only a new shape, as a sample would, and
 starts the sample clock again; otherwise it reports nothing, so a viewer gets
-a position sooner than the clock only together with a new shape. Through the
+a position sooner than the clock only together with a new shape, or after a
+relative move: its looks are whole samples, in a session that reads no shapes
+too, so the host's pointer that a viewer holding its own pointer paints
+follows its moves within 2 ms of each, not at the next sample. A relative
+move leaves no echo to hold back, no place of the viewer's to return the
+pointer to before a click, and no owner of the pointer: watchers see the
+host's own pointer in place of the mover's coloured one. Through the
+helper a look reads the pointer the worker last answered with, after an
+input or a capture call, which may not yet show a relative move Windows has
+still to apply when the worker read it. Through the
 helper the shape still crosses the pipe only when the worker numbered a new
 one, which each capture call observes: every 2 ms after an input while the
 picture is still, at the frame rate while it changes.
@@ -3346,7 +3460,7 @@ so read at the display's rate, and a still one on the timer only.
 | IDR | host minimum interval 300 ms; viewer minimum 500 ms, backoff to 4 s; 1 s hold after a discontinuity |
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued, drained until the IDR or a head under 125 ms; IDR grace 500 ms; stall watchdog 700 ms |
 | fps cap | tick 250 ms; capacity from ≥ 4 busy ticks of the last 8; × 0.9 direct, × 0.8 relay; minimum 5; after 3 s, +5 per 30 fps of ceiling or a quarter of the cap, up to 95% of the capacity; probes of 10% watched 3 s (not by the queue within the IDR grace; a pause takes one back), backoff 3 s doubling to 60 s; turnaround late past 2 frame intervals (≥ 40 ms) over its 10 s floor; ≥ 1 s between changes but for a probe taken back; within the window's display rate (rounded, 30 to 120), a change of which goes at the next tick, and beneath which a backlog cap is held, not raised, probed or removed |
-| Input | viewer queue 512 events or 256 KiB, batches of 16, a lone move replacing a queued tail move and a lone scroll adding to a queued tail scroll of its generation and continuity; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input; `Wheel` at most 100 notches each way, `Scroll` (to a host that lists `wheel_hires`) 120 units a notch, at most 12 000 each way; a viewer's notch the embedder's (Windows `lines × 100 / 3` physical px cut to whole, macOS 40 and Linux 53 logical px, else 30), a touchpad's travel 1.2 units a logical px (30 px a notch toward an older host); a fling from 50 px/s, at most 8 000, on a Mac or iPad until below 20 device px/s, elsewhere for the time Android's curve computes for its speed |
+| Input | viewer queue 512 events or 256 KiB, batches of 16, a lone move replacing a queued tail move, a lone scroll adding to a queued tail scroll of its generation and continuity and a lone relative move to a queued tail relative move of its generation; host lane 512; `MoveBy` (to a host that lists `relative_pointer`) at most 4 096 counts each way; Auto holds the pointer after 300 ms of hidden movement, and Esc held 1 s lets go; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input; `Wheel` at most 100 notches each way, `Scroll` (to a host that lists `wheel_hires`) 120 units a notch, at most 12 000 each way; a viewer's notch the embedder's (Windows `lines × 100 / 3` physical px cut to whole, macOS 40 and Linux 53 logical px, else 30), a touchpad's travel 1.2 units a logical px (30 px a notch toward an older host); a fling from 50 px/s, at most 8 000, on a Mac or iPad until below 20 device px/s, elsewhere for the time Android's curve computes for its speed |
 | Cursor | sampled every 16 ms, or once a period of a faster pace down to 8 ms; the shape looked at 2 ms and 8 ms after a shape-reading controller's newest move, one look pending, a sooner one an earlier move left kept; the controller's own move never reported; an injected move is the pointer until the OS shows it, at most 250 ms after the last (`SETTLE`); a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated, the pointer shows on the shared display and the OS pointer changed (a failed read again after 250 ms), an image over 1024 px a side never, 1 to 256 px a side sent, 64 slots on each end |
 | Codec | `Accepted` waits at most 3 s for the backend's display and H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3; Windows H.264 in Constrained High, then High, then Baseline, `QualityVsSpeed` 0, no scenario |
 
@@ -4374,6 +4488,36 @@ What each platform's new code has been through:
     to send notches instead is the planned answer); on a Mac host, an
     `NSView` logging `scrollWheel:` deltas, `hasPreciseScrollingDeltas` and
     whether the event is continuous; Windows and Linux touchpad flings.
+- **Holding the pointer.** `relative_pointer`, `Input::MoveBy` and the
+  viewer's pointer lock (see
+  [Holding the pointer for games and 3D views](#holding-the-pointer-for-games-and-3d-views))
+  have run in tests and the loopback example on a Mac.
+  - The host side ran in Rust tests: a relative move crosses the wire, the
+    helper pipe (protocol 13) and the synthetic platform's injector as it
+    was sent, a viewer refuses one toward a host without
+    `relative_pointer`, queued moves add up within their bound, thread C
+    reports where the pointer went 2 ms after the move and a click after it
+    lands there, and a posted absolute move's settle ends at a relative one.
+    `desktop_loopback` sends one through a relay to its synthetic host, which
+    applies it. The Windows null-cursor rule is a unit test that runs only
+    on Windows; the Windows injector was type-checked and linted for
+    `x86_64-pc-windows-msvc` here.
+  - The Dart side ran in widget tests: Auto's holds and lets go, Windows'
+    hide-while-typing never holding, Game's swallowed click, the Esc hold,
+    focus loss and a runner that cannot hold, relative moves summed behind
+    the 4 ms gate and dropped at `NOT_FRESH`.
+  - The macOS runner builds here; the Windows and Linux runners build only in
+    CI, and were checked here only against stub headers, the Linux one with
+    each backend on and off.
+  - Not run anywhere: a real mouse held by any viewer against
+    `desktop_ui_host` (`--hide-pointer` plays a game's pointer, and each
+    `move_by` it applies is a `host_input` line; the acceptance entry takes
+    `--dart-define=pointerMode=game`), which this Mac's session could not
+    do, having no Accessibility grant to post a mouse; on a Windows host, a
+    raw-input window counting relative `WM_INPUT` and Blender's orbit with
+    continuous grab, from Mac, Windows and Linux viewers; a Mac host in Game
+    mode with a 3D app; X11 and Wayland locks; and ordinary desktop use in
+    Auto.
 - **Older peers.** A host and a viewer of this revision each ran against
   the other side built from the tree before it (`151ed8d7`, 0.11.0's desktop
   protocol), with the SDK's synthetic host (`desktop_loopback --serve`) and

@@ -467,10 +467,12 @@ Nothing in the SDK crates knows it exists.
     or is offered Update); `background.rs` and `background/`, its own host
     and that host's grant at rest; `os/`, its Win32 glue by concern. The
     service side and the `pb-mapper-desktop-helper` binary need `--features
-    windows-helper`. `HELPER_PROTOCOL` (now 12) and the `.v<n>` pipe names
+    windows-helper`. `HELPER_PROTOCOL` (now 13) and the `.v<n>` pipe names
     change together; an installed helper of another protocol, or of another
     build (its executable differs from the one bundled with the app), is
-    offered Update. Protocol 12: `Input::Scroll` inside `Request::Input`,
+    offered Update. Protocol 13: `Input::MoveBy` inside `Request::Input`,
+    and `StartCaps.relative_pointer`, whether the worker injects it.
+    Protocol 12: `Input::Scroll` inside `Request::Input`,
     and `StartCaps.hires_wheel`, whether the worker injects it.
     Protocol 11: `Request::Adapter` and `Response.adapter`,
     the GPU and driver that drive the worker's display (`AdapterKey`, named
@@ -527,14 +529,16 @@ Nothing in the SDK crates knows it exists.
     `#[non_exhaustive]`, and `Input::PhysicalKey` carries a USB HID usage,
     0x04 to 0xE7, sent only to a host that listed `physical_keys`, and
     `Input::Scroll` 1/120 of a notch, sent only to one that listed
-    `wheel_hires`) and the neutral rules every platform's injector follows:
+    `wheel_hires`, and `Input::MoveBy` the pointer moved by counts, sent only
+    to one that listed `relative_pointer`) and the neutral rules every
+    platform's injector follows:
     held-input release (`held.rs`, physical keys included), text as runs
     with one Enter or Tab per line break or tab (`Input::typed`), whole
     steps out of scroll units (`ScrollCarry`), and cursor confinement, the
     pointer's shape and the pointer a posted move leaves (`cursor.rs`:
     `CursorShape`, `CursorKind`, the scale-down to 256 a side; `Pointer`,
-    the injected pixel until the OS shows it, which the Windows and macOS
-    hosts share)
+    the injected pixel until the OS shows it, or a relative move ends it,
+    which the Windows and macOS hosts share)
   - `modes.rs`: display modes, platform-neutral — `Mode`, `ModeList`
     (`fit_local`: the local size if listed, else the largest inside it
     within 2 % of its shape), `ModeTarget`, `DisplayModeError`; the journal
