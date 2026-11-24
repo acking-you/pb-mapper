@@ -1409,9 +1409,11 @@ until the next present lands, where a grid at the display's own rate mostly
 found a present already waiting at its tick. `desktop_capture_pacing`'s
 `empty_polls_per_s` and `video_bench`'s `polls_per_s` count them, together
 with the asks of a Windows encoder that had not asked for input yet
-(`video_bench`'s `waiting` counts those apart); in process they count the
-captures that armed the capture thread: at most one a tick on an active
-desktop, and one after each 250 ms repeat on a still one. A change of the viewers' limits that changes only
+(`video_bench`'s `waiting` counts those apart) and a Windows encoder's
+refinement repeats; in process they count the captures that armed the
+capture thread or sent a refinement repeat: at most one a tick on an
+active desktop, and on a still desktop an arming after each 250 ms repeat
+besides a burst's repeats. A change of the viewers' limits that changes only
 the frame rate keeps the capture source where it can serve the new limits as
 it is (a Mac host's can while the encode size stays the same, and the
 synthetic test platform's; the Windows source is still built again), and
@@ -1451,7 +1453,9 @@ encoder measures each
 unit's dwell, from submit to output (the `encode_us` it returns with the
 unit), and thread C reports the median of the last second as
 `encoder_dwell_ms`. A static screen is resubmitted about every 250 ms as a
-duplicate, which unique-frame rates exclude. A Mac host does not leave a
+duplicate, which unique-frame rates exclude; a Windows encoder that refines
+(below) first repeats a picture that just stopped changing a few times at
+the capture pace. A Mac host does not leave a
 last picture its encoder dropped to that repeat: it sends it again at the
 next tick, as a new picture
 ([VideoToolbox rate control on a Mac host](#videotoolbox-rate-control-on-a-mac-host)). The hand-off queue holds at most
@@ -1554,8 +1558,9 @@ context. A video processor that refuses the duplication's surface (it fails
 to make a view of it or to convert from it) has each picture copied out of
 it first for the rest of that encoder, as every picture was before, and
 logs `desktop_capture_copied` once. The last submitted sample is kept, so a
-repeat on a still desktop (the 250 ms liveness repeat, or a keyframe)
-copies its NV12 picture into a fresh sample instead of converting again;
+repeat on a still desktop (the 250 ms liveness repeat, a refinement repeat,
+or a keyframe) copies its NV12 picture into a fresh sample instead of
+converting again;
 the encoder never writes the samples it takes. A repeat goes only once the
 armed thread has looked and found nothing newer, which it wakes thread C to
 say when thread C waits for it, or 32 ms after its arming (or after it began
@@ -1652,6 +1657,67 @@ restricts to no privileges: there both calls go without it. Whether that
 worker should keep this one privilege is a separate decision, for after
 the device run. Each call may fail harmlessly, and what each did is logged
 once per process as `desktop_gpu_priority`.
+
+A large change at once, a scroll or a window switch, is coded only as well
+as one frame's share of the bitrate allows by an encoder that budgets each
+frame (NVIDIA's MFTs, measured `nominal` in
+[Encoder rate model per GPU](#encoder-rate-model-per-gpu)). Each repeat of
+the unchanged picture is expected to code up to one more frame's share of
+what that left out, so at the liveness repeat's 4 Hz text sent blurred
+would sharpen slowly; whether a repeat sharpens it on a given encoder, and
+how fast, is what the still-refinement device run measures. The Windows
+encoder can therefore refine a still picture with a short burst of repeats
+(`codec/refine.rs`, its schedule; `Encoder` in `video/mod.rs`). A picture
+is due a burst once a fresh unit (a new picture's or a keyframe's) has
+filled at least three quarters of a frame's budget (the bitrate over the
+nominal frame rate) since the picture last finished refining. 200 ms after
+the last new picture or keyframe (`REFINE_AFTER`, under the 250 ms
+liveness interval), the last picture is submitted again a period of the
+pace apart, each repeat a duplicate copied from the kept sample. A typed
+character or a caret blink codes far under its budget and never starts a
+burst on its own; it can only resume one that the change before it left
+unfinished, within that change's 15 repeats. A refinement repeat is a
+sample that leaves thread C's tick, and the capture thread, armed
+(`Submit::Refined`, which the backend reports as a capture that left the
+tick armed, and the helper's answer as `submitted: false`, as protocol 10
+already says), and asks the capture thread again as an arming does, so it
+never stops looking during a burst. A present that lands during a burst
+is therefore taken at once rather than a tick later; inside the encoder it
+can still wait behind the one repeat being coded. The burst passes the
+encoder-depth and send-credit gates as any capture does, and a pace whose
+period is 250 ms or longer runs none. Its repeats count among the frames
+and bits the rate-model latch reads, as liveness repeats do, so only an
+encoder that spends more than a frame's budget on them pushes a session
+towards the latch. It ends at the first of: two outputs in a row under
+512 bytes (`REFINE_DONE_BYTES`), or two that did not lower the QP the
+encoder reports (`MFSampleExtension_VideoEncodeQP`, read only from
+refinement repeats' units), once it has had three outputs (`REFINE_MIN`:
+right after an IDR or a large unit a rate control can starve the first
+repeats, small and at a QP that does not move, before the picture
+converged); a reported QP of 18 or less (`REFINE_QP_FLOOR`); 15 repeats of
+the picture (`REFINE_MAX`), counted from the new picture's unit that filled
+its budget, however often new pictures interrupt its bursts or keyframes
+of it (the IDRs viewers ask for on a still desktop) start them again; or
+1 s of them (`REFINE_MAX_TIME`). A new picture or a keyframe ends a burst,
+and outputs older than its first repeat say nothing of it; a picture a new
+one interrupted refines again once it stands still, with what is left of
+its 15 repeats, and so does one whose keyframe filled its budget. Then the
+250 ms liveness repeat goes on as before. A liveness repeat ends the
+picture's claim to a burst: at a pace too slow for one the liveness
+repeats refine it instead, and a pace that rises later starts no burst on
+the picture that stood still meanwhile. The cap, the QP floor and the
+200 ms are starting values that the device runs set. In a session an
+encoder refines only where `REFINE_ENCODERS` lists its adapter vendor and
+its MFT's name, once a device run showed that its repeats of a still
+picture raise PSNR and fall under 512 bytes once it converged; none is
+listed yet, so a session keeps the liveness repeat alone. An encoder that
+pads its constant bitrate, or budgets by the sample times, stays off:
+thread C's rate-model latch never reaches the encoder.
+`desktop_video_encoder_opened` logs `refine`. `EncoderOptions::refinement`
+(`video_bench --refine on` or `off`) forces either, and `video_bench --text
+--freeze <ms>` scrolls a page of text and freezes it to compare them; the
+[still-refinement record](benchmarks/2026-11-24-still-refinement/README.md)
+lists the device runs, and records why a Mac host has no burst.
 
 With Windows HDR (or Auto Color Management) on, Windows composes the desktop
 in FP16, linear scRGB in which 1.0 is 80 nits, with SDR content at the
@@ -1769,7 +1835,10 @@ the whole frame. Before macOS 14 the picture keeps its shape on the black
 background. Stills share the configuration. Thread C submits the newest
 picture's IOSurface at the
 negotiated pace without a copy. On a still screen it can reuse the last
-picture for a requested keyframe or the 250 ms liveness repeat. Thread C
+picture for a requested keyframe or the 250 ms liveness repeat; it runs no
+refinement burst, since VideoToolbox gives a repeat the bits of the time
+since the last unit, and a burst made the picture converge no sooner in
+the [still-refinement record](benchmarks/2026-11-24-still-refinement/README.md). Thread C
 only hands the picture over: each encoder has its own submit thread, at the
 default QoS class as thread C is, which makes every call on
 the VideoToolbox session, the encode with its `ForceKeyFrame` option and the
@@ -2409,6 +2478,28 @@ at 4K60), and the rate model stays `nominal`. The GPU priority goes on by
 default only if it lowers dwell p95 or present-to-output time under that
 load without lowering the load's own frame rate by more than 5%.
 
+Still refinement has not been measured on any GPU either, so
+`REFINE_ENCODERS` lists none. Per vendor, NVIDIA first, in release mode
+at 1080p and 4 Mbit/s: `video_bench 6 60 --text --freeze 2000 --bitrate
+4000000 --max-width 1920 --max-height 1080 --refine off --output off.h264
+--dump-source off.nv12` against `--refine on`, then each with `--codec
+h265`: each unit after the freeze (its `still_unit` line) by size, QP and
+ffmpeg's PSNR against the last new picture's source, and how long the
+frozen page takes to come within 0.5 dB of the picture it converges to.
+An encoder joins the list only where a burst brings that sooner and its
+repeats fall under 512 bytes once the picture converged (no filler); the
+same runs set the QP floor, the cap and the 200 ms. In a session with
+refinement on (a build that lists the encoder), one paced at three
+quarters of nominal or less, where the rate-model latch reads, whose page
+scrolls and stops again and again must not latch: `video_bench --pace`
+cannot show this, as its content changes every refresh and so runs no
+burst. A session typing a character every 250 to 400 ms on a still page
+must start no burst and keep its present-to-submit p95, and one with two
+viewers, one of them lagging, must not cycle between the lagging viewer's
+IDRs and bursts. The
+[still-refinement record](benchmarks/2026-11-24-still-refinement/README.md)
+lists them.
+
 A Mac host's VideoToolbox encoder starts at `nominal` as well. The ignored
 tests `video_toolbox_rate_model_h264` and `video_toolbox_rate_model_h265`
 (`platform/macos/tests.rs`) measure it as `video_bench --pace` measures Media
@@ -2769,7 +2860,8 @@ shape is painted as before.
 | Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder (2 in flight in a Mac host's VideoToolbox) |
 | Mac encoder | low latency with QP up to 51; a dropped newest picture sent again at the next tick, at most twice a picture; dropped pictures traced at most once a second |
 | Mac capture interval | (n − 0.5) / refresh: n the pace's multiple where the refresh is one within 1%, else 1 below eight times the pace and floor(refresh / pace / 4) above, at most the most refreshes that fit in 0.9 / `max_fps`, at least 1; 0.9 / `max_fps` with no refresh; a slower pace after 1 s, a faster one, a new refresh (read each second), frame-rate limit or pause at once; the longest allowed while every viewer is paused; one change in flight, a refused one failing the stream |
-| Armed tick | a tick with no new picture, or whose Windows encoder has not asked for input, stays armed; ScreenCaptureKit wakes thread C, and in process so does the Windows encoder's capture thread for the next present, which it waits for at most 16 ms an `AcquireNextFrame` while armed, and the encoder's input request (asked again every 2 ms meanwhile); a repeat due, or a published picture taken 2 ms or more after it was published, waits up to 32 ms after the capture thread's arming for its answer that nothing newer waits; a capture thread not armed again for 2 s stops looking; through the helper the worker is asked again every 2 ms for 250 ms after an injected input or a new picture and while the encoder holds units (an input brings a pending poll in to 2 ms), and once a period otherwise |
+| Armed tick | a tick with no new picture, or whose Windows encoder has not asked for input, stays armed; ScreenCaptureKit wakes thread C, and in process so does the Windows encoder's capture thread for the next present, which it waits for at most 16 ms an `AcquireNextFrame` while armed, and the encoder's input request (asked again every 2 ms meanwhile); a repeat due, or a published picture taken 2 ms or more after it was published, waits up to 32 ms after the capture thread's arming for its answer that nothing newer waits; a capture thread not armed again (or asked again by a refinement repeat) for 2 s stops looking; through the helper the worker is asked again every 2 ms for 250 ms after an injected input or a new picture and while the encoder holds units (an input brings a pending poll in to 2 ms), and once a period otherwise |
+| Still refinement (Windows, encoders a device run listed: none yet) | from 200 ms after the last new picture or keyframe, once a fresh unit since the picture last finished refining filled ¾ of a frame's budget, a repeat a period of the pace apart, the tick and the capture thread left armed; ends after 3 outputs at two in a row under 512 B or two that did not lower the QP, at a QP of 18 or less, or at 15 repeats of the picture (from a new picture's unit that filled its budget, keyframes of it included) or 1 s; none at a pace of 4 or less, nor after a liveness repeat until a fresh unit fills its budget again; then liveness every 250 ms |
 | Capture pacing | after a dated picture, the next tick a period after its present, up to ¼ period early and, for a picture of a single present, at most 1/64 period earlier than a period after the last tick (long-run rate ≤ 64/63 × pace); a picture of several presents that waited keeps the tick a period after the last; ¾ period floor after a stall; a present over a period old counts as undated, and DXGI dates no picture presented over 1 s ago |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
 | QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves; Balanced starts at its ceiling after a first probe under 50 ms; tick 250 ms; bits-per-frame window 3 s; rate-model latch over the last 2 s of ticks, each at ≤ 0.75 × nominal at both ends, with ≥ 6 unique frames and non-IDR bits > max(1.3, min(0.6 × nominal / mean pace, 2)) × expected at each tick's highest per-frame budget |
@@ -2792,7 +2884,7 @@ numbers the UI, the acceptance tool and these docs use:
 | `link` | On a direct path, the viewer tunnel's link, sampled once a second: `kind` (`lan`, `internet`, `private`), `family`, `via`, `peer`, `local_ip`, QUIC's own `rtt_ms` and `min_rtt_ms` (the network alone, rounded up), `setup_ms` and `same_lan`; null on the relay |
 | `queue_delay_ms` | The median of the last three untainted probe RTTs minus the base RTT |
 | `picture_latency_ms` | Median over 2 s of host time (encoder submit to socket write) + `rtt_ms / 2` + viewer time (network receipt to compositor consumption). Each side uses its own clock and the network leg is an estimate; only a camera measures glass to glass. |
-| `presented_fps` | Accepted presentations per second |
+| `presented_fps` | Accepted presentations per second, duplicates included: from a Windows host whose encoder refines, it rises for a moment after a change stops, as a burst of refinement repeats is presented |
 | `received_fps` | Non-duplicate video records per second |
 | `preset`, `max_fps` | The preset this session asked for, and its `limits.max_fps`, which bounds every preset's ceiling, or replaces it with `fps_override` |
 | `skipped_per_s` | Host capture ticks skipped per second, for transport backpressure or a full encoder, between the last two `Stats`: over at least the host's 1 s interval, however close together they arrive, and never above `max_fps` |
@@ -2801,7 +2893,7 @@ numbers the UI, the acceptance tool and these docs use:
 | `speed_rx_bps`, `speed_tx_bps` | Speed, as RustDesk counts it: bytes per second the session's tunnel carried each way over the last second, TLS and every message included. A session over a test stream has no tunnel, and reports the video payload it received and nothing sent |
 | `codec`, `width`, `height` | The codec the host answered (`h265`, `h264` or `jpeg`) and the encoded size |
 | `ack_queue_ms` | The host's receipt-based queue delay (the ack queue under send credit) |
-| `present_interval` | p50/p95/p99/max of the intervals between accepted presentations over the last 60 s, with the gaps over 100 and 250 ms |
+| `present_interval` | p50/p95/p99/max of the intervals between accepted presentations over the last 60 s, with the gaps over 100 and 250 ms; a refinement burst after a change stops adds intervals of a period where the liveness repeat had 250 ms |
 | `degraded` | For 3 s: queue delay ≥ 150 ms, picture latency ≥ 250 ms, or (at a pace of 10 or more) fewer than half the pace presented |
 
 The host writes `encoder_dwell_ms` in its `Stats` only to a viewer that listed
@@ -2823,7 +2915,8 @@ that spent their tick), `presents_per_s` (the presents their pictures
 covered), `coalesced_per_s` (those beyond one per picture: presents no
 capture took) and `empty_polls_per_s` (captures that left the tick armed:
 they found nothing new, a Windows encoder that had not asked for input
-yet, or on a Mac host the encoder's submit thread busy). A
+yet, or on a Mac host the encoder's submit thread busy, or they sent a
+refinement repeat). A
 Mac host traces `macos_capture_timing` there too, once a second while it
 submits: ScreenCaptureKit's `complete_per_s`, `idle_per_s` and
 `replaced_per_s` (pictures a newer one replaced before thread C took them),
@@ -2933,7 +3026,8 @@ High, 66 Baseline, H.265's 1 Main), the SPS's `sps_profile`, and
 `sps_reorder`, what the SPS said of reordering and what is sent: `0`,
 `unstated_rewritten_to_0`, `<n>_rewritten_to_0`, `unread`, or `unknown`
 before its media type carried an SPS; `sps`, that SPS in hex as the
-encoder wrote it, empty before one; and `gpu_priority`. An encoder whose
+encoder wrote it, empty before one; `gpu_priority`; and `refine`, whether
+it refines a still picture with a burst of repeats. An encoder whose
 media type carried no SPS logs `desktop_video_encoder_sps` (`encoder`,
 `sps_profile`, `sps_reorder`, `sps`) once, at the first it writes in band.
 The H.265 probe's encoder logs neither. It warns

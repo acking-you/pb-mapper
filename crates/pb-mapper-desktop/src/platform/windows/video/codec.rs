@@ -344,6 +344,9 @@ impl Codec {
                     poll_events: _,
                     // The duplication's, which `Encoder` makes.
                     sdr_duplication: _,
+                    // When the last picture is submitted again, which
+                    // `Encoder` decides.
+                    refinement: _,
                 },
         } = settings;
         let transform: IMFTransform = unsafe {

@@ -99,6 +99,20 @@
 //!   instead of a session's choice (speed, until a vendor earns quality
 //!   where the picture is scaled down). Compare the two on `--text` at a
 //!   downscaled size, with `--dump-source`.
+//! - `--freeze <ms>`: with `--text`, scroll the page up 4 rows every
+//!   display refresh, as a scrolled document, and freeze it `<ms>` before
+//!   the run ends: every access unit collected after the freeze prints a
+//!   `still_unit` line (its index in `--output`, ms since the freeze,
+//!   bytes, whether it was a duplicate, a keyframe or a refinement repeat,
+//!   and the QP the encoder says it coded it at, read for this run), and a
+//!   `still` line sums them. With `--output` and `--dump-source`, decode
+//!   the output and compare each unit after the freeze with the last new
+//!   picture's source by ffmpeg's PSNR: how soon the frozen page
+//!   converges. Not with `--pace`.
+//! - `--refine on|off`: refine a still picture with a burst of repeats at
+//!   the pace (`codec::refine`), or never (the liveness repeat only),
+//!   instead of a session's choice (on only for an encoder a device run
+//!   listed, none yet). Compare the two with `--freeze`.
 //!
 //! The encoder's read-back of its settings is printed as an
 //! `encoder_opened` line (`desktop_video_encoder_opened`'s fields, and the
@@ -136,7 +150,10 @@
 //! level read as the encoder was built for an HDR desktop
 //! (`sdr_white_nits`), whether the
 //! video processor was asked for quality, and the submits that repeated the
-//! last picture by copying its sample, with their median and mean time; and
+//! last picture by copying its sample, with their median and mean time,
+//! whether the encoder refines still pictures (`refine`) and the repeats
+//! that refined (`refined`, which leave the tick armed and count among the
+//! polls); and
 //! an `encoder_events` line: whether its events were
 //! pushed or polled, the submits that found no input request (`waiting`, as
 //! `Submit::Waiting`) and, pushed, how long each output waited from its
@@ -249,19 +266,20 @@ mod bench {
         displays, native_backend,
         windows::video::{
             Encoded, Encoder, EncoderOptions, EncoderWake, GpuSpan, H264Profile, PICKUP_BOUNDS_US,
-            Statistics, Submit, VpUsage, h265_available,
+            Refinement, Statistics, VpUsage, h265_available,
         },
     };
     use std::{
         fs::File,
         io::{BufWriter, Write},
+        sync::atomic::{AtomicBool, Ordering},
         time::{Duration, Instant},
     };
 
     type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
     /// The options that take a value, which is then no positional argument.
-    const VALUED: [&str; 15] = [
+    const VALUED: [&str; 17] = [
         "--max-width",
         "--max-height",
         "--bitrate",
@@ -277,6 +295,8 @@ mod bench {
         "--scenario",
         "--dump-source",
         "--vp-usage",
+        "--freeze",
+        "--refine",
     ];
     /// A step's bitrate is measured after this long, once the rate controller
     /// has settled.
@@ -320,7 +340,18 @@ mod bench {
                     .into(),
             );
         }
-        let _animation = if option(&args, "--dump").is_some() || noise || text || still || greys {
+        let freeze = option(&args, "--freeze")
+            .map(str::parse::<u64>)
+            .transpose()?
+            .map(Duration::from_millis);
+        if freeze.is_some_and(|freeze| {
+            !text || rates.paces.is_some() || freeze >= Duration::from_secs(rates.seconds)
+        }) {
+            return Err(
+                "--freeze <ms> scrolls --text, not with --pace, and ends within the run".into(),
+            );
+        }
+        let animation = if option(&args, "--dump").is_some() || noise || text || still || greys {
             Some(Pattern::new(
                 display.x,
                 display.y,
@@ -328,6 +359,8 @@ mod bench {
                 display.height,
                 if noise {
                     Fill::Noise
+                } else if text && freeze.is_some() {
+                    Fill::Scroll
                 } else if text {
                     Fill::Text
                 } else if still {
@@ -357,6 +390,8 @@ mod bench {
         } else {
             None
         };
+        // What the paced loop sets to freeze the scrolling page.
+        let frozen = animation.as_ref().map(Pattern::frozen);
         if pattern_only {
             println!(
                 "Animating benchmark window for {}s; no encoder is running in this process",
@@ -407,6 +442,9 @@ mod bench {
             if sinks.source.is_some() || limits.greys {
                 encoder.keep_source();
             }
+            if freeze.is_some() {
+                encoder.read_qp();
+            }
             if limits.gpu_time {
                 encoder.time_gpu();
             }
@@ -431,7 +469,7 @@ mod bench {
             }
         };
         println!(
-            "encoder={} codec={codec:?} build_ms={build_ms:.1} display={}x{} nominal_fps={fps} max_size={max_width}x{max_height}{} target_bitrate={bitrate} h264_profile={:?} qvs={} scenario={} gpu_priority={} vp_usage={:?} sdr_duplication={}",
+            "encoder={} codec={codec:?} build_ms={build_ms:.1} display={}x{} nominal_fps={fps} max_size={max_width}x{max_height}{} target_bitrate={bitrate} h264_profile={:?} qvs={} scenario={} gpu_priority={} vp_usage={:?} sdr_duplication={} refinement={:?}",
             coder.name(),
             display.width,
             display.height,
@@ -446,6 +484,7 @@ mod bench {
             options.gpu_priority,
             options.vp_usage,
             options.sdr_duplication,
+            options.refinement,
         );
 
         let steps = rates.steps();
@@ -460,6 +499,7 @@ mod bench {
             steps: &steps,
             wake: &wake,
             start,
+            freeze: freeze.zip(frozen.as_deref()),
         };
         paced(&run, &mut coder, &mut sinks, &mut tally)?;
         if let Some(file) = &mut sinks.dump {
@@ -770,6 +810,14 @@ mod bench {
                     }
                 },
                 sdr_duplication: flag(args, "--sdr-duplication"),
+                refinement: match option(args, "--refine") {
+                    None => Refinement::Auto,
+                    Some("on") => Refinement::On,
+                    Some("off") => Refinement::Off,
+                    Some(other) => {
+                        return Err(format!("unknown refinement {other}: on or off").into());
+                    }
+                },
             };
             if options.quality_vs_speed > 100 {
                 return Err("--qvs must be 0..100".into());
@@ -779,10 +827,11 @@ mod bench {
                 || options.display_remoting
                 || options.gpu_priority
                 || options.vp_usage != VpUsage::Auto
-                || options.sdr_duplication;
+                || options.sdr_duplication
+                || options.refinement != Refinement::Auto;
             if backend && changes_encoder {
                 return Err(
-                    "--h264-profile, --qvs, --scenario, --gpu-priority, --vp-usage and --sdr-duplication build the encoder; a backend takes a session's settings"
+                    "--h264-profile, --qvs, --scenario, --gpu-priority, --vp-usage, --sdr-duplication and --refine build the encoder; a backend takes a session's settings"
                         .into(),
                 );
             }
@@ -972,6 +1021,14 @@ mod bench {
         paused: bool,
         awaiting_recovery: bool,
         first_reported: bool,
+        /// `--freeze`: when the page froze, and what was collected since:
+        /// units, bytes, refinement repeats among them, and when the last
+        /// one came after the freeze.
+        frozen: Option<Instant>,
+        still_units: u64,
+        still_bytes: u64,
+        still_refined: u64,
+        last_refined: Option<Duration>,
     }
     impl Tally {
         /// Count what an encoder call allocated since `before`, and the
@@ -1021,6 +1078,26 @@ mod bench {
                     );
                 }
             }
+            if let Some(frozen) = self.frozen {
+                // Its index in `--output`, as `written` counts it below.
+                let since = frozen.elapsed();
+                println!(
+                    "still_unit unit={} ms={:.1} bytes={} duplicate={} keyframe={} refined={} qp={}",
+                    self.written,
+                    since.as_secs_f64() * 1e3,
+                    frame.bytes.len(),
+                    frame.duplicate,
+                    frame.keyframe,
+                    frame.refined,
+                    or_none(frame.qp),
+                );
+                self.still_units += 1;
+                self.still_bytes += frame.bytes.len() as u64;
+                if frame.refined {
+                    self.still_refined += 1;
+                    self.last_refined = Some(since);
+                }
+            }
             if let Some(file) = &mut sinks.output {
                 file.write_all(&frame.bytes)?;
             }
@@ -1051,6 +1128,9 @@ mod bench {
         /// What the encoder's event watcher wakes.
         wake: &'a EncoderWake,
         start: Instant,
+        /// `--freeze`: how long before the end the scrolling page freezes,
+        /// and what freezes it.
+        freeze: Option<(Duration, &'a AtomicBool)>,
     }
 
     /// Each step runs the run's seconds at its pace, as the host's capture
@@ -1071,6 +1151,7 @@ mod bench {
             steps,
             wake,
             start,
+            freeze,
         } = *run;
         let mut current_bitrate = limits.bitrate;
         let mut pacer = Pacer::new(rates.fps, start);
@@ -1097,6 +1178,14 @@ mod bench {
                 }
                 if rates.paces.is_none() && start.elapsed() > Duration::from_secs(2) {
                     current_bitrate = limits.bitrate.min(12_000_000);
+                }
+                if let Some((before_end, frozen)) = freeze
+                    && tally.frozen.is_none()
+                    && step_start.elapsed() + before_end >= Duration::from_secs(rates.seconds)
+                {
+                    frozen.store(true, Ordering::Release);
+                    tally.frozen = Some(Instant::now());
+                    println!("frozen_after_units={}", tally.written);
                 }
                 let rate = VideoRate {
                     bitrate: current_bitrate,
@@ -1142,7 +1231,9 @@ mod bench {
                             let outcome = encoder.submit(force)?;
                             let (took, ran) = (at.elapsed(), thread_cycles() - ran);
                             tally.encoder_calls(before, took, ran);
-                            if outcome == Submit::Submitted {
+                            // A refinement repeat is a sample too, which
+                            // leaves the tick armed.
+                            if outcome.submitted() {
                                 if encoder.repeated() {
                                     tally.repeat_us.push(took.as_secs_f64() * 1e6);
                                 } else {
@@ -1188,6 +1279,9 @@ mod bench {
                             height: frame.format.height,
                             keyframe: frame.format.keyframe,
                             duplicate: frame.format.duplicate,
+                            // The backend says neither.
+                            refined: false,
+                            qp: None,
                             pts_us: frame.format.pts_us,
                             encode_us: frame.format.encode_us,
                             gop: frame.format.gop,
@@ -1311,7 +1405,7 @@ mod bench {
                 mean(&tally.drain_kcycles),
             );
             println!(
-                "capture={} sdr_white_nits={} vp_quality={} repeats={} repeat_p50_us={:.1} repeat_mean_us={:.1} acquires={} acquires_per_s={:.1}",
+                "capture={} sdr_white_nits={} vp_quality={} repeats={} repeat_p50_us={:.1} repeat_mean_us={:.1} refine={} refined={} acquires={} acquires_per_s={:.1}",
                 if stats.tone_mapped {
                     "tone_mapped"
                 } else if stats.direct_capture {
@@ -1324,6 +1418,8 @@ mod bench {
                 stats.repeats,
                 median(&tally.repeat_us),
                 mean(&tally.repeat_us),
+                stats.refine,
+                stats.refined,
                 stats.acquires,
                 stats.acquires as f64 / elapsed,
             );
@@ -1480,6 +1576,20 @@ mod bench {
         if let Some(first) = tally.first_unit {
             println!("first_access_unit_ms={:.1}", first.as_secs_f64() * 1e3);
         }
+        if let Some(frozen) = tally.frozen {
+            println!(
+                "still seconds={:.3} units={} bytes={} refined={} last_refined_ms={}",
+                frozen.elapsed().as_secs_f64(),
+                tally.still_units,
+                tally.still_bytes,
+                tally.still_refined,
+                or_none(
+                    tally
+                        .last_refined
+                        .map(|since| format!("{:.1}", since.as_secs_f64() * 1e3))
+                ),
+            );
+        }
         if let Some(first) = stats.first_acquire {
             println!(
                 "first_acquire_last_present_time={} first_acquire_accumulated_frames={} first_acquire_resource={}",
@@ -1551,6 +1661,10 @@ mod pattern {
         /// A still page of text, painted once and again only when Windows
         /// asks the window to repaint.
         Text,
+        /// That page scrolled up `SCROLL_ROWS` every display refresh, as a
+        /// document is, until `Pattern::frozen` is set: then still, as
+        /// `Text`, where it stopped.
+        Scroll,
         /// One colour, painted once and again only when Windows asks the
         /// window to repaint.
         Still,
@@ -1567,11 +1681,16 @@ mod pattern {
         0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255,
     ];
 
+    /// The rows `Fill::Scroll` moves the page up each display refresh.
+    const SCROLL_ROWS: i32 = 4;
+
     /// A topmost window at physical desktop coordinates: a changing colour
     /// or fresh noise every display refresh, a still page of text or
-    /// colour, or a colour that changes once a second.
+    /// colour, a page of text that scrolls until frozen, or a colour that
+    /// changes once a second.
     pub struct Pattern {
         stop: Arc<AtomicBool>,
+        frozen: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
     }
     impl Pattern {
@@ -1584,6 +1703,8 @@ mod pattern {
         ) -> Result<Self, Box<dyn std::error::Error>> {
             let stop = Arc::new(AtomicBool::new(false));
             let done = stop.clone();
+            let frozen = Arc::new(AtomicBool::new(false));
+            let still_from = frozen.clone();
             let (ready, started) = std::sync::mpsc::sync_channel(1);
             let (width, height) = (i32::try_from(width)?, i32::try_from(height)?);
             let thread = std::thread::spawn(move || unsafe {
@@ -1615,7 +1736,7 @@ mod pattern {
                 let noise = (fill == Fill::Noise)
                     .then(|| Noise::new(dc, width, height))
                     .flatten();
-                let text = (fill == Fill::Text)
+                let text = matches!(fill, Fill::Text | Fill::Scroll)
                     .then(|| Text::new(dc, width, height))
                     .flatten();
                 let mut frame = 0u32;
@@ -1624,10 +1745,23 @@ mod pattern {
                 // repaint the window's own class made.
                 let mut stale = true;
                 let mut changed = std::time::Instant::now();
+                // The page's row at the window's top.
+                let mut offset = 0;
                 while !done.load(Ordering::Acquire) {
                     while PeekMessageW(&mut message, Some(window), 0, 0, PM_REMOVE).as_bool() {
                         stale |= message.message == WM_PAINT;
                         let _ = DispatchMessageW(&message);
+                    }
+                    if fill == Fill::Scroll
+                        && !still_from.load(Ordering::Acquire)
+                        && let Some(text) = &text
+                    {
+                        offset = (offset + SCROLL_ROWS) % height.max(1);
+                        text.paint(dc, offset);
+                        if DwmFlush().is_err() {
+                            break;
+                        }
+                        continue;
                     }
                     let once_a_second = fill == Fill::Second;
                     let still = matches!(fill, Fill::Still | Fill::Greys);
@@ -1639,7 +1773,7 @@ mod pattern {
                         }
                         if std::mem::take(&mut stale) {
                             match &text {
-                                Some(text) => text.paint(dc),
+                                Some(text) => text.paint(dc, offset),
                                 None if fill == Fill::Greys => paint_greys(dc, width, height),
                                 None => paint_colour(dc, width, height, frame),
                             }
@@ -1673,8 +1807,14 @@ mod pattern {
                 .map_err(std::io::Error::other)?;
             Ok(Self {
                 stop,
+                frozen,
                 thread: Some(thread),
             })
+        }
+
+        /// What freezes a `Fill::Scroll` page where it is, once set.
+        pub fn frozen(&self) -> Arc<AtomicBool> {
+            self.frozen.clone()
         }
     }
     impl Drop for Pattern {
@@ -1925,20 +2065,39 @@ mod pattern {
             }
         }
 
-        unsafe fn paint(&self, dc: HDC) {
+        /// Copy the page to the window with its row `offset` at the top,
+        /// the rows above it following below, as a page scrolled round.
+        unsafe fn paint(&self, dc: HDC, offset: i32) {
+            let offset = offset.clamp(0, self.height);
+            let below = self.height - offset;
             let _ = unsafe {
                 BitBlt(
                     dc,
                     0,
                     0,
                     self.width,
-                    self.height,
+                    below,
                     Some(self.memory),
                     0,
-                    0,
+                    offset,
                     SRCCOPY,
                 )
             };
+            if offset > 0 {
+                let _ = unsafe {
+                    BitBlt(
+                        dc,
+                        0,
+                        below,
+                        self.width,
+                        offset,
+                        Some(self.memory),
+                        0,
+                        0,
+                        SRCCOPY,
+                    )
+                };
+            }
         }
     }
     impl Drop for Text {
