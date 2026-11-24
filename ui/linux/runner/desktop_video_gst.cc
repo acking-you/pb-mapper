@@ -1402,6 +1402,11 @@ int32_t Snapshot(const PbVideoPicture* picture, uint32_t max_width, uint8_t* rgb
       out.stride[0] != static_cast<gint>(scaled_width * 4)) {
     return -1;
   }
+  // gst_video_converter_new refuses a pair whose frame rate or interlacing
+  // differ, and a decoder's caps carry the stream's frame rate.
+  GST_VIDEO_INFO_FPS_N(&out) = GST_VIDEO_INFO_FPS_N(&picture->frame.info);
+  GST_VIDEO_INFO_FPS_D(&out) = GST_VIDEO_INFO_FPS_D(&picture->frame.info);
+  GST_VIDEO_INFO_INTERLACE_MODE(&out) = GST_VIDEO_INFO_INTERLACE_MODE(&picture->frame.info);
   GstBuffer* wrapped =
       gst_buffer_new_wrapped_full(static_cast<GstMemoryFlags>(0), rgba, size, 0, size, nullptr, nullptr);
   GstVideoFrame frame{};
