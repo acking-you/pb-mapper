@@ -8,24 +8,113 @@ use crate::{
 };
 use std::time::{Duration, Instant};
 
+/// The longest wait between two pointer samples while capturing.
 const CURSOR_INTERVAL: Duration = Duration::from_millis(16);
+/// The shortest: a faster pace samples once a period, down to this.
+const CURSOR_MIN: Duration = Duration::from_millis(8);
+/// How long after the controller's move thread C looks at the shape the
+/// pointer took for it: the hand over a link, the I-beam over text, the
+/// resize arrow at a border.
+const SHAPE_LOOK: Duration = Duration::from_millis(2);
+/// One more look this long after the last move, for a slower app; a later
+/// shape waits for the next sample.
+const SHAPE_LATE: Duration = Duration::from_millis(8);
+const _: () = assert!(
+    CURSOR_MIN.as_nanos() < CURSOR_INTERVAL.as_nanos(),
+    "a faster pace samples more often, never less",
+);
+const _: () = assert!(
+    SHAPE_LOOK.as_nanos() < SHAPE_LATE.as_nanos()
+        && SHAPE_LATE.as_nanos() < CURSOR_INTERVAL.as_nanos(),
+    "each look comes before the sample that would see the shape anyway",
+);
+
+/// A look at the pointer's shape that thread C owes the controller's move,
+/// ahead of the next sample. At most one is pending.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ShapeLook {
+    /// `SHAPE_LOOK` after a move, then one more at `late`.
+    First { due: Instant, late: Instant },
+    /// `SHAPE_LATE` after the last move.
+    Late(Instant),
+}
+impl ShapeLook {
+    pub(super) fn due(self) -> Instant {
+        match self {
+            Self::First { due, .. } | Self::Late(due) => due,
+        }
+    }
+
+    /// The look after a move at `now`. A first look still pending stays,
+    /// since it is sooner, so moves closer together than `SHAPE_LOOK` never
+    /// put it off; the late look follows the newest move. A pending late
+    /// look gives way to a first look.
+    pub(super) fn after_move(look: Option<Self>, now: Instant) -> Self {
+        let late = now + SHAPE_LATE;
+        match look {
+            Some(Self::First { due, .. }) => Self::First { due, late },
+            Some(Self::Late(_)) | None => Self::First {
+                due: now + SHAPE_LOOK,
+                late,
+            },
+        }
+    }
+
+    /// What is left once this look ran at `now`.
+    fn next(self, now: Instant) -> Option<Self> {
+        match self {
+            Self::First { late, .. } if late > now => Some(Self::Late(late)),
+            Self::First { .. } | Self::Late(_) => None,
+        }
+    }
+}
 
 impl<B: Backend, K: Clock> Engine<B, K> {
-    /// Every `CURSOR_INTERVAL` while capturing; never while paused or
-    /// unavailable. Reported when it differs from the last report, or, equal
-    /// to it, once more after C takes a move, so the report carries that
-    /// move's sequence; never when it is the echo of the controller's own
-    /// move, unless the shape changed. `CursorEcho` holds the rule. The
-    /// backend is asked for the shape only in a session whose viewer reads
-    /// shapes.
+    /// The wait between two samples while capturing: `CURSOR_INTERVAL`, or
+    /// the pace's period where that is shorter, but never under
+    /// `CURSOR_MIN`. A pointer a viewer does not draw itself (the host
+    /// user's, another controller's that the OS stopped short, one an app
+    /// moved) then moves at the session's frame rate.
+    pub(super) fn cursor_interval(&self) -> Duration {
+        CURSOR_INTERVAL.min(self.pacer.period()).max(CURSOR_MIN)
+    }
+
+    /// Every `cursor_interval` while capturing, and at each look a
+    /// controller's move left (`ShapeLook`); never while paused or
+    /// unavailable. A sample is reported when it differs from the last
+    /// report, or, equal to it, once more after C takes a move, so the
+    /// report carries that move's sequence; never when it is the echo of the
+    /// controller's own move, unless the shape changed. `CursorEcho` holds
+    /// the rule. The backend is asked for the shape only in a session whose
+    /// viewer reads shapes. A look reads the pointer and its shape, and only
+    /// when a viewer that reads shapes gets a new one does it go on as a
+    /// sample and start the clock again; otherwise it reports nothing, so a
+    /// viewer gets a position sooner than the clock only with a new shape.
+    /// A reading that finds a new shape drops the look still pending.
     pub(super) fn sample_cursor(&mut self, now: Instant) {
-        if self.paused || self.unavailable.is_some() || now < self.cursor_due {
+        if self.paused || self.unavailable.is_some() {
             return;
         }
+        let look = self.shape_due.filter(|look| now >= look.due());
+        if let Some(look) = look {
+            self.shape_due = look.next(now);
+        }
+        if now >= self.cursor_due {
+            self.read_cursor(now, false);
+        } else if look.is_some() && self.cursor_shapes {
+            self.read_cursor(now, true);
+        }
+    }
+
+    /// One reading of the pointer, and of its shape where a viewer reads
+    /// shapes; for a `look`, reported only with a new shape.
+    fn read_cursor(&mut self, now: Instant, look: bool) {
         let Some(context) = &self.context else {
             return;
         };
-        self.cursor_due = now + CURSOR_INTERVAL;
+        if !look {
+            self.cursor_due = now + self.cursor_interval();
+        }
         let position = match self.backend.cursor(context) {
             Ok(position) => position,
             Err(failure) => return self.fail(failure, now),
@@ -34,24 +123,30 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         // a display the viewer does not see, tells it nothing, not even its
         // shape, and the viewer keeps the last.
         let showing = position.is_some_and(|position| position.visible);
+        if look && !showing {
+            return;
+        }
         let shape = (self.cursor_shapes && showing).then(|| self.backend.cursor_shape(context));
+        let mut reshaped = false;
         match shape {
             Some(Ok(Some(shape))) => {
                 let (kind, width, height) = (shape.kind(), shape.width(), shape.height());
                 self.cursor_shape = Some(shape.clone());
-                let mut logged = false;
                 for slot in self.slots.iter_mut().flatten() {
                     if slot.cursor_shapes && slot.cursor.reshape(shape.clone()) {
-                        logged = true;
+                        reshaped = true;
                     }
                 }
-                if logged {
+                if reshaped {
+                    // The app answered the move: no look is owed it.
+                    self.shape_due = None;
                     tracing::debug!(
                         target: "pb_mapper_desktop::session",
                         event = "desktop_cursor_shape",
                         kind = ?kind,
                         width,
                         height,
+                        look,
                     );
                 }
             }
@@ -62,6 +157,13 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 detail = %failure,
             ),
             Some(Ok(None)) | None => {}
+        }
+        if look {
+            if !reshaped {
+                return;
+            }
+            // A sample in all but its time: the clock starts again from it.
+            self.cursor_due = now + self.cursor_interval();
         }
         let mover_moved = std::mem::replace(&mut self.mover_moved_since_sample, false);
         let owner_slot = match (self.last_pointer_owner, position) {
