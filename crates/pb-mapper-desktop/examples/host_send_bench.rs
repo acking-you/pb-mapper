@@ -11,6 +11,16 @@
 //! compare runs of this harness with each other only. A reallocation counts
 //! as one allocation of its new size.
 //!
+//! The host reads shapes (`cursor_shapes`) but shows no pointer through the
+//! cases above, as before. Then it does, and the pointer takes another
+//! shape in each half of the display: `shape` times the first viewer's move
+//! into the other half until its view names the new shape, and
+//! `host_pointer` moves the host's pointer as someone at the host would and
+//! times until a viewer that only watches sees it there, in a room of that
+//! viewer alone at 60 and at 120 FPS. Each sample waits 20 to 60 ms after
+//! the last, so it lands anywhere in the host's pointer cadence; the times
+//! include the 100 µs this thread polls the view at.
+//!
 //! ```text
 //! cargo run --release -p pb-mapper-desktop --example host_send_bench
 //! ```
@@ -23,8 +33,9 @@ use std::time::{Duration, Instant};
 
 use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
 use pb_mapper_desktop::{
-    Backend, DesktopContext, Display, EncodedFrame, Host, HostOptions, Input, Pull, QualityPreset,
-    Result, VideoCodec, VideoFormat, VideoLimits, VideoRate, Viewer, ViewerConfig,
+    Backend, BackendCaps, CursorKind, CursorPosition, CursorShape, Description, DesktopContext,
+    DesktopView, Display, EncodedFrame, Host, HostOptions, Input, Pull, QualityPreset, Result,
+    VideoCodec, VideoFormat, VideoLimits, VideoRate, Viewer, ViewerConfig,
 };
 use pb_mapper_testkit::{Relay, admin_credential};
 
@@ -75,13 +86,49 @@ const UNIT_BYTES: usize = 4096;
 const WINDOW: Duration = Duration::from_secs(5);
 const POINTER_EVERY: Duration = Duration::from_millis(4);
 
+/// The pointer shows (`Pointer`'s top bit) at the x and y in its low bits.
+const SHOWN: u64 = 1 << 63;
+
+/// Where the host's pointer is, for the backend and the benchmark thread;
+/// it shows only once the pointer cases start.
+#[derive(Clone, Default)]
+struct Pointer(Arc<AtomicU64>);
+
+impl Pointer {
+    fn show(&self, x: u32, y: u32) {
+        self.0.store(
+            SHOWN | (u64::from(x) << 32) | u64::from(y),
+            Ordering::Release,
+        );
+    }
+
+    fn at(&self) -> Option<(u32, u32)> {
+        let packed = self.0.load(Ordering::Acquire);
+        (packed & SHOWN != 0).then_some(((packed >> 32) as u32 & 0x7fff_ffff, packed as u32))
+    }
+}
+
 /// An H.264 desktop: every capture is one opaque unit, an IDR when asked.
+/// Its pointer goes where the viewer moves it, and is an arrow on the left
+/// half of the display and a hand on the right.
 struct Encoded {
     frames: u64,
     inputs: Arc<AtomicU64>,
+    pointer: Pointer,
+    /// The half whose shape `cursor_shape` last returned.
+    shown: Option<u32>,
 }
 
 impl Backend for Encoded {
+    fn describe(&mut self, _: bool) -> Result<Description> {
+        let mut caps = BackendCaps::default();
+        caps.cursor_shapes = true;
+        Ok(Description {
+            display: self.display()?,
+            caps,
+        })
+    }
+
     fn display(&mut self) -> Result<Display> {
         Ok(Display {
             id: 1,
@@ -114,8 +161,36 @@ impl Backend for Encoded {
         }))
     }
 
-    fn input(&mut self, _: &Input) -> Result<()> {
+    fn cursor(&mut self, _: &DesktopContext) -> Result<Option<CursorPosition>> {
+        Ok(self.pointer.at().map(|(x, y)| CursorPosition {
+            x: x as i32,
+            y: y as i32,
+            visible: true,
+        }))
+    }
+
+    fn cursor_shape(&mut self, _: &DesktopContext) -> Result<Option<CursorShape>> {
+        let Some((x, _)) = self.pointer.at() else {
+            return Ok(None);
+        };
+        let half = u32::from(x >= 960);
+        if self.shown == Some(half) {
+            return Ok(None);
+        }
+        self.shown = Some(half);
+        let kind = if half == 0 {
+            CursorKind::Arrow
+        } else {
+            CursorKind::Hand
+        };
+        CursorShape::new(kind, 8, 8, (0, 0), vec![half as u8 + 1; 8 * 8 * 4]).map(Some)
+    }
+
+    fn input(&mut self, input: &Input) -> Result<()> {
         self.inputs.fetch_add(1, Ordering::Relaxed);
+        if let (Input::Move { x, y }, Some(_)) = (input, self.pointer.at()) {
+            self.pointer.show(*x, *y);
+        }
         Ok(())
     }
 
@@ -191,6 +266,8 @@ async fn main() {
     let client = Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
     let inputs = Arc::new(AtomicU64::new(0));
     let applied = inputs.clone();
+    let pointer = Pointer::default();
+    let host_pointer = pointer.clone();
     let mut options = HostOptions::new("desktop:bench");
     options.allow_control = true;
     options.allow_direct = false;
@@ -199,6 +276,8 @@ async fn main() {
             Ok(Encoded {
                 frames: 0,
                 inputs: applied.clone(),
+                pointer: host_pointer.clone(),
+                shown: None,
             })
         })
         .start(&client)
@@ -338,10 +417,128 @@ async fn main() {
         latencies[253]
     );
 
+    // The pointer shows from here, on the left, an arrow; the first viewer's
+    // move into the other half gives it the other shape.
+    pointer.show(480, 540);
+    let shape_of = |viewer: &Viewer| viewer.view().cursor_shape;
+    let started = Instant::now();
+    while shape_of(&viewer) == 0 {
+        assert!(started.elapsed() < Duration::from_secs(3), "no shape");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let mut latencies = Vec::with_capacity(SAMPLES);
+    for sample in 0..SAMPLES {
+        tokio::time::sleep(spread(sample)).await;
+        let x = if sample % 2 == 0 { 1440 } else { 480 };
+        let before = shape_of(&viewer);
+        let generation = viewer.view().generation;
+        let start = Instant::now();
+        viewer
+            .input(generation, &[Input::Move { x, y: 540 }])
+            .unwrap();
+        while shape_of(&viewer) == before {
+            assert!(start.elapsed() < Duration::from_secs(3), "shape timed out");
+            std::thread::sleep(Duration::from_micros(100));
+        }
+        latencies.push(start.elapsed().as_micros());
+    }
+    report_latencies("shape", "", &mut latencies);
+
     stop.store(true, Ordering::Release);
     viewer2.stop().await.unwrap();
     viewer.stop().await.unwrap();
     renderer2.join().unwrap();
     renderer.join().unwrap();
+
+    // Someone at the host moves its pointer; a viewer that only watches, the
+    // room's only one, sees it at the host's pointer cadence for its pace.
+    for fps in [60, 120] {
+        let watcher = Viewer::connect(
+            &client,
+            host.invitation(),
+            ConnectOptions {
+                path: PathPolicy::RelayOnly,
+                ..Default::default()
+            },
+            ViewerConfig {
+                codecs: vec![VideoCodec::H264],
+                limits: VideoLimits::for_viewer(f64::from(fps)),
+                fps_override: true,
+                quality: QualityPreset::Balanced,
+                progress: None,
+            },
+        )
+        .await
+        .unwrap();
+        let shown = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let renderer = render(&watcher, shown.clone(), stop.clone());
+        let started = Instant::now();
+        while shown.load(Ordering::Relaxed) == 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the watcher got no picture"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let start = Tally::now(&shown, &inputs);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let end = Tally::now(&shown, &inputs);
+        let units_per_s = (end.presented - start.presented) as f64
+            / end.at.duration_since(start.at).as_secs_f64();
+        let mut latencies = Vec::with_capacity(SAMPLES);
+        for sample in 0..SAMPLES {
+            tokio::time::sleep(spread(sample)).await;
+            let x = 100 + (sample as u32 * 13) % 1700;
+            let start = Instant::now();
+            pointer.show(x, 300);
+            loop {
+                let view = watcher.view();
+                if view.flags & DesktopView::FLAG_CURSOR_VISIBLE != 0
+                    && view.cursor_x == x as i32
+                    && view.cursor_y == 300
+                {
+                    break;
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(3),
+                    "host pointer timed out"
+                );
+                std::thread::sleep(Duration::from_micros(100));
+            }
+            latencies.push(start.elapsed().as_micros());
+        }
+        report_latencies(
+            "host_pointer",
+            &format!(" pace={fps} units_per_s={units_per_s:.1}"),
+            &mut latencies,
+        );
+        stop.store(true, Ordering::Release);
+        watcher.stop().await.unwrap();
+        renderer.join().unwrap();
+    }
     host.stop().await.unwrap();
+}
+
+/// Samples in each pointer case.
+const SAMPLES: usize = 128;
+
+/// The wait before `sample`: 20 to 60 ms, spread over the host's pointer
+/// cadence.
+fn spread(sample: usize) -> Duration {
+    Duration::from_millis(20 + (sample as u64 * 7) % 41)
+}
+
+fn report_latencies(case: &str, extra: &str, latencies: &mut [u128]) {
+    latencies.sort_unstable();
+    let at = |q: f64| latencies[((latencies.len() - 1) as f64 * q).round() as usize];
+    println!(
+        "case={case}{extra} samples={} p50_us={} p90_us={} p99_us={} max_us={}",
+        latencies.len(),
+        at(0.5),
+        at(0.9),
+        at(0.99),
+        at(1.0),
+    );
 }

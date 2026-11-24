@@ -1,0 +1,54 @@
+=== before { 8.06 6.41 4.43 }
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1130 allocs_per_unit=18.84 alloc_bytes_per_unit=40188
+case=video+pointer units_per_s=59.8 inputs_per_s=242.8 allocs_per_s=3443 allocs_per_unit=57.59 alloc_bytes_per_unit=46890
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.9 allocs_per_s=10035 allocs_per_unit=167.28 alloc_bytes_per_unit=100442
+case=peer_cursor samples=256 p50_us=158 p95_us=335 p99_us=498
+case=shape samples=128 p50_us=7712 p90_us=14475 p99_us=16467 max_us=16485
+case=host_pointer pace=60 units_per_s=59.9 samples=128 p50_us=7984 p90_us=14718 p99_us=16140 max_us=16198
+case=host_pointer pace=120 units_per_s=119.8 samples=128 p50_us=7761 p90_us=13721 p99_us=15382 max_us=15915
+=== end { 5.72 6.06 4.40 }
+=== after { 5.72 6.06 4.40 }
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1130 allocs_per_unit=18.84 alloc_bytes_per_unit=40183
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3527 allocs_per_unit=58.81 alloc_bytes_per_unit=47060
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.9 allocs_per_s=10034 allocs_per_unit=167.27 alloc_bytes_per_unit=100444
+case=peer_cursor samples=256 p50_us=156 p95_us=318 p99_us=477
+case=shape samples=128 p50_us=2460 p90_us=2634 p99_us=2892 max_us=2950
+case=host_pointer pace=60 units_per_s=60.0 samples=128 p50_us=7842 p90_us=14929 p99_us=16177 max_us=16294
+case=host_pointer pace=120 units_per_s=119.8 samples=128 p50_us=4243 p90_us=7688 p99_us=8510 max_us=8613
+=== end { 3.67 5.49 4.27 }
+=== after { 3.67 5.49 4.27 }
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1131 allocs_per_unit=18.85 alloc_bytes_per_unit=40184
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=3526 allocs_per_unit=58.77 alloc_bytes_per_unit=47072
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.9 allocs_per_s=10035 allocs_per_unit=167.28 alloc_bytes_per_unit=100443
+case=peer_cursor samples=256 p50_us=156 p95_us=164 p99_us=311
+case=shape samples=128 p50_us=2463 p90_us=2627 p99_us=2666 max_us=2757
+case=host_pointer pace=60 units_per_s=60.9 samples=128 p50_us=7287 p90_us=14018 p99_us=15963 max_us=16039
+case=host_pointer pace=120 units_per_s=119.7 samples=128 p50_us=4226 p90_us=7823 p99_us=8512 max_us=9430
+=== end { 2.36 4.88 4.10 }
+=== before { 2.36 4.88 4.10 }
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1132 allocs_per_unit=18.87 alloc_bytes_per_unit=40185
+case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3521 allocs_per_unit=58.69 alloc_bytes_per_unit=47069
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.8 allocs_per_s=10028 allocs_per_unit=167.22 alloc_bytes_per_unit=100443
+case=peer_cursor samples=256 p50_us=158 p95_us=435 p99_us=531
+case=shape samples=128 p50_us=7778 p90_us=14646 p99_us=16190 max_us=16249
+case=host_pointer pace=60 units_per_s=59.9 samples=128 p50_us=7450 p90_us=14953 p99_us=16189 max_us=16211
+case=host_pointer pace=120 units_per_s=119.8 samples=128 p50_us=7754 p90_us=13549 p99_us=15487 max_us=15719
+=== end { 2.02 4.47 3.99 }
+=== before { 2.02 4.47 3.99 }
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1129 allocs_per_unit=18.83 alloc_bytes_per_unit=40183
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=3517 allocs_per_unit=58.63 alloc_bytes_per_unit=47067
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.4 allocs_per_s=10022 allocs_per_unit=167.11 alloc_bytes_per_unit=100424
+case=peer_cursor samples=256 p50_us=157 p95_us=319 p99_us=329
+case=shape samples=128 p50_us=8311 p90_us=14270 p99_us=16297 max_us=16322
+case=host_pointer pace=60 units_per_s=59.9 samples=128 p50_us=7631 p90_us=14540 p99_us=16063 max_us=16246
+case=host_pointer pace=120 units_per_s=119.9 samples=128 p50_us=7212 p90_us=14152 p99_us=17083 max_us=17709
+=== end { 2.37 4.22 3.92 }
+=== after { 2.37 4.22 3.92 }
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1132 allocs_per_unit=18.87 alloc_bytes_per_unit=40197
+case=video+pointer units_per_s=60.0 inputs_per_s=248.3 allocs_per_s=3501 allocs_per_unit=58.39 alloc_bytes_per_unit=46957
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.4 allocs_per_s=9998 allocs_per_unit=166.72 alloc_bytes_per_unit=100375
+case=peer_cursor samples=256 p50_us=272 p95_us=323 p99_us=343
+case=shape samples=128 p50_us=2322 p90_us=2480 p99_us=2536 max_us=2546
+case=host_pointer pace=60 units_per_s=60.9 samples=128 p50_us=7242 p90_us=13757 p99_us=16147 max_us=16291
+case=host_pointer pace=120 units_per_s=119.7 samples=128 p50_us=3761 p90_us=7494 p99_us=8292 max_us=8457
+=== end { 3.04 4.17 3.91 }

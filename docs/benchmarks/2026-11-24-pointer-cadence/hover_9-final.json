@@ -1,0 +1,69 @@
+{
+  "os": "Version 27.0 (Build 26A425)",
+  "processors": 12,
+  "refresh_hz": 144.0,
+  "device_pixel_ratio": 2.0,
+  "hover_every_ms": 8,
+  "lifecycle": [
+    "unknown"
+  ],
+  "ready": {
+    "input_ready": true,
+    "shape": "ibeam",
+    "paint": "none"
+  },
+  "windows": [
+    {
+      "window": "rest",
+      "seconds": 5.001234,
+      "hovers": 0,
+      "frames_drawn": 0,
+      "frames_drawn_per_s": 0.0,
+      "view_reads_per_s": 62.58455413204021,
+      "moves_sent_per_s": 0.0,
+      "first_frame_number": 4,
+      "last_frame_number": 4,
+      "frame_timings": 0,
+      "frame_timings_per_s": 0.0
+    },
+    {
+      "window": "sweep",
+      "seconds": 5.002079,
+      "hovers": 624,
+      "frames_drawn": 0,
+      "frames_drawn_per_s": 0.0,
+      "view_reads_per_s": 187.12219459148886,
+      "moves_sent_per_s": 124.74812972765923,
+      "first_frame_number": 4,
+      "last_frame_number": 4,
+      "frame_timings": 0,
+      "frame_timings_per_s": 0.0
+    },
+    {
+      "window": "rest",
+      "seconds": 5.002999,
+      "hovers": 0,
+      "frames_drawn": 0,
+      "frames_drawn_per_s": 0.0,
+      "view_reads_per_s": 62.56247502747852,
+      "moves_sent_per_s": 0.0,
+      "first_frame_number": 4,
+      "last_frame_number": 4,
+      "frame_timings": 0,
+      "frame_timings_per_s": 0.0
+    },
+    {
+      "window": "sweep",
+      "seconds": 5.00301,
+      "hovers": 624,
+      "frames_drawn": 0,
+      "frames_drawn_per_s": 0.0,
+      "view_reads_per_s": 187.28725307364968,
+      "moves_sent_per_s": 124.72491560080832,
+      "first_frame_number": 4,
+      "last_frame_number": 4,
+      "frame_timings": 0,
+      "frame_timings_per_s": 0.0
+    }
+  ]
+}

@@ -598,6 +598,50 @@ void main() {
   );
 
   testWidgets(
+    'hovering while the local pointer shows the host shape asks for no '
+    'frame; hovering with the shape painted repaints it',
+    (tester) async {
+      final runner = FakeDesktopPointer()..fail = true;
+      final scene = await _Scene.open(tester, native: runner);
+      final _Scene(:h, :pointer) = scene;
+      h.api.cursorShapes.addAll({
+        1: _shape(DesktopCursorKind.ibeam),
+        2: _shape(DesktopCursorKind.custom),
+      });
+      Future<void> sweep({required bool frames}) async {
+        for (var i = 1; i <= 24; i++) {
+          h.input.hover(
+            h.viewport.toNormalized(_Scene._at + Offset(i * 4.0, i * 2.0))!,
+          );
+          expect(tester.binding.hasScheduledFrame, frames, reason: 'hover $i');
+          if (frames) await tester.pump();
+          // The move gate closes and reads the view; nothing in it changed.
+          await tester.binding.delayed(const Duration(milliseconds: 2));
+          expect(tester.binding.hasScheduledFrame, isFalse, reason: 'read $i');
+        }
+      }
+
+      // The text beam is this computer's own pointer: nothing is painted,
+      // and a hover is no frame, the view's reads included.
+      await scene.report(shape: 1);
+      expect(pointer.value.paint, RemotePointerPaint.none);
+      expect(tester.binding.hasScheduledFrame, isFalse);
+      await sweep(frames: false);
+      expect(scene.layer, isNot(paints..path()));
+
+      // A shape the runner cannot show is painted at the pointer: each
+      // hover repaints it there.
+      await scene.report(shape: 2);
+      await tester.pump();
+      expect(pointer.value.paint, RemotePointerPaint.shape);
+      await sweep(frames: true);
+      expect(scene.layer, paints..path());
+      await scene.close();
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.windows),
+  );
+
+  testWidgets(
     'a runner that cannot show the bitmap leaves it painted under a hidden '
     'pointer',
     (tester) async {
