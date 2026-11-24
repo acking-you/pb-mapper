@@ -1,0 +1,14 @@
+     Running unittests src/lib.rs (target/release/deps/pb_mapper_desktop-41905534f0615e49)
+
+running 2 tests
+test slow_link::window_display_moves_at_120 ... window_display_smooth phase=120hz paced_after_ms=None mean_pace_fps=120.0 caps=[None, None, None, None, None, None, None, None, None] received_fps=120.0 bpf=100000 sent_bitrate=11999124 sent_bytes_per_received_frame=12499
+window_display_smooth phase=60hz paced_after_ms=Some(70.938417) mean_pace_fps=60.0 caps=[Some(60), Some(60), Some(60), Some(60), Some(60), Some(60), Some(60), Some(60), Some(60), Some(60)] received_fps=66.1 bpf=100000 sent_bitrate=6038944 sent_bytes_per_received_frame=11422
+window_display_smooth phase=144hz paced_after_ms=Some(107.439875) mean_pace_fps=120.0 caps=[None, None, None, None, None, None, None, None, None, None] received_fps=114.0 bpf=100000 sent_bitrate=11937441 sent_bytes_per_received_frame=13092
+ok
+test slow_link::window_display_moves_at_balanced ... window_display_balanced phase=120hz paced_after_ms=None mean_pace_fps=60.0 caps=[None, None, None, None, None, None, None, None, None] received_fps=60.1 bpf=133333 sent_bitrate=8015522 sent_bytes_per_received_frame=16680
+window_display_balanced phase=60hz paced_after_ms=None mean_pace_fps=60.0 caps=[Some(60), Some(60), Some(60), Some(60), Some(60), Some(60), Some(60), Some(60), Some(60)] received_fps=60.0 bpf=133333 sent_bitrate=8003758 sent_bytes_per_received_frame=16670
+window_display_balanced phase=144hz paced_after_ms=None mean_pace_fps=60.0 caps=[None, None, None, None, None, None, None, None, None, None] received_fps=60.0 bpf=133333 sent_bitrate=8000378 sent_bytes_per_received_frame=16672
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 397 filtered out; finished in 80.16s
+

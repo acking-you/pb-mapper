@@ -7,7 +7,9 @@
 // every session is JPEG, which Dart decodes. The app never needs GStreamer
 // to start. Each texture is an FlTextureGL whose populate, on Flutter's
 // raster thread, converts the decoder's picture to RGBA on the GPU
-// (desktop_video_gl.cc).
+// (desktop_video_gl.cc). `refresh_hz` answers the refresh of the display
+// the view's window is on, and `display_changed` tells Dart when that may
+// have changed, as on Windows: Flutter's embedder follows neither.
 #define G_LOG_DOMAIN "pb-mapper-video"
 
 #include "desktop_video.h"
@@ -44,6 +46,8 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 constexpr char kChannel[] = "pb_mapper/desktop_video";
+// The view's data that holds its DesktopVideo.
+constexpr char kViewData[] = "pb-mapper-desktop-video";
 constexpr char kFfiFile[] = "libpb_mapper_ffi.so";
 constexpr int64_t kSnapshotWidth = 320;
 constexpr char kSnapshotQuality[] = "80";
@@ -195,6 +199,23 @@ double DisplayMaxHz() {
   return fastest > 1 ? fastest : 60.0;
 }
 
+// The monitor with the most of `view`'s window, as Flutter's embedder names
+// the view's display, which it does only when the view's size or scale
+// changes; null before the window is realized. GTK thread only.
+GdkMonitor* WindowMonitor(GtkWidget* view) {
+  GdkWindow* window = gtk_widget_get_window(gtk_widget_get_toplevel(view));
+  return window ? gdk_display_get_monitor_at_window(gtk_widget_get_display(view), window) : nullptr;
+}
+
+// The refresh of the monitor `view`'s window is on now, exactly as GDK
+// reads it (59.94 Hz as 59940 mHz); 0 when that says nothing. GTK thread
+// only.
+double WindowRefreshHz(GtkWidget* view) {
+  GdkMonitor* monitor = WindowMonitor(view);
+  const int millihertz = monitor ? gdk_monitor_get_refresh_rate(monitor) : 0;
+  return millihertz > 1000 ? millihertz / 1000.0 : 0;
+}
+
 FlValue* Limit(const PbVideoCodecProbe& codec) {
   if (codec.max_width == 0 || codec.max_height == 0) return fl_value_new_null();
   FlValue* limit = fl_value_new_map();
@@ -231,6 +252,9 @@ FlValue* ProbeDecoders(double display_max_hz, const std::string& device) {
   fl_value_set_string_take(answer, "h264", Limit(probe.h264));
   fl_value_set_string_take(answer, "h265", Limit(probe.h265));
   fl_value_set_string_take(answer, "display_max_hz", fl_value_new_float(display_max_hz));
+  // This runner answers `refresh_hz` and calls `display_changed`, so Dart
+  // follows the window's display through it.
+  fl_value_set_string_take(answer, "window_refresh", fl_value_new_bool(TRUE));
   return answer;
 }
 
@@ -647,12 +671,13 @@ void ProbeDone(GObject*, GAsyncResult* result, gpointer) {
 
 class DesktopVideo {
  public:
-  explicit DesktopVideo(FlPluginRegistrar* registrar)
+  DesktopVideo(FlPluginRegistrar* registrar, FlView* view)
       : textures_(FL_TEXTURE_REGISTRAR(g_object_ref(fl_plugin_registrar_get_texture_registrar(registrar)))),
         probe_(std::make_shared<ProbeState>()) {
     g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
     channel_ = fl_method_channel_new(fl_plugin_registrar_get_messenger(registrar), kChannel, FL_METHOD_CODEC(codec));
     fl_method_channel_set_method_call_handler(channel_, OnCall, this, nullptr);
+    WatchDisplays(view);
   }
   DesktopVideo(const DesktopVideo&) = delete;
   DesktopVideo& operator=(const DesktopVideo&) = delete;
@@ -677,6 +702,18 @@ class DesktopVideo {
     const gchar* method = fl_method_call_get_name(call);
     if (strcmp(method, "decoders") == 0) {
       Decoders(call);
+      return;
+    }
+    if (strcmp(method, "refresh_hz") == 0) {
+      // The refresh of the display the view's window is on, which Dart
+      // sends the viewer; null when GDK says nothing. No arguments. Dart
+      // follows the display from the first call, so `display_changed` goes
+      // from then on, for a monitor other than this one.
+      following_ = true;
+      monitor_ = WindowMonitor(view_);
+      const double hz = WindowRefreshHz(view_);
+      g_autoptr(FlValue) result = hz > 1 ? fl_value_new_float(hz) : fl_value_new_null();
+      fl_method_call_respond_success(call, result, nullptr);
       return;
     }
     FlValue* args = fl_method_call_get_args(call);
@@ -762,7 +799,10 @@ class DesktopVideo {
         fl_value_set_string_take(measured, "surface_consume", TimingValue(consume));
         fl_value_set_string_take(result, "timings", measured);
       }
-      fl_value_set_string_take(result, "refreshHz", fl_value_new_float(DisplayMaxHz()));
+      // The display the view's window is on, the one the viewer follows;
+      // the fastest where GDK says nothing of it.
+      const double window_hz = WindowRefreshHz(view_);
+      fl_value_set_string_take(result, "refreshHz", fl_value_new_float(window_hz > 1 ? window_hz : DisplayMaxHz()));
       fl_method_call_respond_success(call, result, nullptr);
     } else if (strcmp(method, "dispose") == 0) {
       viewers_.erase(found);
@@ -784,6 +824,72 @@ class DesktopVideo {
                          [](gpointer job) { delete static_cast<ProbeJob*>(job); });
     g_task_run_in_thread(task, ProbeThread);
     g_object_unref(task);
+  }
+
+  // What may change the display the view's window is on, which Flutter's
+  // embedder does not follow (it names the view's display again only when
+  // its size or scale changes, and reads the monitors' rates only when one
+  // is added or removed): the window's configure-event, which X11 sends on
+  // a move (Wayland tells GTK 3 nothing of a move between outputs of one
+  // scale), a monitor added or removed, and a monitor's refresh rate. Each
+  // handler finds this through `view`, and is disconnected when the view
+  // goes, before this does.
+  void WatchDisplays(FlView* view) {
+    view_ = GTK_WIDGET(view);
+    GtkWidget* toplevel = gtk_widget_get_toplevel(view_);
+    if (gtk_widget_is_toplevel(toplevel)) {
+      g_signal_connect_object(toplevel, "configure-event", G_CALLBACK(OnConfigure), view_,
+                              static_cast<GConnectFlags>(0));
+    }
+    GdkDisplay* display = gtk_widget_get_display(view_);
+    g_signal_connect_object(display, "monitor-added", G_CALLBACK(OnMonitorAdded), view_,
+                            static_cast<GConnectFlags>(0));
+    g_signal_connect_object(display, "monitor-removed", G_CALLBACK(OnMonitorRemoved), view_,
+                            static_cast<GConnectFlags>(0));
+    for (int i = 0; i < gdk_display_get_n_monitors(display); ++i) WatchMonitor(gdk_display_get_monitor(display, i));
+  }
+
+  void WatchMonitor(GdkMonitor* monitor) {
+    g_signal_connect_object(monitor, "notify::refresh-rate", G_CALLBACK(OnRefreshRate), view_,
+                            static_cast<GConnectFlags>(0));
+  }
+
+  static DesktopVideo* Of(gpointer view) {
+    return static_cast<DesktopVideo*>(g_object_get_data(G_OBJECT(view), kViewData));
+  }
+
+  // Seen, not handled: the window goes on with it.
+  static gboolean OnConfigure(GtkWidget*, GdkEvent*, gpointer view) {
+    if (DesktopVideo* video = Of(view)) video->DisplayMaybeChanged(true);
+    return FALSE;
+  }
+
+  static void OnMonitorAdded(GdkDisplay*, GdkMonitor* monitor, gpointer view) {
+    if (DesktopVideo* video = Of(view)) {
+      video->WatchMonitor(monitor);
+      video->DisplayMaybeChanged(false);
+    }
+  }
+
+  static void OnMonitorRemoved(GdkDisplay*, GdkMonitor*, gpointer view) {
+    if (DesktopVideo* video = Of(view)) video->DisplayMaybeChanged(false);
+  }
+
+  static void OnRefreshRate(GObject*, GParamSpec*, gpointer view) {
+    if (DesktopVideo* video = Of(view)) video->DisplayMaybeChanged(false);
+  }
+
+  // The window moved or resized, or a monitor came, went or changed its
+  // rate: once Dart follows the display, when the window is on another
+  // monitor than before, or a monitor changed, Dart is told
+  // (`display_changed`, no arguments) and reads `refresh_hz` again. A move
+  // within one monitor, as each step of a drag, tells nothing.
+  void DisplayMaybeChanged(bool moved) {
+    if (!following_) return;
+    GdkMonitor* now = WindowMonitor(view_);
+    if (moved && now == monitor_) return;
+    monitor_ = now;
+    fl_method_channel_invoke_method(channel_, "display_changed", nullptr, nullptr, nullptr, nullptr);
   }
 
   // D9: Dart and this runner must reach one library instance, or the
@@ -849,12 +955,19 @@ class DesktopVideo {
   std::unique_ptr<const VideoLibrary> library_;
   // This runner's reference to each live texture.
   std::map<int64_t, PbVideoTexture*> viewers_;
+  // Flutter's view, which holds this (no reference of its own).
+  GtkWidget* view_ = nullptr;
+  // The monitor the view's window was on when last looked at, once Dart
+  // follows; compared, never read: it may be gone.
+  GdkMonitor* monitor_ = nullptr;
+  // Dart asked `refresh_hz`, so it listens for `display_changed`.
+  bool following_ = false;
 };
 }  // namespace
 
 void desktop_video_register(FlView* view) {
   g_autoptr(FlPluginRegistrar) registrar =
       fl_plugin_registry_get_registrar_for_plugin(FL_PLUGIN_REGISTRY(view), "PbMapperDesktopVideo");
-  g_object_set_data_full(G_OBJECT(view), "pb-mapper-desktop-video", new DesktopVideo(registrar),
+  g_object_set_data_full(G_OBJECT(view), kViewData, new DesktopVideo(registrar, view),
                          [](gpointer data) { delete static_cast<DesktopVideo*>(data); });
 }

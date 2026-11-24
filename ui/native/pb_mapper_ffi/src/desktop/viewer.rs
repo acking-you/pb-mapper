@@ -343,6 +343,12 @@ enum ViewerRequest {
     Quality {
         preset: QualityPreset,
     },
+    /// The refresh rate of the display the viewer window is on, in hertz,
+    /// exact where the runner reads it (59.94): sent whenever it changes and
+    /// once after connect (`Viewer::set_display_refresh`).
+    DisplayRefresh {
+        hz: f64,
+    },
     Pause,
     Resume,
     /// The definition of the shape the view names (`cursor_shape`), fetched
@@ -639,6 +645,16 @@ fn viewer_call(state: &DesktopState, request: ViewerRequest) -> Result<Value, Ct
         ViewerRequest::Quality { preset } => {
             if let Some(viewer) = viewer {
                 viewer.set_quality(preset);
+            }
+        }
+        ViewerRequest::DisplayRefresh { hz } => {
+            if !(hz.is_finite() && hz > 0.0) {
+                return Err(CtlError::invalid_argument(
+                    "a display refresh must be a positive number of hertz",
+                ));
+            }
+            if let Some(viewer) = viewer {
+                viewer.set_display_refresh(hz);
             }
         }
         ViewerRequest::Pause => state.set_paused(true),

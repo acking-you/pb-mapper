@@ -543,10 +543,17 @@ impl VideoSink {
         self.ready.notify_all();
     }
 
+    /// The display the viewer's window is on refreshes `fps` times a second
+    /// now: the fps cap stays within it from the next tick.
+    pub(super) fn set_display_fps(&self, fps: u32) {
+        self.state.lock().fps_cap.set_display(fps);
+    }
+
     /// The viewer tick (every 250 ms). Returns the fps the host should be
     /// capped at, when that changes; it is judged only while the session
     /// streams and is not paused, from `IDR_GRACE` after the consumer took its
-    /// first IDR, and a probe under watch when that stops is taken back. Also
+    /// first IDR, and a probe under watch when that stops is taken back. A
+    /// new display rate goes at the next tick in either case. Also
     /// re-requests an awaited IDR on its backoff, and runs the stall watchdog.
     pub(super) fn tick(
         &self,
