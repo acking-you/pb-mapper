@@ -1,0 +1,6 @@
+view (10.0, 20.0, 320.0, 180.0) backing layer (0.0, 0.0, 320.0, 180.0)
+container (0.0, 0.0, 320.0, 180.0) content (0.0, 0.0, 320.0, 180.0)
+after resize: container (0.0, 0.0, 640.0, 360.0) content (0.0, 0.0, 640.0, 360.0)
+commits done; contents is an IOSurface: true
+moved: container superlayer is second's layer: true (0.0, 0.0, 300.0, 200.0)
+display link ticks in 1 s: 0 screen G24H2

@@ -133,14 +133,25 @@ off. The optional `cycleWindow` switch hides the desktop viewer after eight
 samples and shows it again four samples later. Check `events` for pause and
 resume and `summary.resume_picture_ms` for the return of a fresh picture.
 
-Each sample's `native` holds VideoToolbox's own figures: the counts;
-`timings.decode` (`VTDecompressionSessionDecodeFrame`, keyframes included)
-and `timings.surface_consume` (a picture's publication to the compositor
-taking it), each `samples`, `mean_ms` and `max_ms` since the timings began;
-`decoderCpuMs`, the CPU time of the texture's decoder threads, which a
-reconnect's new thread adds to; `hardware`; `lowLatency`; and `refreshHz`,
-the display the viewer window is on. Compare builds as on Windows below, with
-`decoderCpuMs` gained per second in place of `decoderCycles`.
+The viewer presents on its own Core Animation layer; to compare with
+Flutter's texture, build the same entry a second time with
+`--dart-define=presenter=texture` and keep each bundle apart. The report's
+`presenter` says which a run used. Each sample's `native` holds
+VideoToolbox's own figures: the counts; `timings.decode`
+(`VTDecompressionSessionDecodeFrame`, keyframes included) and either
+`timings.present` (layer: the end of a picture's decode to the end of its
+commit) or `timings.surface_consume` (texture: a picture's publication to
+the compositor taking it), each `samples`, `mean_ms` and `max_ms` since the
+timings began; `decoderCpuMs`, the CPU time of the texture's decoder threads,
+which a reconnect's new thread adds to and which, with the layer, includes
+the commits; `hardware`; `lowLatency`; and `refreshHz`, the display the
+viewer window is on. With the layer, `presented` counts commits, so
+`picture_latency_ms` ends earlier than with the texture: do not compare it
+across presenters. Compare builds as on Windows below, with `decoderCpuMs`
+gained per second in place of `decoderCycles`. Run with the display on and
+the session unlocked: with the screen locked the texture path's Flutter
+frames fell to about 5 a second after the first 30 s, while the layer kept
+committing every picture.
 
 ## Windows viewer
 

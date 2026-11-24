@@ -767,7 +767,10 @@ The design and its rules are in `docs/ui-design.md`.
     the FFI `ErrorCode`; never match their text
   - `desktop_video.dart`: The native decoder's Flutter texture, over the
     `pb_mapper/desktop_video` channel, on every platform the app runs on
-    (`nativeDesktopVideo`). Dart binds it to a video source; the decoder
+    (`nativeDesktopVideo`); on macOS its own Core Animation layer instead,
+    which the viewer shows through the platform view its `platformViewType`
+    names (`--dart-define=presenter=texture` keeps the texture). Dart binds
+    it to a video source; the decoder
     pulls the video from Rust itself. The channel's `decoders` method says,
     without creating a decoder, how large H.264 and H.265 this device
     decodes and its fastest refresh; the store offers H.265 and the
