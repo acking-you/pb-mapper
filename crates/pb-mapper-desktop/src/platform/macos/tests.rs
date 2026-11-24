@@ -605,9 +605,10 @@ fn screen_capture_consent_is_classified_by_domain_and_code() {
     );
 }
 
-/// The stream leaves the pointer to the viewer and fills what the display
-/// does not cover with opaque black, as NV12 has no alpha. It stays sRGB,
-/// as every viewer shows it, and SDR where the system offers HDR.
+/// The stream leaves the pointer to the viewer and has the display fill the
+/// frame where the system can stretch it (macOS 14), else fills what the
+/// display does not cover with opaque black, as NV12 has no alpha. It stays
+/// sRGB, as every viewer shows it, and SDR where the system offers HDR.
 #[test]
 fn capture_without_a_pointer_stays_opaque() {
     use objc2::ClassType;
@@ -635,7 +636,47 @@ fn capture_without_a_pointer_stays_opaque() {
                 SCCaptureDynamicRange::SDR
             );
         }
+        if SCStreamConfiguration::class().responds_to(objc2::sel!(preservesAspectRatio)) {
+            assert!(!prepared.config.preservesAspectRatio());
+        }
     }
+}
+
+/// A new frame-rate limit reaches the session as its expected frame rate,
+/// set by the submit thread at once while it idles; one set while the
+/// thread takes nothing reaches it only once it does.
+#[test]
+fn an_expected_frame_rate_set_live_reaches_the_session() {
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    let mut encoder = Encoder::new(
+        VideoCodec::H264,
+        1280,
+        720,
+        120,
+        4_000_000,
+        &Waker(wake.clone()),
+    )
+    .expect("VideoToolbox makes an H.264 session on every Mac, in software if need be");
+    let Some(opened) = encoder.expected_fps() else {
+        // Past the harness's capture, so that the log says so.
+        let _ = writeln!(
+            std::io::stderr(),
+            "skipped {}: this session reads back no expected frame rate",
+            module_path!()
+        );
+        return;
+    };
+    assert_eq!(opened, 120.0);
+    encoder.set_expected_fps(60);
+    wait_for(&waiter, Duration::from_secs(3), || encoder.idle());
+    assert_eq!(encoder.expected_fps(), Some(60.0));
+    encoder.hold(true);
+    encoder.set_expected_fps(30);
+    assert_eq!(encoder.expected_fps(), Some(60.0));
+    encoder.hold(false);
+    wait_for(&waiter, Duration::from_secs(3), || encoder.idle());
+    assert_eq!(encoder.expected_fps(), Some(30.0));
 }
 
 /// Each key a viewer can press keeps, on its key-down, every Fn, keypad and
@@ -1842,4 +1883,232 @@ fn per(before: Option<Duration>, after: Option<Duration>, count: f64) -> String 
         }
         _ => "unread".into(),
     }
+}
+
+/// Why a measurement of live capture cannot run on this Mac now, if it
+/// cannot: it needs ScreenCaptureKit, Screen Recording, and the main display
+/// awake and unlocked.
+fn capture_unavailable() -> Option<&'static str> {
+    use objc2_core_graphics::{CGDisplayIsAsleep, CGMainDisplayID, CGPreflightScreenCaptureAccess};
+    if !super::capture::available() {
+        Some("ScreenCaptureKit needs macOS 12.3")
+    } else if !CGPreflightScreenCaptureAccess() {
+        Some("Screen Recording is not granted to this process")
+    } else if CGDisplayIsAsleep(CGMainDisplayID()) {
+        Some("the main display sleeps")
+    } else if desktop::available().is_err() {
+        Some("the screen is locked, or another login owns it")
+    } else {
+        None
+    }
+}
+
+/// How long each arm of `sck_cadence` counts, after `CADENCE_SETTLE`.
+const CADENCE_RUN: Duration = Duration::from_secs(5);
+const CADENCE_SETTLE: Duration = Duration::from_secs(1);
+
+/// How ScreenCaptureKit gates its pictures by the minimum interval, which
+/// decides what `cadence.rs` gains: a stream of the main display at
+/// 1920x1080 or less, at each interval for `CADENCE_RUN`, in the order
+/// given and then back. The arms: 0.9/60 and 0.9/120 (the interval before
+/// the cadence, for a 60 and a 120 FPS viewer), the floor rule
+/// (`floor(refresh × 1.01 / 60) - 0.5` refreshes), the cadence at 60, and
+/// zero. Each prints its complete and idle pictures a second, WindowServer's
+/// CPU a second, and how many refresh periods apart consecutive pictures'
+/// display times were (`SCStreamFrameInfoDisplayTime`). If ScreenCaptureKit
+/// gates each picture strictly, a 144 Hz display gives about 48, 72, 144 and
+/// 144 pictures a second at 15, 10.4, 3.5 and 0 ms.
+///
+/// The main display must be awake and unlocked, and show an animation that
+/// changes the whole screen every refresh, such as a browser's frame-rate
+/// test full screen; the test says why when it cannot run. Run it in
+/// release mode, one test at a time:
+/// `cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture
+/// --test-threads=1 sck_cadence`.
+#[test]
+#[ignore = "a measurement: a minute of capture, with Screen Recording and a moving screen"]
+fn sck_cadence() {
+    use super::{
+        cadence,
+        capture::{Refresh, Stream, mach_duration},
+    };
+    use crate::qos::scaled_size;
+    use objc2_core_graphics::CGMainDisplayID;
+
+    if let Some(why) = capture_unavailable() {
+        let _ = writeln!(std::io::stderr(), "skipped sck_cadence: {why}");
+        return;
+    }
+    let id = CGMainDisplayID();
+    let refresh = Refresh::new(id);
+    let Some(hz) = refresh.hz() else {
+        let _ = writeln!(std::io::stderr(), "skipped sck_cadence: no refresh");
+        return;
+    };
+    let display = desktop::displays()
+        .unwrap()
+        .into_iter()
+        .find(|display| display.id == id)
+        .unwrap();
+    let (width, height) = scaled_size(display.width, display.height, 1920, 1080);
+    let period = refresh
+        .link_period()
+        .unwrap_or_else(|| Duration::from_secs_f64(hz.recip()));
+    let floor_rule = (hz * 1.01 / 60.0).floor().max(1.0);
+    let arms = [
+        ("0.9/60", Duration::from_micros(15_000)),
+        (
+            "floor rule",
+            Duration::from_secs_f64((floor_rule - 0.5) / hz),
+        ),
+        ("cadence 60", cadence::cadence(Some(hz), 60, 60).interval),
+        ("0.9/120", Duration::from_micros(7_500)),
+        ("zero", Duration::ZERO),
+    ];
+    let _ = writeln!(
+        std::io::stderr(),
+        "sck_cadence: display {id} {}x{} captured at {width}x{height}, mode {:.4} Hz, link period {period:?}",
+        display.width,
+        display.height,
+        refresh.mode_hz()
+    );
+    let wake = Wake::new();
+    let waker = Waker(wake.clone());
+    for (label, interval) in arms.iter().chain(arms.iter().rev()) {
+        let stream = Stream::start(id, width, height, *interval, &waker).unwrap();
+        std::thread::sleep(CADENCE_SETTLE);
+        let _ = stream.display_times();
+        let (before, server) = (stream.counts(), window_server_cpu());
+        let started = Instant::now();
+        std::thread::sleep(CADENCE_RUN);
+        let seconds = started.elapsed().as_secs_f64();
+        let (after, server_after) = (stream.counts(), window_server_cpu());
+        let times = stream.display_times();
+        drop(stream);
+        // Pictures 1, 2, 3, 4, 5 and 6 or more refresh periods apart.
+        let mut apart = [0u32; 6];
+        for pair in times.windows(2) {
+            let Some(delta) = mach_duration(pair[1].saturating_sub(pair[0])) else {
+                continue;
+            };
+            let periods = (delta.as_secs_f64() / period.as_secs_f64()).round() as usize;
+            apart[periods.clamp(1, 6) - 1] += 1;
+        }
+        let _ = writeln!(
+            std::io::stderr(),
+            "{label:>10} {:>7.3} ms: complete {:6.1}/s idle {:6.1}/s window_server_cpu {} s/s periods apart 1..6+ {apart:?}",
+            interval.as_secs_f64() * 1e3,
+            (after.complete - before.complete) as f64 / seconds,
+            (after.idle - before.idle) as f64 / seconds,
+            per(server, server_after, seconds),
+        );
+    }
+}
+
+/// Lookups of `sck_display_lookup` per arm.
+const LOOKUPS: usize = 20;
+/// Refresh reads of `sck_display_lookup` per source.
+const REFRESH_READS: u32 = 1_000;
+
+/// What finding a display costs before and after asking ScreenCaptureKit
+/// for its displays with the on-screen windows only, without the desktop's:
+/// `LOOKUPS` of each, alternating which goes first, after one of each to
+/// warm up. Each arm prints its lookups' p50 and maximum and the windows and
+/// displays the last one listed; then what reading the main display's
+/// refresh costs, from its mode and from a display link, `REFRESH_READS`
+/// times each. Needs Screen Recording, not an awake display:
+/// `cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture
+/// --test-threads=1 sck_display_lookup`.
+#[test]
+#[ignore = "a measurement: a few seconds of lookups, with Screen Recording"]
+fn sck_display_lookup() {
+    use super::capture::{Refresh, shareable};
+    use block2::DynBlock;
+    use objc2_core_graphics::{CGMainDisplayID, CGPreflightScreenCaptureAccess};
+    use objc2_foundation::NSError;
+    use objc2_screen_capture_kit::SCShareableContent;
+
+    type Request = fn(&DynBlock<dyn Fn(*mut SCShareableContent, *mut NSError)>);
+    if !super::capture::available() || !CGPreflightScreenCaptureAccess() {
+        let _ = writeln!(
+            std::io::stderr(),
+            "skipped sck_display_lookup: Screen Recording is not granted to this process"
+        );
+        return;
+    }
+    let every: Request = |handler| {
+        // SAFETY: the handler outlives the call; ScreenCaptureKit copies it.
+        unsafe { SCShareableContent::getShareableContentWithCompletionHandler(handler) }
+    };
+    let on_screen: Request = |handler| {
+        // SAFETY: as above.
+        unsafe {
+            SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+                true, true, handler,
+            )
+        }
+    };
+    let arms = [("every window", every), ("on screen", on_screen)];
+    let mut took = [Vec::new(), Vec::new()];
+    let mut listed = [(0, 0); 2];
+    for round in 0..=LOOKUPS {
+        for step in 0..2 {
+            let arm = (round + step) % 2;
+            let started = Instant::now();
+            let content = objc2::rc::autoreleasepool(|_| shareable(arms[arm].1)).unwrap();
+            let elapsed = started.elapsed();
+            // SAFETY: the content's lists, read on this thread.
+            listed[arm] = unsafe { (content.windows().count(), content.displays().count()) };
+            if round > 0 {
+                took[arm].push(elapsed);
+            }
+        }
+    }
+    for (arm, (label, _)) in arms.iter().enumerate() {
+        let lookups = &mut took[arm];
+        lookups.sort_unstable();
+        let _ = writeln!(
+            std::io::stderr(),
+            "{label:>12}: p50 {:.2} ms max {:.2} ms over {} lookups; {} windows, {} displays",
+            lookups[lookups.len() / 2].as_secs_f64() * 1e3,
+            lookups[lookups.len() - 1].as_secs_f64() * 1e3,
+            lookups.len(),
+            listed[arm].0,
+            listed[arm].1,
+        );
+    }
+    let id = CGMainDisplayID();
+    // The first display link a process makes, then another.
+    let mut made = Vec::new();
+    let mut refresh = None;
+    for _ in 0..2 {
+        let started = Instant::now();
+        refresh = Some(Refresh::new(id));
+        made.push(started.elapsed());
+    }
+    let refresh = refresh.unwrap();
+    for round in 0..3 {
+        let started = Instant::now();
+        let mut hz = 0.0;
+        for _ in 0..REFRESH_READS {
+            hz += refresh.mode_hz();
+        }
+        let mode = started.elapsed() / REFRESH_READS;
+        let _ = writeln!(
+            std::io::stderr(),
+            "refresh of display {id}, round {round}: mode {:.4} Hz in {mode:?} a read",
+            hz / f64::from(REFRESH_READS),
+        );
+    }
+    let started = Instant::now();
+    let mut periods = Duration::ZERO;
+    for _ in 0..REFRESH_READS {
+        periods += refresh.link_period().unwrap_or_default();
+    }
+    let link = started.elapsed() / REFRESH_READS;
+    let _ = writeln!(
+        std::io::stderr(),
+        "display link of display {id}: made in {made:?}, period {:?} in {link:?} a read",
+        periods / REFRESH_READS,
+    );
 }

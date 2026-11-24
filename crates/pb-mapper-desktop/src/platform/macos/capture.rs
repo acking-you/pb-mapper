@@ -5,9 +5,18 @@
 //! reads in place; thread C takes it at its own pace. A stream the system
 //! stops says why at the next take.
 //!
-//! What the display's picture does not cover takes the background colour,
-//! clear unless set, and NV12 has no alpha to show it: the background is
-//! opaque black, which the configuration does not retain.
+//! From macOS 14 the display's picture fills the frame, stretched by the
+//! pixel or two by which the encoder's size, rounded down to even pixels,
+//! may miss the display's shape. Before, it keeps its shape, and what it does not cover
+//! takes the background colour, clear unless set, which NV12 has no alpha
+//! to show: the background is opaque black, which the configuration does
+//! not retain.
+//!
+//! The stream starts at a minimum interval between pictures from the
+//! display's refresh and the session's pace (`cadence.rs`), and changes it
+//! live (`Stream::set_interval`), one change at a time. A display is found
+//! among the displays and on-screen windows only, which is all a display's
+//! filter needs.
 //!
 //! Each picture keeps when it arrived, which thread C anchors its pacing
 //! on, and how long after the window server displayed it that was
@@ -15,7 +24,7 @@
 //! stream counts its complete pictures, its idle samples and the pictures a
 //! newer one replaced before thread C took them.
 
-use super::cf;
+use super::{cadence::Updates, cf};
 use crate::{BackendError, FailureKind, Result, Waker};
 use block2::RcBlock;
 use dispatch2::{DispatchQoS, DispatchQueue, DispatchRetained, GlobalQueueIdentifier};
@@ -27,11 +36,13 @@ use objc2::{
 };
 use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString};
 use objc2_core_graphics::{
-    CGColor, CGMainDisplayID, kCGColorSpaceSRGB, kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
+    CGColor, CGDisplayCopyDisplayMode, CGDisplayMode, CGMainDisplayID, kCGColorSpaceSRGB,
+    kCGDisplayStreamYCbCrMatrix_ITU_R_709_2,
 };
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
-    CVPixelBuffer, kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    CVDisplayLink, CVPixelBuffer, CVTimeFlags, kCVPixelFormatType_32BGRA,
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVReturnSuccess,
 };
 use objc2_foundation::{
     NSArray, NSError, NSObjectProtocol, NSOperatingSystemVersion, NSProcessInfo,
@@ -90,9 +101,19 @@ pub(crate) struct Latest {
     displayed: Option<Duration>,
     /// Complete pictures since the last take.
     since_take: u32,
+    /// When the first complete picture arrived.
+    first: Option<Instant>,
     counts: Counts,
     stopped: Option<BackendError>,
+    /// Each complete picture's display time, in mach absolute time, for a
+    /// measurement to read, up to `DISPLAY_TIMES`.
+    #[cfg(test)]
+    display_times: Vec<u64>,
 }
+
+/// The display times a measurement keeps.
+#[cfg(test)]
+const DISPLAY_TIMES: usize = 8_192;
 
 /// What the stream delivered since it started.
 #[derive(Clone, Copy, Debug, Default)]
@@ -179,17 +200,30 @@ const DISPLAYED_MAX_AGE: Duration = Duration::from_secs(1);
 /// (the order of the reads) is now, and one over a second old, or with no
 /// timebase, is none.
 fn mach_age(ticks: u64) -> Option<Duration> {
+    let (numer, denom) = timebase()?;
+    // SAFETY: no arguments; reads a clock.
+    let now = unsafe { mach_absolute_time() };
+    ticks_age(now.saturating_sub(ticks), numer, denom)
+}
+
+/// Mach absolute time's units, once read.
+fn timebase() -> Option<(u32, u32)> {
     static TIMEBASE: OnceLock<Option<(u32, u32)>> = OnceLock::new();
-    let (numer, denom) = (*TIMEBASE.get_or_init(|| {
+    *TIMEBASE.get_or_init(|| {
         let mut timebase = Timebase { numer: 0, denom: 0 };
         // SAFETY: an out parameter the call fills.
         let status = unsafe { mach_timebase_info(&mut timebase) };
         (status == 0 && timebase.numer != 0 && timebase.denom != 0)
             .then_some((timebase.numer, timebase.denom))
-    }))?;
-    // SAFETY: no arguments; reads a clock.
-    let now = unsafe { mach_absolute_time() };
-    ticks_age(now.saturating_sub(ticks), numer, denom)
+    })
+}
+
+/// `ticks` of mach absolute time, for a measurement.
+#[cfg(test)]
+pub(super) fn mach_duration(ticks: u64) -> Option<Duration> {
+    let (numer, denom) = timebase()?;
+    let nanos = u128::from(ticks) * u128::from(numer) / u128::from(denom);
+    u64::try_from(nanos).ok().map(Duration::from_nanos)
 }
 
 /// `ticks` of mach absolute time at `numer / denom` nanoseconds each, as a
@@ -233,10 +267,19 @@ define_class!(
                 return;
             };
             let arrived = Instant::now();
+            #[cfg(test)]
+            let display_time = displayed;
             let displayed = displayed.and_then(mach_age);
             let wake = {
                 let mut latest = self.ivars().latest.lock();
                 let wake = !latest.fresh;
+                #[cfg(test)]
+                if let Some(time) = display_time
+                    && latest.display_times.len() < DISPLAY_TIMES
+                {
+                    latest.display_times.push(time);
+                }
+                latest.first.get_or_insert(arrived);
                 latest.counts.complete += 1;
                 latest.counts.replaced += u64::from(latest.fresh);
                 latest.since_take = latest.since_take.saturating_add(1);
@@ -324,8 +367,11 @@ pub(super) fn answer<T>(receiver: mpsc::Receiver<Result<T>>, what: &str) -> Resu
     })?
 }
 
-/// ScreenCaptureKit's display of id `id`, which a filter needs.
-pub(crate) fn display(id: u32) -> Result<Retained<SCDisplay>> {
+/// What ScreenCaptureKit's shareable-content `request` gives, waited for.
+/// `request` makes the call with the handler it is given.
+pub(super) fn shareable(
+    request: impl FnOnce(&block2::DynBlock<dyn Fn(*mut SCShareableContent, *mut NSError)>),
+) -> Result<Retained<SCShareableContent>> {
     // ScreenCaptureKit asserts the window server connection is up; a Core
     // Graphics call makes sure it is.
     CGMainDisplayID();
@@ -336,10 +382,25 @@ pub(crate) fn display(id: u32) -> Result<Retained<SCDisplay>> {
         // SAFETY: the callback owns the optional error for this call.
         let _ = sender.send(content.ok_or_else(|| failure(unsafe { err.as_ref() }).into()));
     });
-    // SAFETY: the handler outlives the call; ScreenCaptureKit copies it.
-    unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
+    request(&handler);
     drop(handler);
     let ShareableContent(content) = answer(receiver, "display enumeration")?;
+    Ok(content)
+}
+
+/// ScreenCaptureKit's display of id `id`, which a filter needs. Only the
+/// on-screen windows are listed with it, without the desktop's: a filter of
+/// a whole display excludes no window, so the picture is the same, and the
+/// windows of every app off screen are not enumerated.
+pub(crate) fn display(id: u32) -> Result<Retained<SCDisplay>> {
+    let content = shareable(|handler| {
+        // SAFETY: the handler outlives the call; ScreenCaptureKit copies it.
+        unsafe {
+            SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+                true, true, handler,
+            )
+        }
+    })?;
     // SAFETY: the content's displays, read on this thread.
     let displays = unsafe { content.displays() };
     displays
@@ -365,6 +426,64 @@ pub(crate) fn filter(display: &SCDisplay) -> Retained<SCContentFilter> {
     }
 }
 
+/// What one display says of its refresh, read off the main thread: its
+/// mode's rate, and the nominal period of a display link made on it once,
+/// for a built-in panel whose mode may report none. On an M6, back to back,
+/// a mode read took 5 to 24 µs, the first link a process makes 2.4 to
+/// 2.7 ms and another about 190 µs, and a period read 11 ns
+/// (`sck_display_lookup`).
+pub(crate) struct Refresh {
+    id: u32,
+    link: Option<CFRetained<CVDisplayLink>>,
+}
+
+impl Refresh {
+    pub(crate) fn new(id: u32) -> Self {
+        let mut link = std::ptr::null_mut();
+        // SAFETY: an out pointer to a local, which the call sets to a link it
+        // created on success. The deprecated display link is the only source
+        // of a display's refresh off the main thread (NSScreen is the main
+        // thread's), and nothing starts it.
+        #[expect(
+            deprecated,
+            reason = "CVDisplayLink is the only refresh source off the main thread"
+        )]
+        let created = unsafe {
+            CVDisplayLink::create_with_cg_display(id, std::ptr::NonNull::from(&mut link))
+        };
+        let link = std::ptr::NonNull::new(link)
+            .filter(|_| created == kCVReturnSuccess)
+            // SAFETY: a Create-rule result, released when this drops.
+            .map(|link| unsafe { CFRetained::from_raw(link) });
+        Self { id, link }
+    }
+
+    /// The mode's refresh rate; 0 where it reports none.
+    pub(crate) fn mode_hz(&self) -> f64 {
+        CGDisplayMode::refresh_rate(CGDisplayCopyDisplayMode(self.id).as_deref())
+    }
+
+    /// The display link's nominal refresh period, where it knows one.
+    pub(crate) fn link_period(&self) -> Option<Duration> {
+        let link = self.link.as_ref()?;
+        #[expect(
+            deprecated,
+            reason = "CVDisplayLink is the only refresh source off the main thread"
+        )]
+        let period = link.nominal_output_video_refresh_period();
+        let indefinite = CVTimeFlags(period.flags).contains(CVTimeFlags::IsIndefinite);
+        (!indefinite && period.timeValue > 0 && period.timeScale > 0)
+            .then(|| Duration::from_secs_f64(period.timeValue as f64 / f64::from(period.timeScale)))
+    }
+
+    /// The refresh now: the mode's, else the display link's.
+    pub(crate) fn hz(&self) -> Option<f64> {
+        let mode = self.mode_hz();
+        super::cadence::refresh_hz(mode, None)
+            .or_else(|| super::cadence::refresh_hz(mode, self.link_period()))
+    }
+}
+
 /// A stream configuration and the background colour its property does not
 /// retain. A stream holds the colour until the stream has stopped. A
 /// screenshot's completion handler holds another retain ([`Self::background`]):
@@ -384,9 +503,20 @@ impl PreparedCapture {
 }
 
 /// The configuration of a picture `width` x `height` pixels in sRGB,
-/// without the pointer, on an opaque black background: NV12 (BT.709
-/// matrix, video range) for the encoder, else BGRA, as an image takes it.
+/// without the pointer, that the display fills (macOS 14), else on an
+/// opaque black background: NV12 (BT.709 matrix, video range) for the
+/// encoder, else BGRA, as an image takes it.
 pub(crate) fn configuration(width: u32, height: u32, nv12: bool) -> PreparedCapture {
+    with_background(width, height, nv12, CGColor::new_srgb(0.0, 0.0, 0.0, 1.0))
+}
+
+/// `configuration` on `background`, a stream's own when it is updated.
+fn with_background(
+    width: u32,
+    height: u32,
+    nv12: bool,
+    background: CFRetained<CGColor>,
+) -> PreparedCapture {
     // SAFETY: a fresh configuration, set before any stream reads it; the
     // constants are Core Graphics', alive for the process.
     let config = unsafe {
@@ -411,9 +541,15 @@ pub(crate) fn configuration(width: u32, height: u32, nv12: bool) -> PreparedCapt
         if SCStreamConfiguration::class().responds_to(sel!(setCaptureDynamicRange:)) {
             config.setCaptureDynamicRange(SCCaptureDynamicRange::SDR);
         }
+        // macOS 14. The encoder's size, rounded down to even pixels, may
+        // miss the display's shape by a pixel or two: kept, the picture
+        // would leave a row or column of background along an edge, while
+        // viewers map the pointer across the whole frame.
+        if SCStreamConfiguration::class().responds_to(sel!(setPreservesAspectRatio:)) {
+            config.setPreservesAspectRatio(false);
+        }
         config
     };
-    let background = CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
     // SAFETY: the property does not retain `background`; the returned value
     // does, and a caller that can stop waiting before the read keeps
     // another retain from `PreparedCapture::background`.
@@ -426,6 +562,117 @@ pub(crate) struct Stream {
     /// The stream, its output and the output's queue, until it stops.
     running: Option<Running>,
     shared: Arc<Shared>,
+    /// What its interval changes and their completions share.
+    retune: Arc<Retune>,
+    startup: Startup,
+}
+
+/// How a stream started, for `macos_capture_started`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Startup {
+    /// When the start began.
+    pub began: Instant,
+    /// Finding the display among the shareable content.
+    pub lookup: Duration,
+    /// The rest, to the start's completion.
+    pub start: Duration,
+}
+
+/// What a stream's interval changes and their completion handlers share:
+/// the stream, the size and background colour each new configuration
+/// repeats, and the changes in flight.
+struct Retune {
+    stream: Retained<SCStream>,
+    width: u32,
+    height: u32,
+    /// The stream's own background colour, which every configuration it is
+    /// given points at; `Running` keeps it until the stream has stopped.
+    background: CFRetained<CGColor>,
+    updates: Mutex<Updates>,
+}
+// SAFETY: thread C and ScreenCaptureKit's completion queue share this. The
+// stream and the colour are Objective-C and Core Foundation objects,
+// retained and released atomically from any thread, and never mutated here.
+// The stream is only sent asynchronous requests, each answered on
+// ScreenCaptureKit's own queue: one configuration update at a time, from
+// thread C or from the completion of the last, which `updates` serialises
+// under its lock, and none once the stream is stopping. The rest is plain
+// data.
+unsafe impl Send for Retune {}
+// SAFETY: as for `Send`: shared references only read the retained objects
+// and send the stream the requests `updates` allows.
+unsafe impl Sync for Retune {}
+
+/// An interval change ScreenCaptureKit has yet to complete: the
+/// configuration it was handed, with its colour, kept until then, and what
+/// hands over the next.
+struct Update {
+    _prepared: PreparedCapture,
+    retune: Arc<Retune>,
+}
+// SAFETY: the configuration, the colours and the stream are Objective-C and
+// Core Foundation objects, retained and released atomically from any thread;
+// the completion handler, on ScreenCaptureKit's queue, takes this once, and
+// makes the next update only through `Updates`, which keeps one in flight.
+unsafe impl Send for Update {}
+
+impl Retune {
+    /// Hand ScreenCaptureKit `interval`, in a configuration otherwise the
+    /// stream's own, without waiting. Its completion logs a failure and
+    /// hands over the change asked for meanwhile, if any.
+    fn issue(self: Arc<Self>, interval: Duration) {
+        objc2::rc::autoreleasepool(|_| {
+            let prepared = with_background(self.width, self.height, true, self.background.clone());
+            // SAFETY: a fresh configuration, before the stream reads it.
+            unsafe {
+                prepared
+                    .config
+                    .setMinimumFrameInterval(frame_time(interval));
+                prepared.config.setQueueDepth(QUEUE_DEPTH);
+            }
+            let config = prepared.config.clone();
+            let stream = self.stream.clone();
+            let held = Mutex::new(Some(Update {
+                _prepared: prepared,
+                retune: self,
+            }));
+            let handler = RcBlock::new(move |err: *mut NSError| {
+                let Some(Update { _prepared, retune }) = held.lock().take() else {
+                    return;
+                };
+                // SAFETY: the error is null on success or valid for this call.
+                let refused = unsafe { err.as_ref() }.map(|err| failure(Some(err)));
+                let next = {
+                    let mut updates = retune.updates.lock();
+                    if let Some(refused) = &refused
+                        && !updates.stopped()
+                    {
+                        tracing::warn!(
+                            target: "pb_mapper_desktop::session",
+                            event = "macos_capture_interval_refused",
+                            interval_us = interval.as_micros() as u64,
+                            detail = %refused,
+                        );
+                    }
+                    updates.completed()
+                };
+                if let Some(next) = next {
+                    retune.issue(next);
+                }
+            });
+            // SAFETY: a configuration like the stream's, which the handler
+            // keeps, with its colour, until ScreenCaptureKit completes the
+            // update; ScreenCaptureKit copies the handler.
+            unsafe { stream.updateConfiguration_completionHandler(&config, Some(&handler)) };
+        });
+    }
+}
+
+/// `interval` as a time in nanoseconds; zero lets every refresh through.
+fn frame_time(interval: Duration) -> CMTime {
+    let nanos = i64::try_from(interval.as_nanos()).unwrap_or(i64::MAX);
+    // SAFETY: CMTimeMake only fills in a value.
+    unsafe { CMTime::new(nanos, 1_000_000_000) }
 }
 
 /// The output receives the stream's pictures on the queue for as long as
@@ -451,24 +698,36 @@ struct Released {
 unsafe impl Send for Released {}
 
 impl Stream {
-    /// Display `id`'s stream at `width` x `height`, at most `fps` pictures a
-    /// second, started. Thread C has no autorelease pool: this brings its
-    /// own.
-    pub(crate) fn start(id: u32, width: u32, height: u32, fps: u32, waker: &Waker) -> Result<Self> {
-        objc2::rc::autoreleasepool(|_| Self::started(id, width, height, fps, waker))
+    /// Display `id`'s stream at `width` x `height`, at least `interval`
+    /// between pictures (`cadence.rs`), started. Thread C has no autorelease
+    /// pool: this brings its own.
+    pub(crate) fn start(
+        id: u32,
+        width: u32,
+        height: u32,
+        interval: Duration,
+        waker: &Waker,
+    ) -> Result<Self> {
+        objc2::rc::autoreleasepool(|_| Self::started(id, width, height, interval, waker))
     }
 
-    fn started(id: u32, width: u32, height: u32, fps: u32, waker: &Waker) -> Result<Self> {
+    fn started(
+        id: u32,
+        width: u32,
+        height: u32,
+        interval: Duration,
+        waker: &Waker,
+    ) -> Result<Self> {
+        let began = Instant::now();
         let display = display(id)?;
+        let lookup = began.elapsed();
         let filter = filter(&display);
         let prepared = configuration(width, height, true);
         // SAFETY: a fresh configuration, before the stream reads it.
         unsafe {
-            // Give refresh timestamps a 10% margin around the requested
-            // rate. Thread C still applies the negotiated frame cap.
             prepared
                 .config
-                .setMinimumFrameInterval(CMTime::new(9, (fps.clamp(1, 1_000) * 10) as i32));
+                .setMinimumFrameInterval(frame_time(interval));
             prepared.config.setQueueDepth(QUEUE_DEPTH);
         }
         let shared = Arc::new(Shared {
@@ -511,8 +770,15 @@ impl Stream {
         });
         // SAFETY: the handler outlives the call; ScreenCaptureKit copies it.
         unsafe { stream.startCaptureWithCompletionHandler(Some(&handler)) };
+        let retune = Arc::new(Retune {
+            stream: stream.clone(),
+            width,
+            height,
+            background: prepared.background(),
+            updates: Mutex::default(),
+        });
         // Stopped as it drops, should the start fail or time out.
-        let this = Self {
+        let mut this = Self {
             running: Some(Running {
                 stream,
                 output,
@@ -520,10 +786,44 @@ impl Stream {
                 _background: prepared.background,
             }),
             shared,
+            retune,
+            startup: Startup {
+                began,
+                lookup,
+                start: Duration::ZERO,
+            },
         };
         drop(handler);
         answer(started, "stream start")?;
+        this.startup.start = began.elapsed().saturating_sub(lookup);
         Ok(this)
+    }
+
+    /// Run at least `interval` between pictures from ScreenCaptureKit's next
+    /// on, without waiting. A change asked for while another is in flight
+    /// follows it, the newest only.
+    pub(crate) fn set_interval(&self, interval: Duration) {
+        let now = self.retune.updates.lock().ask(interval);
+        if let Some(interval) = now {
+            self.retune.clone().issue(interval);
+        }
+    }
+
+    /// How the stream started.
+    pub(super) fn startup(&self) -> Startup {
+        self.startup
+    }
+
+    /// When its first complete picture arrived.
+    pub(super) fn first_picture(&self) -> Option<Instant> {
+        self.shared.latest.lock().first
+    }
+
+    /// The display times of the complete pictures since the last call, in
+    /// mach absolute time.
+    #[cfg(test)]
+    pub(super) fn display_times(&self) -> Vec<u64> {
+        std::mem::take(&mut self.shared.latest.lock().display_times)
     }
 
     /// Fails once the system stopped the stream.
@@ -583,8 +883,10 @@ impl Stream {
 impl Drop for Stream {
     /// Detaches the output, so that no picture arrives after this, then
     /// stops without waiting. The stream, its output and their queue live
-    /// until the stop is done, on ScreenCaptureKit's completion queue.
+    /// until the stop is done, on ScreenCaptureKit's completion queue. An
+    /// interval change in flight hands over no other.
     fn drop(&mut self) {
+        self.retune.updates.lock().stop();
         let Some(running) = self.running.take() else {
             return;
         };

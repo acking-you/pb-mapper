@@ -10,6 +10,13 @@
 //! wakes thread C. The encoder pushes its output and wakes thread C
 //! (`DRAIN = None`). A new picture is dated by when it reached the stream's
 //! queue, which thread C anchors its pacing on.
+//! The stream's minimum interval between pictures follows the display's
+//! refresh, read again at most once a second, and the session's pace
+//! (`cadence.rs`): a faster pace at once, a slower one once it has held
+//! for a second, two pictures a second while every viewer is paused. New
+//! limits of the same encode size, a frame-rate change, keep the stream and
+//! the encoder (`retune`): the encoder takes the new expected frame rate
+//! live.
 //! A display that sleeps gives the stream nothing: an open, the first
 //! submit after a resume and a stream with no picture light it
 //! (`power.rs`) and fail, and thread C's retry opens a stream once it draws.
@@ -17,7 +24,8 @@
 //! until the display has been dark for `wake::SETTLE`, then does the same.
 
 use super::{
-    capture::{CaptureState, Counts, Stream},
+    cadence::{self, Follow},
+    capture::{CaptureState, Counts, Refresh, Stream},
     encoder::{self, Admit, Encoder},
     platform::ScreenAccess,
     power,
@@ -112,6 +120,13 @@ pub(crate) struct MacVideo {
     encoder: Encoder,
     /// The captured display's id.
     display: u32,
+    /// The encoder's and the stream's size.
+    size: (u32, u32),
+    /// The display's refresh, and when it was last read.
+    refresh: Refresh,
+    refresh_read: Instant,
+    /// The stream's minimum interval between pictures.
+    follow: Follow,
     /// Resumed since the last submit, which then checks that the display
     /// did not fall asleep during the pause.
     resumed: bool,
@@ -141,6 +156,13 @@ const _: () = assert!(
     "a display that turns off under a still screen is found awake within SETTLE before"
 );
 
+/// How often the display's refresh is read again while the stream runs:
+/// a refresh changed without a new size keeps the stream.
+const REFRESH_READ: Duration = Duration::from_secs(1);
+
+/// Where `macos_capture_opened`, `macos_capture_started` and
+/// `macos_capture_interval` go.
+const SESSION_TARGET: &str = "pb_mapper_desktop::session";
 /// Where `macos_capture_timing` goes: with thread C's pacing.
 const TIMING_TARGET: &str = "pb_mapper_desktop::feedback";
 /// Display-to-arrival delays kept per second.
@@ -226,8 +248,10 @@ impl VideoSource for MacVideo {
         encoder::encodes(codec)
     }
     /// The display fitted inside the viewer's limits, its aspect kept,
-    /// never upscaled; the encoder first, whose failure is the codec's. A
-    /// sleeping display is lit instead, and the open fails until it draws.
+    /// never upscaled; the encoder first, whose failure is the codec's. The
+    /// stream starts at the current pace's interval on the display's
+    /// refresh. A sleeping display is lit instead, and the open fails until
+    /// it draws.
     fn open(
         _: &ScreenAccess,
         display: &Display,
@@ -248,9 +272,13 @@ impl VideoSource for MacVideo {
             limits.max_width,
             limits.max_height,
         );
+        let refresh = Refresh::new(display.id);
+        let (mode_hz, link_period) = (refresh.mode_hz(), refresh.link_period());
+        let refresh_hz = cadence::refresh_hz(mode_hz, link_period);
+        let follow = Follow::new(refresh_hz, rate.pace_fps, limits.max_fps);
         let encoder = Encoder::new(codec, width, height, limits.max_fps, rate.bitrate, waker)?;
-        let stream =
-            Stream::start(display.id, width, height, limits.max_fps, waker).map_err(|failure| {
+        let stream = Stream::start(display.id, width, height, follow.applied(), waker).map_err(
+            |failure| {
                 // ScreenCaptureKit may not list a display that fell asleep.
                 if failure_kind(&failure) == Some(FailureKind::DisplayLost)
                     && power::wake([display.id])
@@ -259,12 +287,36 @@ impl VideoSource for MacVideo {
                 } else {
                     failure
                 }
-            })?;
+            },
+        )?;
+        let opened = follow.wanted();
+        let pace_fps = rate.pace_fps.min(limits.max_fps).max(1);
+        tracing::info!(
+            target: SESSION_TARGET,
+            event = "macos_capture_opened",
+            width,
+            height,
+            refresh_hz,
+            mode_hz,
+            link_period_us = link_period.map(|period| period.as_micros() as u64),
+            pace_fps,
+            max_fps = limits.max_fps,
+            n = opened.every,
+            interval_us = opened.interval.as_micros() as u64,
+            drift_ppm = opened
+                .every
+                .zip(link_period)
+                .and_then(|(every, period)| cadence::drift_ppm(every, period, pace_fps)),
+        );
         let now = Instant::now();
         Ok(Self {
             stream,
             encoder,
             display: display.id,
+            size: (width, height),
+            refresh,
+            refresh_read: now,
+            follow,
             resumed: false,
             watch: SleepWatch::default(),
             looked: now,
@@ -279,9 +331,20 @@ impl VideoSource for MacVideo {
     fn codec(&self) -> VideoCodec {
         self.encoder.codec()
     }
+    /// The bitrate, live; and the stream's interval for the pace and, read
+    /// again at most once a second, the display's refresh. Nothing reaches
+    /// ScreenCaptureKit unless the interval changes.
     fn set_rate(&mut self, rate: VideoRate) -> Result<()> {
         rate_bounds(rate.bitrate)?;
         self.encoder.set_bitrate(rate.bitrate);
+        let now = Instant::now();
+        if now >= self.refresh_read + REFRESH_READ {
+            self.refresh_read = now;
+            let changed = self.follow.refresh(self.refresh.hz());
+            self.retime(changed);
+        }
+        let changed = self.follow.pace(rate.pace_fps, now);
+        self.retime(changed);
         Ok(())
     }
     /// Never waits: nothing captured yet, a full encoder or a still screen
@@ -344,6 +407,7 @@ impl VideoSource for MacVideo {
         }
         if self.last_submit.is_none() {
             trace_layout(&taken.picture);
+            self.trace_startup();
         }
         let unit = Unit::of(taken.fresh.is_some(), self.resubmit);
         self.encoder.encode(&taken.picture, self.keyframe, unit)?;
@@ -405,8 +469,67 @@ impl VideoSource for MacVideo {
         self.encoder.pending() + usize::from(self.stream.stopped())
     }
     /// The display may sleep while every viewer is paused, which releases
-    /// the session's activity: the next submit looks.
+    /// the session's activity: the next submit looks. Meanwhile the stream
+    /// delivers two pictures a second, and a resume restores the pace's
+    /// interval before thread C takes the resume's keyframe.
     fn paused(&mut self, paused: bool) {
         self.resumed = !paused;
+        let changed = self.follow.paused(paused);
+        self.retime(changed);
+    }
+    /// Keeps the stream and the encoder for limits of the same encode size:
+    /// the encoder takes the new frame rate as a hint, and the stream the
+    /// interval for it.
+    fn retune(&mut self, display: &Display, limits: VideoLimits) -> Result<bool> {
+        let size = scaled_size(
+            display.width,
+            display.height,
+            limits.max_width,
+            limits.max_height,
+        );
+        if size != self.size || self.stream.stopped() {
+            return Ok(false);
+        }
+        self.encoder.set_expected_fps(limits.max_fps);
+        let changed = self.follow.max_fps(limits.max_fps);
+        self.retime(changed);
+        Ok(true)
+    }
+}
+
+impl MacVideo {
+    /// Hand the stream a new interval, if there is one.
+    fn retime(&self, interval: Option<Duration>) {
+        let Some(interval) = interval else {
+            return;
+        };
+        self.stream.set_interval(interval);
+        let paused = self.follow.is_paused();
+        tracing::debug!(
+            target: SESSION_TARGET,
+            event = "macos_capture_interval",
+            interval_us = interval.as_micros() as u64,
+            n = (!paused).then(|| self.follow.wanted().every).flatten(),
+            paused,
+        );
+    }
+
+    /// How long the stream took to find the display, to start, and to give
+    /// its first picture, as a debug line (`macos_capture_started`).
+    fn trace_startup(&self) {
+        if !tracing::enabled!(target: SESSION_TARGET, tracing::Level::DEBUG) {
+            return;
+        }
+        let startup = self.stream.startup();
+        tracing::debug!(
+            target: SESSION_TARGET,
+            event = "macos_capture_started",
+            lookup_us = startup.lookup.as_micros() as u64,
+            start_us = startup.start.as_micros() as u64,
+            first_picture_us = self
+                .stream
+                .first_picture()
+                .map(|at| at.saturating_duration_since(startup.began).as_micros() as u64),
+        );
     }
 }
