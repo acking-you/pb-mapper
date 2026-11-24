@@ -32,6 +32,9 @@ class MainFlutterWindow: NSWindow {
     // The remote desktop's H.264/H.265 decoder (ui/darwin/DesktopVideo.swift).
     DesktopVideoPlugin.register(
       with: flutterViewController.registrar(forPlugin: "PbMapperDesktopVideo"))
+    // A remote computer's pointer as this Mac's own (ui/darwin/DesktopPointer.swift).
+    DesktopPointerPlugin.register(
+      with: flutterViewController.registrar(forPlugin: "PbMapperDesktopPointer"))
 
     super.awakeFromNib()
   }

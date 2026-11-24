@@ -48,6 +48,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [Viewer fps cap measurements](benchmarks/2026-11-24-viewer-fps-cap/README.md) | the slow-link suite, three runs before and after the viewer's fps cap measured its decoder, raised in steps scaled to the ceiling and drained a backlog instead of freezing until the IDR |
 | [Shared direct cooldown measurements](benchmarks/2026-11-24-direct-cooldown/README.md) | `connect_tcp`'s time to the first byte inside a direct pause, before and after one client's calls share it |
 | [Mac viewer decoder stats](benchmarks/2026-11-24-viewer-decoder-stats/README.md) | the macOS viewer's new decode time and decoder-thread CPU, read by the acceptance tool at 1080p and 4K, against a paced VideoToolbox harness on the same clips |
+| [Native pointer shape measurements](benchmarks/2026-11-24-native-cursor/README.md) | `ui/tool/pointer_latency.dart` on the macOS runner: a pointer shape change through a rebuild and the post-frame pass, against the direct system cursor and runner bitmap calls the cursor session makes, and how long a painted pointer took to draw after a mouse move |
 
 ## Security
 

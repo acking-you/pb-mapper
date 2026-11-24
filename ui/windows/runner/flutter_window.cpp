@@ -27,6 +27,7 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   desktop_video_ = std::make_unique<DesktopVideo>(flutter_controller_->engine(), GetHandle());
   desktop_ime_ = std::make_unique<DesktopIme>(flutter_controller_->engine(), flutter_controller_->view()->GetNativeWindow());
+  desktop_pointer_ = std::make_unique<DesktopPointer>(flutter_controller_->engine());
   desktop_keys_ = std::make_unique<DesktopKeyCapture>(flutter_controller_->engine(), GetHandle());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
@@ -44,6 +45,7 @@ bool FlutterWindow::OnCreate() {
 
 void FlutterWindow::OnDestroy() {
   desktop_keys_.reset();
+  desktop_pointer_.reset();
   desktop_ime_.reset();
   desktop_video_.reset();
   if (flutter_controller_) {

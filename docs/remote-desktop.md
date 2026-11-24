@@ -105,8 +105,12 @@ rotated displays instead of presenting incorrect geometry. The pointer travels
 beside the video: its position always, and its shape where both ends list
 `cursor_shape` (see [Input and cursor](#input-and-cursor)). On a desktop
 viewer in control, this computer's own pointer takes the host's shape over the
-picture, so one pointer shows; a phone paints the shape at the picture's
-scale. A host without shapes (0.11.0) shows the generic arrow, as before.
+picture, so one pointer shows: a shape this computer's system has as its own
+pointer, and any other (an app's own cursor, and on a Mac the busy, help, move
+and diagonal resize pointers) as the host's bitmap made this computer's
+cursor, which moves with the mouse and changes without waiting for a Flutter
+frame. A phone paints the shape at the picture's scale. A host without shapes
+(0.11.0) shows the generic arrow, as before.
 When more than one viewer controls at once and both ends list `peer_cursors`,
 each viewer also sees the others' active pointers in distinct session colours.
 
@@ -2039,6 +2043,57 @@ new one passes over every number a slot holds and the one last asked for,
 so the number Dart shows keeps its definition, and Dart keeps decoded
 shapes by content, never by number.
 
+**The viewer's pointer.** While a desktop viewer controls, the local pointer
+over the picture is one `RemoteShapeCursor` per viewer
+(`remote_cursor_layer.dart`), so Flutter's mouse tracker keeps its session for
+as long as the pointer stays over the picture. That session shows the shape
+itself, the moment the host's shape, the picture's scale or whether the host's
+pointer is under the local one changes: no widget rebuilds, and no frame is
+waited for, where a `MouseRegion` takes a new cursor only in the post-frame
+pass of the frame that rebuilt it. A kind this computer's system has goes to
+the engine's `activateSystemCursor`. Flutter's macOS embedder knows no busy,
+progress, help, move or diagonal resize pointer and shows those as the arrow,
+so on a Mac they take the bitmap path, as do `up_arrow` and `custom`
+everywhere. The bitmap path scales the host's bitmap to the picture (one host
+pixel as 0.35 to 2 logical pixels, at most 128 logical pixels a side, times
+the device pixel ratio, area-averaged in premultiplied space) and hands it to
+the runner's `pb_mapper/desktop_pointer` channel
+(`ui/lib/src/ffi/desktop_pointer.dart`): `cursor_create {id, rgba, width,
+height, hot_x, hot_y, scale}` in straight RGBA and physical pixels, `scale`
+being the device pixel ratio the bitmap was made for, `cursor_set {id}` and
+`cursor_delete {id}`. The viewer keeps 16 such cursors, by content, by scale
+to within 2 % and by device pixel ratio (the same pixels at another ratio are
+another size on macOS and Linux), and deletes the oldest past that, all of
+them when the host's shape is forgotten (another viewer), and all when the
+viewer closes. A `cursor_create` for an id a runner holds replaces that
+cursor: a hot restart starts Dart's ids again while the runner keeps its
+cursors. Each runner shows the cursor on its platform thread at once:
+
+- Windows (`ui/windows/runner/desktop_pointer.cpp`): `CreateIconIndirect`
+  from a 32-bpp top-down DIB section with its alpha and a 1-bpp AND mask from
+  it, `SetCursor`, and `DestroyIcon`, kept until another cursor shows when it
+  is still the current one. The engine answers `WM_SETCURSOR` over the client
+  area without setting a cursor, so this one stays until Dart activates a
+  system cursor.
+- macOS (`ui/darwin/DesktopPointer.swift`, in the macOS runner only):
+  `NSCursor(image:hotSpot:)` from the bitmap at `scale`, its size and
+  hotspot in points. It tells `FlutterView` through its
+  `didUpdateMouseCursor:`, so the view's `cursorUpdate:` restores this
+  cursor rather than the last system one; an engine without that method gets
+  a local `cursorUpdate` monitor that keeps it instead.
+- Linux (`ui/linux/runner/desktop_pointer.cc`): `gdk_cursor_new_from_surface`
+  from a cairo surface at `scale` (a whole number, as GDK takes it), set on
+  the toplevel's `GdkWindow`, where the engine sets its own cursors. GDK
+  keeps a hotspot in whole logical pixels on X11 and Wayland, and a Wayland
+  cursor buffer must be a multiple of its scale, so transparent pixels pad
+  the bitmap on the left and top until the hotspot is on a logical pixel's
+  corner, and on the right and bottom to whole logical pixels.
+
+A call that fails (no runner, or one that cannot make the cursor) paints the
+shape under a hidden pointer for the rest of that viewer, as a viewer did
+before. Viewing only, with the host's pointer elsewhere, and on a phone, the
+shape is painted as before.
+
 ### Constants
 
 | What | Value |
@@ -2671,7 +2726,10 @@ What each platform's new code has been through:
     input method (WeType, in its Chinese mode):
     - in control, the local pointer took the host's arrow, I-beam, resize and
       hand, and hid over the custom shape with the bitmap painted at it, so
-      one pointer showed; outside the picture it was the arrow again;
+      one pointer showed; outside the picture it was the arrow again. This
+      run predates native pointer shapes, which make the custom shape the
+      local pointer itself and have not run on Windows (see **Native pointer
+      shapes** below);
     - in the local mode, `nihao` composed with the candidates at the remote
       pointer and sent nothing, and Space sent exactly `你好`;
     - Enter and Backspace stayed with the input method while it composed,
@@ -2727,6 +2785,27 @@ What each platform's new code has been through:
   app with the Swift decoder. The iOS app links the FFI static library and
   exports its entry points. The M3 Pro viewer decoded H.264 and H.265 in
   hardware and wrote a thumbnail on disconnect. iOS device testing is pending.
+- **Native pointer shapes.** The desktop viewers' host bitmaps as their own
+  cursors (`pb_mapper/desktop_pointer`, see
+  [The viewer's pointer](#input-and-cursor)) have run only on a Mac.
+  - The Dart side ran in widget tests, with the engine's and the runner's
+    channels mocked and the target platform set to Windows, macOS and Linux.
+  - The macOS runner ran in a release build of `ui/tool/pointer_latency.dart`
+    ([the 2026-11-24 record](benchmarks/2026-11-24-native-cursor/README.md)).
+    It makes the calls the cursor session makes and times them against the
+    rebuild they replace, and times the painted pointer the native one
+    replaces. A synthetic mouse inside the window stood for the pointer, so
+    nothing there shows how a cursor looks.
+  - The Windows and Linux runners build only in CI, and were checked here
+    only against stub headers; the Linux runner's hotspot padding also ran
+    against fake cairo and GDK calls.
+  - Not run anywhere: a real pointer over `desktop_ui_host`'s bands on any
+    viewer, the macOS one included (the host bitmap's look, size and hotspot,
+    and a busy band showing the host's hourglass); on Windows, a custom shape
+    and a Mac host's open hand as the cursor, and
+    `GetGuiResources(GR_USEROBJECTS)` across 200 shape changes; on Linux,
+    X11 and Wayland, at scale 1 and 2; and a high-speed camera over a
+    painted and a native pointer following the mouse.
 - **Older peers.** A host and a viewer of this revision each ran against
   the other side built from the tree before it (`151ed8d7`, 0.11.0's desktop
   protocol), with the SDK's synthetic host (`desktop_loopback --serve`) and

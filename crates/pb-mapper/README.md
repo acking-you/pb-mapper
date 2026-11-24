@@ -245,7 +245,7 @@ acceptance and the 60+ FPS end-to-end UI target are still unverified. See the
 | `desktop_control` | any OS, against a host you own | Taking control, `display_point`, batches, `text_chunks`, every `InputError`, `release_input` on the way out |
 | `desktop_supervised` | any OS, no setup | `Supervisor` through an H.265 decoder failure, a host restart, a stall and a stop |
 | `desktop_display_mode` | any OS, against a host you own; `desktop_loopback --serve` is the safe one | The host display's `ModeList`; `--fit WxH`, `--mode WxH`, `--original`; a `DisplayModeError` the viewer refuses with, and the host's refusal notice; the mode put back at the disconnect |
-| `desktop_ui_host` | any OS, with a recorded H.264 clip | A host whose desktop is the clip, never this computer's: a pointer shape per fifth of the display (arrow, I-beam, resize, hand, custom), every input and shape it applies logged, `--no-shapes`, `--macos`, `--view-only`, `--wander`, `--relay-only`; for checking the viewer apps on a real screen (`scripts/test/desktop-ui-acceptance.md`) |
+| `desktop_ui_host` | any OS, with a recorded H.264 clip | A host whose desktop is the clip, never this computer's: a pointer shape per sixth of the display (arrow, I-beam, resize, hand, custom, busy), every input and shape it applies logged, `--no-shapes`, `--macos`, `--view-only`, `--wander`, `--relay-only`; for checking the viewer apps on a real screen (`scripts/test/desktop-ui-acceptance.md`) |
 
 `cargo run -p pb-mapper --features desktop --example desktop_loopback` needs no
 relay of your own and runs in CI.

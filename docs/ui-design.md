@@ -435,11 +435,15 @@ picture went stale is sent with the next fresh picture.
 The arrow takes the host's pointer shape where the host sends one
 (`remote_cursor_layer.dart`). A desktop viewer in control turns its own
 pointer into that shape over the picture and paints nothing, so one pointer
-shows; a custom shape hides the local pointer and paints the bitmap under
-it; viewing only, or when the host's pointer is elsewhere, the bitmap is
-painted at the host's pointer. A phone paints the bitmap at the picture's
-scale, at least 32 logical pixels on its longer side. A host that sends no
-shape gets the arrow, as before.
+shows: a shape this computer's system has as its system pointer, and any
+other (`custom`, `up_arrow`, and on a Mac the busy, progress, help, move and
+diagonal resize pointers) as the host's bitmap, scaled to the picture and
+made this computer's cursor through the runner's `pb_mapper/desktop_pointer`
+channel. Only where that channel is missing (iOS and Android) or a call to
+it fails is the bitmap painted under a hidden pointer. Viewing only, or when
+the host's pointer is elsewhere, the bitmap is painted at the host's pointer.
+A phone paints the bitmap at the picture's scale, at least 32 logical pixels
+on its longer side. A host that sends no shape gets the arrow, as before.
 
 How touch, the mouse and keys become remote input is in
 [the remote desktop's documentation](remote-desktop.md#gestures-keys-and-modifiers).
