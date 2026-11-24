@@ -3729,18 +3729,25 @@ Dart reads what is missing from the `decoders` answer
 (`DesktopDecoders.installable` and `missing`, `installHint`):
 
 - Windows, `installable` with `hevc`, on an H.264 session with the codec on
-  Auto: the HEVC Video Extensions, whose button opens Microsoft Store product
-  `9NMZLZ57R3T7` (`ms-windows-store://pdp/?ProductId=…`, or the Store's web
-  page where Windows has no Store app). Installed, their MFT is what the
-  probe finds once the app runs again (the store probes once a run).
+  Auto: the HEVC Video Extensions, Microsoft's paid Store app, whose button
+  opens Microsoft Store product `9NMZLZ57R3T7`: in the Store app
+  (`ms-windows-store://pdp/?ProductId=…`) where its scheme is registered
+  (`canLaunchUrl`, which reads the registry and opens nothing; Windows may
+  answer a scheme nothing handles with its own dialog rather than fail),
+  else on the Store's web page. A PC whose maker included the extensions has
+  their MFT and no hint. Installed, their MFT is what the probe finds once
+  the app runs again (the store probes once a run).
 - Linux, from an answer the runner gave (not a failed probe, nor under the
-  software renderer, where an install changes nothing): no `h264` is
-  GStreamer's decoders missing, hinted on a JPEG session under either codec
-  preference, with the command that installs the user guide's "Always" and
-  "Software decoding" rows on Debian and Ubuntu, Fedora or Arch, read from
-  `os-release` (`ID`, then `ID_LIKE`); no `h265` is no hardware decoder for
-  it, hinted on an H.264 session on Auto. Both link to the guide's package
-  table, and the module, like the store, looks once a run.
+  software renderer, nor from an app built without its decoder module, the
+  bundle's `lib/libpb_mapper_desktop_video.so`, where an install changes
+  nothing): no `h264` is GStreamer's decoders missing, hinted on a JPEG
+  session under either codec preference, with the command that installs the
+  user guide's "Always" and "Software decoding" rows on Debian and Ubuntu,
+  Fedora or Arch, read from `os-release` (`ID`, then `ID_LIKE`); no `h265`
+  is no hardware decoder for it, hinted on an H.264 session on Auto, whose
+  line names the video driver and, on Intel and AMD before GStreamer 1.24,
+  GStreamer's VA-API plugin. Both link to the guide's package table, and the
+  module, like the store, looks once a run.
 - An H.265 decoder that failed and was dropped for the run is not missing.
 
 **Units.** `PbDesktopVideoMetaV1.flags` and the JNI meta carry `FLAG_H265`

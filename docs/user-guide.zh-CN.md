@@ -348,7 +348,7 @@ flutter run
 | AMD 显卡 | `mesa-va-drivers`；GStreamer 1.24 之前另加 `gstreamer1.0-vaapi` | RPM Fusion 的 `mesa-va-drivers-freeworld` | `mesa` |
 | NVIDIA 显卡 | 专有驱动 | RPM Fusion 的 `akmod-nvidia` 与 `xorg-x11-drv-nvidia-cuda-libs` | `nvidia-utils` |
 
-装上某个软件就能让画面更好时，连接质量面板顶部和 **显示 → 编码** 会提示，直到选择 **不再显示**，这台电脑会记住。Windows 上，显卡能解码 H.265 却缺少微软的 HEVC 视频扩展、会话因此只用 H.264 时，**获取 HEVC 视频扩展** 会在 Microsoft Store 中打开它。Linux 上，缺少 GStreamer 的视频解码器（画面此时是 JPEG）时，提示会给出在 Debian、Ubuntu、Fedora 或 Arch 上安装表中前两行的命令；没有 H.265 硬件解码器时，提示指向显卡那几行；**安装指南** 打开本节。H.265 相关的提示只在 **编码** 为 **自动** 时出现。应用每次启动只查找一次解码器，所以装好后请（从托盘）退出应用再重新打开。
+装上某个软件就能让画面更好时，连接质量面板顶部和 **显示 → 编码** 会提示，直到选择 **不再显示**，这台电脑会记住。Windows 上，显卡能解码 H.265 却缺少微软的 HEVC 视频扩展、会话因此只用 H.264 时，**获取 HEVC 视频扩展** 会在 Microsoft Store 中打开它，它在 Store 中是付费应用；厂商已预装它的电脑不会出现这条提示。Linux 上，缺少 GStreamer 的视频解码器（画面此时是 JPEG）时，提示会给出在 Debian、Ubuntu、Fedora 或 Arch 上安装表中前两行的命令；没有 H.265 硬件解码器时，提示指向显卡那几行：视频驱动，以及 GStreamer 1.24 之前 Intel 和 AMD 显卡还需的 `gstreamer1.0-vaapi`；**安装指南** 打开本节。H.265 相关的提示只在 **编码** 为 **自动** 时出现。应用每次启动只查找一次解码器，所以装好后请（从托盘）退出应用再重新打开。
 
 **打字。** **快捷键 → 输入法** 按电脑选择键盘怎么输入。**本机**（默认）由你自己的输入法组字，中文、日文、韩文都可以，候选窗出现在远程指针旁边，上屏的文字发给对方；单独按一下 Shift 或 Ctrl+Space 仍在本机切换输入法。有些输入法（例如 Windows 上的微信输入法）把按住 Shift 点鼠标也当作这一切换，所以 Shift+点击之后本机输入法可能变成英文，在其他程序里也一样；再单独按一下 Shift 即可切回。**远程电脑** 按键位发送按键，由对方的键盘布局和输入法打字；快捷键里的 **切换输入法** 向 Windows 发送 Win+Space，向 Mac 发送 Ctrl+Space。对方是 Mac 时，快捷键换成 Mac 自己的 **切换应用**（⌘Tab）、**强制退出**（⌥⌘Esc）和 **聚焦搜索**（⌘Space），手机的修饰键栏显示 ⌃ ⌥ ⇧ ⌘。Mac 与其他电脑之间默认互换 Cmd 和 Ctrl（同一菜单里的 **Cmd 键用作 Ctrl** 或 **Ctrl 键用作 Cmd**）。对方的 pb-mapper 版本较旧时，字母、数字和空格作为按键发送，其余作为文字发送。
 

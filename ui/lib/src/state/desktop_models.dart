@@ -223,7 +223,9 @@ enum DecoderInstallHint {
   /// itself, are missing), so the picture is JPEG at up to 8 FPS.
   gstreamer,
 
-  /// Linux: no hardware H.265 decoder, which a GPU's video driver may add.
+  /// Linux: no hardware H.265 decoder, which a GPU's video driver may add
+  /// (on Intel and AMD before GStreamer 1.24, with GStreamer's VA-API
+  /// plugin).
   gpuDriver,
 }
 
