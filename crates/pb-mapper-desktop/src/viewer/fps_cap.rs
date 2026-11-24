@@ -26,6 +26,15 @@
 //! MediaCodec) hides a backlog from the sink's queue, but not from the time it
 //! takes from a hand-off to that unit's presentation: that lag rising well
 //! above its own floor lowers the cap too.
+//!
+//! The display the viewer's window is on bounds it all: a frame the display
+//! has no refresh for is superseded unseen, so the host is asked for none
+//! (`set_display`). That rate is the ceiling beneath which backlog lowers
+//! and to which raises return, and removing the backlog cap sends it, not
+//! the session's maximum, which would clear the host's limit. A change of it
+//! goes to the host at the next tick, whatever the hold and spacing of
+//! backlog changes. A frame rate the user chose ignores it: frames that
+//! arrive fresher are what they asked for.
 use crate::{QualityPreset, qos::ceiling_fps};
 use pb_mapper_core::timeout::RetryBackoff;
 use std::{
@@ -249,15 +258,22 @@ struct Probe {
 /// Owned by the sink. `tick` runs every viewer tick while the session
 /// streams and is not paused, from `IDR_GRACE` after the consumer took its
 /// first IDR; otherwise `freeze` keeps the cap as it is, but for a probe
-/// under watch, which it takes back.
+/// under watch, which it takes back. Either sends a new display rate.
 pub(crate) struct FpsCap {
     /// The session's `limits.max_fps`. The host clears its cap for any value
-    /// at or above it, so this is what removing the cap sends: the preset's
-    /// ceiling would outlive a switch to a faster preset.
+    /// at or above it, so this is what removing the cap sends while the
+    /// display allows it: the preset's ceiling would outlive a switch to a
+    /// faster preset.
     max_fps: u32,
     /// `max_fps` is the user's own choice, the host's ceiling for every
     /// preset (`fps_override`), and so the cap's.
     fps_override: bool,
+    /// The refresh rate of the display the viewer's window is on, in fps,
+    /// once the viewer said; ignored with `fps_override`.
+    display_fps: Option<u32>,
+    /// What the host was last sent: `max_fps`, no cap, until anything is.
+    sent: u32,
+    /// The backlog cap, which the display's rate bounds in turn.
     cap: Option<u32>,
     last_change: Option<Instant>,
     /// Consecutive ticks with more than `BACKLOG_HIGH` units queued, and with
@@ -283,6 +299,8 @@ impl FpsCap {
         Self {
             max_fps,
             fps_override,
+            display_fps: None,
+            sent: max_fps,
             cap: None,
             last_change: None,
             high_ticks: 0,
@@ -297,6 +315,13 @@ impl FpsCap {
             probe_backoff: RetryBackoff::new(PROBE_BACKOFF_MIN, PROBE_BACKOFF_MAX),
             probe_after: None,
         }
+    }
+
+    /// The display the viewer's window is on now refreshes `fps` times a
+    /// second (`MIN_VIEWER_FPS..=MAX_FPS`). The next tick, or freeze, sends
+    /// what that changes.
+    pub fn set_display(&mut self, fps: u32) {
+        self.display_fps = Some(fps);
     }
 
     /// The sink opened a backlog episode or dropped its queue to the next IDR.
@@ -338,25 +363,28 @@ impl FpsCap {
 
     /// Paused, or the host does not stream: nothing is judged, and the hold
     /// toward a raise starts over afterwards. A probe under watch is taken
-    /// back, without a verdict: the cap to send then, so the host never
-    /// stays above what the consumer was seen to take.
+    /// back, without a verdict, so the host never stays above what the
+    /// consumer was seen to take. What to send then, if anything: that, or a
+    /// new display rate, which applies at once.
     pub fn freeze(&mut self, now: Instant) -> Option<u32> {
         self.high_ticks = 0;
         self.lag_ticks = 0;
         self.short_since = None;
         self.backlog = false;
         self.meter.reset();
-        let probe = self.probe.take()?;
-        self.cap = Some(probe.from);
-        self.last_change = Some(now);
-        Some(probe.from)
+        if let Some(probe) = self.probe.take() {
+            self.cap = Some(probe.from);
+            self.last_change = Some(now);
+        }
+        self.send()
     }
 
-    /// The fps to send the host, when the cap changes: lowered under backlog
-    /// to a share of what the consumer can take, at most halved per change
-    /// when that is only what it presented; raised after 3 s without backlog,
-    /// in steps scaled to the ceiling up to just below a known capacity and
-    /// by watched probes above it; removed at the ceiling.
+    /// The fps to send the host, when what it was sent last no longer
+    /// holds: the cap lowered under backlog to a share of what the consumer
+    /// can take, at most halved per change when that is only what it
+    /// presented; raised after 3 s without backlog, in steps scaled to the
+    /// ceiling up to just below a known capacity and by watched probes above
+    /// it; removed at the ceiling. A new display rate goes at once.
     pub fn tick(
         &mut self,
         now: Instant,
@@ -364,10 +392,38 @@ impl FpsCap {
         direct: bool,
         quality: QualityPreset,
     ) -> Option<u32> {
+        self.judge(now, observed, direct, quality);
+        self.send()
+    }
+
+    /// What removing the backlog cap sends: the display's rate where that is
+    /// below the session's maximum and the user chose no frame rate, else
+    /// the maximum, which clears the host's cap whatever the preset.
+    fn release(&self) -> u32 {
+        self.display_fps
+            .filter(|display| !self.fps_override && *display < self.max_fps)
+            .unwrap_or(self.max_fps)
+    }
+
+    /// What the host should be capped at: the backlog cap within the
+    /// display's rate.
+    fn wire(&self) -> u32 {
+        let release = self.release();
+        self.cap.map_or(release, |cap| cap.min(release))
+    }
+
+    /// The value for the host, unless it was sent last.
+    fn send(&mut self) -> Option<u32> {
+        let wire = self.wire();
+        (std::mem::replace(&mut self.sent, wire) != wire).then_some(wire)
+    }
+
+    /// Moves the backlog cap for this tick; `send` says what that changes.
+    fn judge(&mut self, now: Instant, observed: Observed, direct: bool, quality: QualityPreset) {
         let ceiling = if self.fps_override {
             self.max_fps
         } else {
-            ceiling_fps(quality).min(self.max_fps)
+            ceiling_fps(quality).min(self.release())
         };
         if self
             .quality
@@ -438,7 +494,7 @@ impl FpsCap {
                 self.short_since = None;
                 self.cap = Some(from);
                 self.last_change = Some(now);
-                return Some(from);
+                return;
             }
             if now.saturating_duration_since(probe.at) >= PROBE_WATCH {
                 self.probe = None;
@@ -463,7 +519,7 @@ impl FpsCap {
                 lowered = lowered.max(current / 2);
             }
             if lowered >= current || !settled {
-                return None;
+                return;
             }
             if self.probe.take().is_some() {
                 self.probe_failed(now);
@@ -471,22 +527,24 @@ impl FpsCap {
             self.capacity = (capacity > 0.0).then_some(capacity);
             self.cap = Some(lowered);
             self.last_change = Some(now);
-            return Some(lowered);
+            return;
         }
 
-        let cap = self.cap?;
+        let Some(cap) = self.cap else {
+            return;
+        };
         if self.probe.is_some()
             || !settled
             || self
                 .short_since
                 .is_none_or(|since| now.saturating_duration_since(since) < CAP_UP_HOLD)
         {
-            return None;
+            return;
         }
         let raised = match self.capacity {
             Some(capacity) if cap >= hold(capacity) => {
                 if self.probe_after.is_some_and(|after| now < after) {
-                    return None;
+                    return;
                 }
                 self.probe = Some(Probe {
                     from: cap,
@@ -501,13 +559,9 @@ impl FpsCap {
             }
         };
         self.last_change = Some(now);
-        if raised >= ceiling {
-            self.cap = None;
-            Some(self.max_fps)
-        } else {
-            self.cap = Some(raised);
-            Some(raised)
-        }
+        // At the ceiling the cap goes, which sends `release`: never past
+        // the display's rate.
+        self.cap = (raised < ceiling).then_some(raised);
     }
 
     fn probe_failed(&mut self, now: Instant) {
@@ -541,7 +595,7 @@ fn probe_step(capacity: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::QualityPreset::{Balanced, Quality};
+    use crate::QualityPreset::{Balanced, Quality, Smooth};
 
     /// An fps cap on a 250 ms tick, and the consumer the sink reports to it.
     struct Ticks {
@@ -978,5 +1032,121 @@ mod tests {
         ticks.presented(4, Duration::from_millis(200));
         ticks.consumer(4, false);
         assert_eq!(ticks.tick(16.0, 0, false), Some(15));
+    }
+
+    /// The display the window is on bounds a Smooth session: moved to a
+    /// slower display the host is lowered at the next tick, and moved back
+    /// it is raised at the next tick, with no hold; a change undone before
+    /// that tick sends nothing. Inside the second between backlog changes a
+    /// move still goes at once, and backlog goes on lowering beneath it.
+    #[test]
+    fn a_display_change_goes_at_once_and_backlog_lowers_beneath_it() {
+        let mut ticks = Ticks::new(120, false);
+        ticks.quality = Smooth;
+        ticks.quiet(4, 120.0, 0, true);
+        ticks.cap.set_display(100);
+        assert_eq!(ticks.tick(120.0, 0, true), Some(100));
+        ticks.quiet(4, 100.0, 0, true);
+        ticks.cap.set_display(120);
+        assert_eq!(ticks.tick(100.0, 0, true), Some(120));
+        ticks.cap.set_display(60);
+        ticks.cap.set_display(120);
+        ticks.quiet(4, 120.0, 0, true);
+
+        // From the display's 100, at most halved at once by backlog.
+        ticks.cap.set_display(100);
+        assert_eq!(ticks.tick(120.0, 0, true), Some(100));
+        ticks.quiet(1, 80.0, 3, true);
+        assert_eq!(ticks.tick(80.0, 3, true), Some(72));
+        // A quarter-second later the window is on a 60 Hz display.
+        ticks.cap.set_display(60);
+        assert_eq!(ticks.tick(72.0, 0, true), Some(60));
+        // Backlog beneath the display's 60, once a second has passed since
+        // the last backlog change.
+        ticks.quiet(2, 55.0, 3, true);
+        assert_eq!(ticks.tick(55.0, 3, true), Some(49));
+        // The backlog cap stays beneath a faster display.
+        ticks.cap.set_display(120);
+        ticks.quiet(4, 49.0, 1, true);
+    }
+
+    /// Recovered from backlog, raises stop at the display's rate and send
+    /// it, never the session's maximum, which would clear the host's limit
+    /// and let it send what the display cannot show.
+    #[test]
+    fn a_backlog_recovery_sends_the_display_rate_not_the_maximum() {
+        let mut ticks = Ticks::new(120, false);
+        ticks.quality = Smooth;
+        ticks.cap.set_display(60);
+        assert_eq!(ticks.tick(60.0, 0, true), Some(60));
+        ticks.cap.on_backlog();
+        assert_eq!(ticks.tick(40.0, 0, true), Some(36));
+        ticks.cap.forget();
+        let mut caps = Vec::new();
+        for tick in 1..=40 {
+            if let Some(cap) = ticks.tick(40.0, 0, true) {
+                caps.push((tick, cap));
+            }
+        }
+        assert_eq!(caps, [(13, 46), (17, 58), (21, 60)]);
+        // Back on a 120 Hz display: the cap is cleared at once.
+        ticks.cap.set_display(120);
+        assert_eq!(ticks.tick(60.0, 0, true), Some(120));
+    }
+
+    /// A frame rate the user chose is theirs on any display: a slower one
+    /// sends nothing, backlog lowers from the chosen rate, and recovery
+    /// clears the cap with the session's maximum.
+    #[test]
+    fn a_chosen_frame_rate_ignores_the_display() {
+        let mut ticks = Ticks::new(120, true);
+        ticks.cap.set_display(60);
+        ticks.quiet(4, 120.0, 0, true);
+        ticks.cap.on_backlog();
+        assert_eq!(ticks.tick(100.0, 0, true), Some(90));
+        ticks.cap.forget();
+        let mut caps = Vec::new();
+        for tick in 1..=30 {
+            if let Some(cap) = ticks.tick(90.0, 0, true) {
+                caps.push((tick, cap));
+            }
+        }
+        assert_eq!(caps, [(13, 113), (17, 120)]);
+    }
+
+    /// Paused, or before the consumer is judged, a display change goes at
+    /// the next tick all the same, under every preset: a Balanced session
+    /// is held to a 50 Hz display, and one that switches to Smooth stays
+    /// within a 60 Hz one. A display faster than a probe under watch leaves
+    /// it be: a pause still takes it back.
+    #[test]
+    fn a_display_change_goes_while_frozen_too() {
+        fn freeze(ticks: &mut Ticks) -> Option<u32> {
+            ticks.now += Duration::from_millis(250);
+            ticks.cap.freeze(ticks.now)
+        }
+        let mut ticks = Ticks::new(120, false);
+        ticks.cap.set_display(50);
+        assert_eq!(freeze(&mut ticks), Some(50));
+        assert_eq!(freeze(&mut ticks), None);
+        ticks.cap.set_display(60);
+        assert_eq!(freeze(&mut ticks), Some(60));
+        ticks.quality = Smooth;
+        ticks.quiet(20, 60.0, 0, true);
+
+        // Raised to 15 by the 16 measured, then probed to 17, while the
+        // window moves to a 30 Hz display.
+        let mut ticks = Ticks::measured_16();
+        ticks.quiet_consumer(12, 3, false, 0);
+        ticks.consumer(3, false);
+        assert_eq!(ticks.tick(12.0, 0, false), Some(15));
+        ticks.quiet_consumer(3, 4, false, 0);
+        ticks.consumer(4, false);
+        assert_eq!(ticks.tick(15.0, 0, false), Some(17));
+        ticks.cap.set_display(30);
+        ticks.consumer(4, false);
+        assert_eq!(ticks.tick(17.0, 0, false), None);
+        assert_eq!(freeze(&mut ticks), Some(15));
+        assert_eq!(freeze(&mut ticks), None);
     }
 }

@@ -751,6 +751,49 @@ async fn host_stats_reach_the_viewer_status() {
     viewer.stop().await.unwrap();
 }
 
+/// The display the window is on caps the host at its rate from the next
+/// tick, before any picture is judged, with the `FpsCap` every host takes; a
+/// fractional mode asks the whole rate, back on a display as fast as the
+/// session's maximum the cap is cleared, and a value that is no rate
+/// changes nothing. A frame rate the user chose ignores the display.
+#[tokio::test]
+async fn the_window_display_caps_the_host_at_its_rate() {
+    async fn next_cap(host: &mut DuplexStream) -> u32 {
+        match until(host, |m| matches!(m, ViewerMessage::FpsCap { .. })).await {
+            ViewerMessage::FpsCap { fps } => fps,
+            other => panic!("expected an fps cap, got {other:?}"),
+        }
+    }
+    async fn no_cap(host: &mut DuplexStream) {
+        let sent = tokio::time::timeout(3 * VIEWER_TICK, next_cap(host)).await;
+        assert!(sent.is_err(), "{sent:?}");
+    }
+    let at_120 = |fps_override| ViewerConfig {
+        limits: VideoLimits::for_viewer(120.0),
+        fps_override,
+        ..config()
+    };
+    let (viewer, mut host, _) = connect_with(at_120(false), accepted()).await;
+    let viewer = viewer.unwrap();
+    send(&mut host, state(1, false), None).await;
+    viewer.set_display_refresh(59.94);
+    assert_eq!(next_cap(&mut host).await, 60);
+    viewer.set_display_refresh(f64::NAN);
+    no_cap(&mut host).await;
+    viewer.set_display_refresh(119.88);
+    assert_eq!(next_cap(&mut host).await, 120);
+    drop(host);
+    viewer.stop().await.unwrap();
+
+    let (viewer, mut host, _) = connect_with(at_120(true), accepted()).await;
+    let viewer = viewer.unwrap();
+    send(&mut host, state(1, false), None).await;
+    viewer.set_display_refresh(60.0);
+    no_cap(&mut host).await;
+    drop(host);
+    viewer.stop().await.unwrap();
+}
+
 /// To a host that listed `arrival_time` and `keyframe_seq`, a probe echo
 /// and a receipt carry when the probe, or the unit, was read, on the
 /// session's clock,
