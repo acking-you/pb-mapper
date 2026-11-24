@@ -198,7 +198,7 @@ local**. **Shortcuts → Input method** chooses whether your own input method
 composes or the remote computer's, and the pointer takes the remote
 computer's shape.
 
-**In your own app:** `pb-mapper = { version = "0.12", features = ["desktop"] }`
+**In your own app:** `pb-mapper = { version = "0.13", features = ["desktop"] }`
 gives you the host, the viewer's encoded picture for your own decoder, input,
 status streams (`Host::watch`, `Viewer::watch`), `supervisor::Supervisor` to
 keep a viewer connected, and `trust::TrustFile` to keep a host's invitation
@@ -224,7 +224,7 @@ own program:
 
 ```toml
 [dependencies]
-pb-mapper = "0.12"
+pb-mapper = "0.13"
 tokio = { version = "1", features = ["full"] }
 ```
 
