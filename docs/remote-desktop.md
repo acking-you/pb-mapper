@@ -250,10 +250,37 @@ before then still drags: press, move and release go together, and the host
 re-checks the held press's authorisation when it lets it go. A quick second
 tap is a second click, which is a double click.
 
-With a mouse or a touchpad, buttons and the wheel go to the remote computer
-(a notch per 30 px of scrolling); Ctrl with the wheel, or a touchpad pinch,
-zooms the picture here. A Windows touchscreen uses the desktop viewer with
-direct touch.
+With a mouse or a touchpad, buttons and the wheel go to the remote computer;
+Ctrl with the wheel, or a touchpad pinch, zooms the picture here. A Windows
+touchscreen uses the desktop viewer with direct touch.
+
+A notch of the wheel here is one notch there. Each Flutter embedder reports
+a notch as a distance of its own, which the viewer divides back out: on
+Windows `lines × 100 / 3` physical pixels, cut to a whole number, where
+`lines` is how many lines a notch scrolls (`SPI_GETWHEELSCROLLLINES`, which
+the runner reads as it starts and answers as `wheel_lines` on
+`pb_mapper/desktop_pointer`), so 100 / DPR logical pixels at the default 3;
+40 logical pixels on macOS and 53 on Linux; elsewhere 30. Before, every
+viewer took 30 px for a notch, so one notch of a Windows viewer at 100 %
+reached the host as 3 or 4 notches, and those of Mac and Linux viewers in
+1, 1, 2 and 2, 2, 1 patterns. A touchpad's travel goes as it moves to a host
+that lists `wheel_hires` (Windows and macOS after 0.12.1): `Input::Scroll` in
+1/120 of a notch, 1.2 units a logical pixel, so a notch is 100 px of travel,
+marked `continuous`; a wheel's notch goes there as 120 units, not
+continuous. Toward an older host the travel goes in notches of 30 px.
+Whatever falls short of a whole step waits for the next event.
+
+Flutter passes on no momentum of the system's (macOS drops its momentum
+phase, Windows its DirectManipulation inertia, and GTK has none), so a
+touchpad fling would stop on the host the moment the fingers lift. The
+viewer carries it on itself: it tracks the pan's velocity as this platform's
+scroll views do, and a lift faster than 50 px/s goes on, frame by frame, as
+those scroll views decelerate: UIKit's 0.998 a millisecond on a Mac or iPad,
+Android's curve on Windows, Linux and Android, until it slows below 20 device
+pixels a second. A fling of 3 750 px/s travels about 1 870 px over 3 s on a
+Mac and about 1 930 px over 1.2 s elsewhere (the viewer's tests). Fingers
+back on the touchpad, a new pan, a click, a wheel, focus or control lost and
+a new picture generation stop it, and a pinch flings nothing.
 
 ### Modifiers
 
@@ -853,11 +880,18 @@ refused over such a grant (`HELPER_OUTDATED`, `HELPER_FOREIGN_APP`), since
 configuring it from here would replace its view-only, relay-only or paused
 policy, and under another service name its invitation.
 
-Protocol 11 is the current one, with the pipes
-`pb-mapper.desktop-helper.v11` and `pb-mapper.desktop-background.v11`. It
-adds `Request::Adapter`, which the host sends only for a viewer that decodes
-H.265, just before it would ask `Request::H265`: the worker answers with the
-GPU that drives its display and that GPU's driver (`adapter`: the adapter's
+Protocol 12 is the current one, with the pipes
+`pb-mapper.desktop-helper.v12` and `pb-mapper.desktop-background.v12`. Its
+`Request::Input` may carry `Input::Scroll`, scrolling in 1/120 of a notch
+(see [Input and cursor](#input-and-cursor)), which the worker injects as
+`SendInput` wheel data, and the `Start` answer's caps say whether the worker
+scrolls that finely (`hires_wheel`), which the host then lists to its viewers
+as `wheel_hires`. Both ends refuse a scroll beyond 12 000 units each way.
+
+Protocol 11 added `Request::Adapter`, which the host sends only for a viewer
+that decodes H.265, just before it would ask `Request::H265`: the worker
+answers with the GPU that drives its display and that GPU's driver
+(`adapter`: the adapter's
 vendor, device, subsystem and revision ids from DXGI, and the user-mode
 driver's version). The answer to `Request::H265` names the GPU in `adapter`
 too, but only when that answer is the worker's probe of it; the host keeps
@@ -1112,8 +1146,10 @@ does not require Flutter or a POCOX runtime.
   sends a batch of up to 16, stamps the presented frame and consecutive
   sequence numbers itself, and fails with a typed `InputError` (`NotFresh`,
   `NotControlling`, `Congestion`, `Closed`, `Invalid`, and `NotOffered` for
-  an `Input::PhysicalKey` toward a host that did not list `physical_keys`,
-  nothing of the batch sent). `Input` and `Key` are `#[non_exhaustive]`. The
+  an `Input::PhysicalKey` toward a host that did not list `physical_keys` or
+  an `Input::Scroll` toward one that did not list `wheel_hires`, nothing of
+  the batch sent). A host's backend says it injects `Input::Scroll` with
+  `BackendCaps::hires_wheel`. `Input` and `Key` are `#[non_exhaustive]`. The
   host checks the same rule against its own ledger and rejects duplicate or
   reordered sequences.
   Permission revisions, desktop transitions and capture failures invalidate old
@@ -1213,7 +1249,7 @@ crates/pb-mapper-desktop/src/
 | --- | --- | --- |
 | `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope | `CGDirectDisplayID` from `CGGetActiveDisplayList`, named by its UUID, which finds it again; `CGDisplayBounds` × the current mode's pixels per point; a session that is not on the console, or a locked screen, is the secure desktop; capture and the pointer reuse a check that passed within 16 ms until the session's own mode change, input never |
 | `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`) that pushes: a capture thread that thread C arms when its tick finds nothing new waits in `AcquireNextFrame` for the next present, converts it at once and wakes thread C (`capture_poll()` is `None`), and a watcher thread waits for the MFT's events and wakes thread C for each output and for an input request it waits for (`drain_poll()` is `None`; an MFT without `IMFShutdown` is drained every 2 ms instead) | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6, its minimum interval between pictures from the display's refresh and the pace) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
-| `Input` | enigo; `SendInput` with `KEYEVENTF_SCANCODE` for physical keys (a HID usage to its set-1 scancode); absolute moves as one `SendInput` event each (see [Pointer moves on Windows](#pointer-moves-on-windows)); `LockWorkStation` | `CGEvent` at the HID tap: pointer and wheel in the bound display's points, click counts for double clicks, named letters and digits at the key the Mac's layout types them with, other keys and physical keys by `kVK_*` place, modifiers as flag changes with left and right apart, text as Unicode string events of at most 20 UTF-16 units; no lock (`LOCK = false`) |
+| `Input` | enigo; `SendInput` with `KEYEVENTF_SCANCODE` for physical keys (a HID usage to its set-1 scancode); absolute moves as one `SendInput` event each (see [Pointer moves on Windows](#pointer-moves-on-windows)); `Input::Scroll` as one `SendInput` of `MOUSEEVENTF_WHEEL` (the vertical units, negated) and `MOUSEEVENTF_HWHEEL` (the horizontal) for the axes that move, its units Windows' own (`WHEEL_DELTA` 120 a notch); `LockWorkStation` | `CGEvent` at the HID tap: pointer and wheel in the bound display's points, `Input::Scroll` that is continuous as a pixel scroll of a point per 1.2 units marked `kCGScrollWheelEventIsContinuous`, and otherwise as lines, a line per 120 units, what falls short of a point or a line kept, click counts for double clicks, named letters and digits at the key the Mac's layout types them with, other keys and physical keys by `kVK_*` place, modifiers as flag changes with left and right apart, text as Unicode string events of at most 20 UTF-16 units; no lock (`LOCK = false`) |
 | `Cursor` | `GetCursorInfo`, separate, the injected pixel until it shows a move; the shape once per new `HCURSOR`: its kind from the `LoadCursorW` standard handles, its bitmap from `GetIconInfo` and `GetDIBits` (colour, alpha or AND mask; monochrome AND/XOR, an inverting pixel drawn black outlined in white) | `CGEventGetLocation`, separate, the injected pixel until it shows a move; the shape when the window server's cursor seed moves (a private `CGSCurrentCursorSeed`, looked up with `dlsym`; without it at most every 500 ms): `NSCursor.currentSystemCursor` drawn at the display's scale, a kind only where it equals a standard cursor pixel for pixel, else `custom` |
 | `Modes` / `Still` | `WinModes` (dynamic changes only; see [Remote resolution](#remote-resolution)) / xcap JPEG | Core Graphics modes for this app only (`kCGConfigureForAppOnly`) / `SCScreenshotManager` and ImageIO JPEG, macOS 14 and later |
 | `Grant` | none | the Screen Recording grant; Accessibility is checked at each input |
@@ -3051,9 +3087,13 @@ presentation is never forwarded.
 ### Input and cursor
 
 The viewer queues input in order behind a revoke barrier: at most 512 events or
-256 KiB, with consecutive pointer moves coalescing into the newest. A barrier (a
+256 KiB, with consecutive pointer moves coalescing into the newest, and
+consecutive scrolls (`Input::Scroll`) of one generation and continuity adding
+up into one, within a scroll's 12 000 units, so a touchpad's stream of events
+never fills the queue while the uplink stalls. A barrier (a
 release, a grant or a revoke) discards only the input queued before it, never
-input submitted after the call that set it. It sends a
+input submitted after the call that set it, and a scroll never adds itself to
+one queued before a barrier: it then goes alone. It sends a
 pending presentation ahead of input, and revokes control rather than grow the
 queue. The host's reader checks the control policy and pushes input onto a
 bounded lane without waiting. The desktop-bound thread drains that lane before
@@ -3164,7 +3204,7 @@ gap. A single viewer receives the owned frame buffer directly, and two or more
 share the same encoded bytes. Each viewer has its own input lane,
 presentation ledger, drag-start hold and held-input set: releasing or
 disconnecting one controller lifts only keys and mouse buttons no remaining
-controller still holds, and a button or wheel event re-aims the OS pointer to
+controller still holds, and a button, wheel or scroll event re-aims the OS pointer to
 that controller's last move if another controller moved it in between. Viewers
 and hosts that list `peer_cursors` receive `PeerCursor` updates outside the
 video queue — each controller assigned a distinct colour (`0..4`) for its
@@ -3296,7 +3336,7 @@ so read at the display's rate, and a still one on the timer only.
 | IDR | host minimum interval 300 ms; viewer minimum 500 ms, backoff to 4 s; 1 s hold after a discontinuity |
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued, drained until the IDR or a head under 125 ms; IDR grace 500 ms; stall watchdog 700 ms |
 | fps cap | tick 250 ms; capacity from ≥ 4 busy ticks of the last 8; × 0.9 direct, × 0.8 relay; minimum 5; after 3 s, +5 per 30 fps of ceiling or a quarter of the cap, up to 95% of the capacity; probes of 10% watched 3 s (not by the queue within the IDR grace; a pause takes one back), backoff 3 s doubling to 60 s; turnaround late past 2 frame intervals (≥ 40 ms) over its 10 s floor; ≥ 1 s between changes but for a probe taken back; within the window's display rate (rounded, 30 to 120), a change of which goes at the next tick, and beneath which a backlog cap is held, not raised, probed or removed |
-| Input | viewer queue 512 events or 256 KiB, batches of 16; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input |
+| Input | viewer queue 512 events or 256 KiB, batches of 16, a lone move replacing a queued tail move and a lone scroll adding to a queued tail scroll of its generation and continuity; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input; `Wheel` at most 100 notches each way, `Scroll` (to a host that lists `wheel_hires`) 120 units a notch, at most 12 000 each way; a viewer's notch the embedder's (Windows `lines × 100 / 3` physical px cut to whole, macOS 40 and Linux 53 logical px, else 30), a touchpad's travel 1.2 units a logical px (30 px a notch toward an older host); a fling from 50 px/s, at most 8 000, until below 20 device px/s |
 | Cursor | sampled every 16 ms, or once a period of a faster pace down to 8 ms; the shape looked at 2 ms and 8 ms after a shape-reading controller's newest move, one look pending, a sooner one an earlier move left kept; the controller's own move never reported; an injected move is the pointer until the OS shows it, at most 250 ms after the last (`SETTLE`); a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated, the pointer shows on the shared display and the OS pointer changed (a failed read again after 250 ms), an image over 1024 px a side never, 1 to 256 px a side sent, 64 slots on each end |
 | Codec | `Accepted` waits at most 3 s for the backend's display and H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3; Windows H.264 in Constrained High, then High, then Baseline, `QualityVsSpeed` 0, no scenario |
 
@@ -4300,6 +4340,28 @@ What each platform's new code has been through:
     `GetGuiResources(GR_USEROBJECTS)` across 200 shape changes; on Linux,
     X11 and Wayland, at scale 1 and 2; and a high-speed camera over a
     painted and a native pointer following the mouse.
+- **Scrolling.** A wheel's notch as a host notch, `Input::Scroll` and the
+  touchpad fling (see [Touch](#touch)) have run only in tests on a Mac.
+  - The Dart side ran in widget tests with the target platform set to
+    Windows (at 100, 125, 150 and 200 %, 1, 3 and 7 lines a notch), macOS and
+    Linux: one notch event made exactly one host notch, or 120 units toward
+    a host that lists `wheel_hires`, and a quarter notch 30; a touchpad's
+    travel went as one continuous scroll per event, 360 units for 300 px; a
+    fling decayed, and every way of stopping it stopped it.
+  - The host side ran in Rust tests: a scroll crosses the wire, the helper
+    pipe (protocol 12) and the synthetic platform's injector as it was sent,
+    a viewer refuses one toward a host without `wheel_hires`, and queued
+    scrolls add up. The Windows `SendInput` data's signs are a unit test that
+    runs only on Windows; the Windows runner's `wheel_lines` builds only in
+    CI.
+  - Not run anywhere: a real wheel and touchpad on any viewer against
+    `desktop_ui_host`, whose `host_input` lines show each `Scroll`; on a
+    Windows host, a window logging `WM_MOUSEWHEEL` deltas while a Mac
+    viewer's touchpad scrolls, a classic Win32 list box and a Java Swing
+    list under continuous input (if either fails to scroll, a viewer setting
+    to send notches instead is the planned answer); on a Mac host, an
+    `NSView` logging `scrollWheel:` deltas, `hasPreciseScrollingDeltas` and
+    whether the event is continuous; Windows and Linux touchpad flings.
 - **Older peers.** A host and a viewer of this revision each ran against
   the other side built from the tree before it (`151ed8d7`, 0.11.0's desktop
   protocol), with the SDK's synthetic host (`desktop_loopback --serve`) and
