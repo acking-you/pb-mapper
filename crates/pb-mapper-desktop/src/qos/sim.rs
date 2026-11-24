@@ -521,7 +521,7 @@ impl Sim {
                 break;
             }
             let (pace, expected, base, clamp) = (
-                self.qos.targets(now).pace_fps,
+                self.qos.pace_fps(now),
                 self.qos.expected_bps(now),
                 self.qos.base_rtt(),
                 self.qos.clamp_rate(now),

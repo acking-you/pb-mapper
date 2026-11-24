@@ -123,6 +123,11 @@ struct Fake {
     /// names a retry `DRAIN_POLL` after the capture that found it waiting,
     /// and asks for input (the wake) once its unit is out.
     push_drain: Arc<AtomicBool>,
+    /// An encoder serial at its bottleneck that still takes input, up to
+    /// thread C's bound, as a Media Foundation encoder slower than the pace
+    /// can: each unit starts once the one before it is out and then takes
+    /// `latency`, so its dwell grows with the units ahead of it.
+    queueing: Arc<AtomicBool>,
     /// When the last capture found a serial encoder waiting for input.
     waiting: Arc<Mutex<Option<Instant>>>,
     /// The next capture that finds a serial encoder waiting has its unit
@@ -162,6 +167,7 @@ impl Fake {
             full: Arc::default(),
             serial: Arc::default(),
             push_drain: Arc::default(),
+            queueing: Arc::default(),
             waiting: Arc::default(),
             asks_late: Arc::default(),
             repeatable: false,
@@ -293,9 +299,12 @@ impl Backend for Fake {
         } else {
             self.finished()
         };
-        self.encoding
-            .lock()
-            .push_back((started, started + latency, frame));
+        let mut encoding = self.encoding.lock();
+        let start = match encoding.back() {
+            Some((_, ready, _)) if self.queueing.load(Ordering::SeqCst) => started.max(*ready),
+            _ => started,
+        };
+        encoding.push_back((started, start + latency, frame));
         Ok(finished)
     }
     fn drain_video(&mut self, _: &DesktopContext, _: Duration) -> Result<Option<EncodedFrame>> {
@@ -524,7 +533,7 @@ fn session(allowed: bool) -> Arc<SessionShared> {
     Arc::new(SessionShared::new(
         Arc::new(Policy::new(allowed)),
         CancellationToken::new(),
-        Targets::new(60, 4_000_000),
+        Targets::new(60, 4_000_000, 10),
     ))
 }
 
@@ -583,7 +592,7 @@ impl Harness {
             room.peer_cursors.clone(),
             room.policy.clone(),
             room.cancel.child_token(),
-            Targets::new(max_fps, 4_000_000),
+            Targets::new(max_fps, 4_000_000, 10),
         ));
         room.set_slot(
             slot,
@@ -613,6 +622,10 @@ impl Harness {
     /// Iterate at every deadline for `span`, with B-send taking every unit when
     /// `send` is set.
     fn run(&mut self, span: Duration, send: bool) {
+        self.run_watching(span, send, |_| {});
+    }
+    /// `run`, with `watch` looking at the harness after every iteration.
+    fn run_watching(&mut self, span: Duration, send: bool, mut watch: impl FnMut(&Self)) {
         let end = self.now() + span;
         let mut spins = 0;
         loop {
@@ -620,6 +633,7 @@ impl Harness {
             if send {
                 self.sent();
             }
+            watch(self);
             if deadline > end {
                 *self.now.lock() = end;
                 return;
@@ -945,6 +959,242 @@ fn the_encoder_dwell_stays_true_when_the_encoder_drops_units() {
         (Duration::from_millis(45)..=Duration::from_millis(47)).contains(&dwell),
         "{dwell:?}"
     );
+}
+
+/// A session paced at `fps` (its viewer's own rate up to 120) whose encoder
+/// keeps each unit `latency`, one at a time when `queueing`, many at once
+/// otherwise.
+fn paced(fps: u32, latency: Duration, queueing: bool) -> Harness {
+    let h = Harness::with(
+        true,
+        WorkerConfig {
+            limits: VideoLimits {
+                max_fps: 120,
+                ..LIMITS
+            },
+            ..config(None)
+        },
+    );
+    h.shared.targets.pace_fps.store(fps, Ordering::Release);
+    *h.fake.latency.lock() = latency;
+    h.fake.queueing.store(queueing, Ordering::SeqCst);
+    h
+}
+
+/// What thread C did over one second of a run, B-send taking every unit.
+#[derive(Debug)]
+struct Second {
+    /// The most units the encoder held.
+    most: usize,
+    /// The dwell thread C last published.
+    dwell: Option<Duration>,
+    skipped: u64,
+}
+
+/// `count` seconds of a run, one by one.
+fn seconds(h: &mut Harness, count: usize) -> Vec<Second> {
+    (0..count)
+        .map(|_| {
+            let skipped = h.state().skipped_ticks;
+            let mut most = 0;
+            h.run_watching(Duration::from_secs(1), true, |h| {
+                most = most.max(h.fake.pending_video());
+            });
+            Second {
+                most,
+                dwell: h.state().encoder_dwell,
+                skipped: h.state().skipped_ticks - skipped,
+            }
+        })
+        .collect()
+}
+
+/// An encoder that serves one unit each 11 ms but takes four, paced at 120:
+/// four units queue, each waiting behind three, until the first second's
+/// full ticks cap the pace near what it delivers (0.95 × 1000 / 11, 86).
+/// Once the queue has drained it holds one or two units, each out within
+/// two service times, evenly spaced and with no tick skipped; the viewers'
+/// QoS reads the cap, and the encoder is told the capped pace. The cap holds
+/// every second through a pace asked at 15 for one, as a startup hold asks,
+/// and a still desktop; 30 s after it was measured, a probe raises it past
+/// the encoder, which fills for a moment and lowers it again, and the next
+/// probe waits twice as long.
+#[test]
+fn an_encoder_slower_than_the_pace_caps_it_at_its_throughput() {
+    let service = Duration::from_millis(11);
+    let mut h = paced(120, service, true);
+    let mut most = 0;
+    h.run_watching(Duration::from_millis(990), true, |h| {
+        most = most.max(h.fake.pending_video());
+    });
+    assert_eq!(most, ENCODER_DEPTH);
+    assert_eq!(h.engine.throughput.cap(), None);
+    h.run(Duration::from_millis(20), true);
+    let (cap, measured) = (h.engine.throughput.cap().unwrap(), h.now());
+    assert!((84..=86).contains(&cap), "{cap}");
+    assert_eq!(h.shared.encoder_cap(), Some(cap));
+    // The queue drains, and the guard keeps the cap: the dwell fell.
+    h.run(Duration::from_millis(990), true);
+    let (before, skipped) = (h.captures().len(), h.state().skipped_ticks);
+    let mut most = 0;
+    h.run_watching(Duration::from_millis(1980), true, |h| {
+        most = most.max(h.fake.pending_video());
+    });
+    assert_eq!(h.engine.throughput.cap(), Some(cap));
+    assert!(most <= 2, "{most} units inside");
+    let dwell = h.state().encoder_dwell.unwrap();
+    assert!(dwell <= service * 2, "{dwell:?}");
+    assert_eq!(h.state().skipped_ticks, skipped);
+    let steady = &h.captures()[before..];
+    let period = Duration::from_secs(1) / cap;
+    assert!(
+        spacing(steady)
+            .iter()
+            .all(|gap| gap.abs_diff(period) < Duration::from_micros(10)),
+        "{:?}",
+        spacing(steady)
+    );
+    assert!(steady.iter().all(|(_, _, rate)| rate.pace_fps == cap));
+    let settled = |seconds: &[Second]| {
+        seconds.iter().all(|second| {
+            second.most <= 2
+                && second.skipped == 0
+                && second.dwell.is_none_or(|dwell| dwell <= service * 2)
+        })
+    };
+    let mut held = seconds(&mut h, 5);
+    h.shared.targets.pace_fps.store(15, Ordering::Release);
+    held.extend(seconds(&mut h, 1));
+    h.shared.targets.pace_fps.store(120, Ordering::Release);
+    assert_eq!(h.shared.encoder_cap(), Some(cap));
+    h.fake.still.store(true, Ordering::SeqCst);
+    held.extend(seconds(&mut h, 15));
+    h.fake.still.store(false, Ordering::SeqCst);
+    held.extend(seconds(&mut h, 3));
+    assert!(settled(&held), "{held:?}");
+    assert_eq!(h.engine.throughput.cap(), Some(cap));
+    // The probe 30 s after the cap was measured fills the encoder for a
+    // moment, and the next comes 60 s after that.
+    let start = h.now();
+    let probed = seconds(&mut h, 62);
+    let filled: Vec<u64> = (0..probed.len())
+        .filter(|&at| !settled(&probed[at..=at]))
+        .map(|at| at as u64)
+        .collect();
+    assert!(
+        filled.len() <= 3 && filled.windows(2).all(|pair| pair[1] == pair[0] + 1),
+        "{probed:?}"
+    );
+    let first = start + Duration::from_secs(filled[0] + 1) - measured;
+    assert!(
+        (Duration::from_secs(30)..Duration::from_secs(36)).contains(&first),
+        "{first:?} {probed:?}"
+    );
+    let lowered = h.engine.throughput.cap().unwrap();
+    assert!((84..=86).contains(&lowered), "{lowered}");
+}
+
+/// An encoder that serves one unit each 9 ms, 111 a second, paced at 120:
+/// close to the pace, it skips only nine ticks a second, but still holds
+/// four units, each waiting behind three, and is capped near what it
+/// delivers (0.95 × 111, 105), with one unit inside after.
+#[test]
+fn an_encoder_just_slower_than_the_pace_is_capped_too() {
+    let service = Duration::from_millis(9);
+    let mut h = paced(120, service, true);
+    h.run(Duration::from_millis(1010), true);
+    let cap = h.engine.throughput.cap().unwrap();
+    assert!((104..=106).contains(&cap), "{cap}");
+    h.run(Duration::from_secs(1), true);
+    let after = seconds(&mut h, 3);
+    assert!(
+        after.iter().all(
+            |second| second.most <= 2 && second.dwell.is_some_and(|dwell| dwell <= service * 2)
+        ),
+        "{after:?}"
+    );
+}
+
+/// An encoder that serves one unit each 50 ms, 20 a second, paced at 60:
+/// its cap, 19, drains the three units queued behind the one it serves at
+/// only one a second, so the guard judges it once they drained, and keeps
+/// it.
+#[test]
+fn a_slow_encoder_keeps_its_cap_once_its_queue_drained() {
+    let service = Duration::from_millis(50);
+    let mut h = paced(60, service, true);
+    h.run(Duration::from_millis(1010), true);
+    assert_eq!(h.engine.throughput.cap(), Some(19));
+    let after = seconds(&mut h, 6);
+    assert_eq!(h.engine.throughput.cap(), Some(19));
+    let last = after.last().unwrap();
+    assert!(
+        last.most <= 1 && last.dwell.is_some_and(|dwell| dwell <= service * 2),
+        "{after:?}"
+    );
+}
+
+/// A new desktop rebuilds the encoder: the cap measured on the old one goes
+/// at once, from every viewer, and a still slow encoder is capped again.
+#[test]
+fn a_rebuilt_encoder_starts_without_a_cap() {
+    let mut h = paced(120, Duration::from_millis(11), true);
+    h.run(Duration::from_millis(1010), true);
+    assert!(h.engine.throughput.cap().is_some());
+    let configured = h.fake.log.lock().configured;
+    h.fake.width.store(20, Ordering::SeqCst);
+    h.run(Duration::from_millis(150), true);
+    assert_eq!(h.fake.log.lock().configured, configured + 1);
+    assert_eq!(h.engine.throughput.cap(), None);
+    assert_eq!(h.shared.encoder_cap(), None);
+    h.run(Duration::from_millis(1100), true);
+    assert!(h.engine.throughput.cap().is_some());
+}
+
+/// An encoder that keeps each unit 45 ms but takes many at once, paced at
+/// 120: four in flight fill it, and the first second, which its first
+/// units' latency shortened, caps the pace; but the cap leaves each unit's
+/// 45 ms as it was, so the guard lifts it within two seconds and sets none
+/// again for 30 s: it does not ratchet down.
+#[test]
+fn a_pipelined_encoder_full_for_its_latency_has_its_cap_lifted() {
+    let mut h = paced(120, Duration::from_millis(45), false);
+    let mut caps = vec![None];
+    let mut watch = |h: &Harness| {
+        let cap = h.engine.throughput.cap();
+        if caps.last() != Some(&cap) {
+            caps.push(cap);
+        }
+    };
+    h.run_watching(Duration::from_millis(1010), true, &mut watch);
+    let capped = h.engine.throughput.cap().unwrap();
+    assert!((70..=85).contains(&capped), "{capped}");
+    h.run_watching(Duration::from_secs(2), true, &mut watch);
+    assert_eq!(h.engine.throughput.cap(), None);
+    assert_eq!(h.shared.encoder_cap(), None);
+    h.run_watching(Duration::from_secs(10), true, &mut watch);
+    assert_eq!(caps, [None, Some(capped), None]);
+    assert_eq!(h.captures().last().unwrap().2.pace_fps, 120);
+}
+
+/// The serial encoder of `an_encoder_slower_than_the_pace_caps_it_at_its_throughput`
+/// becomes fast as soon as it is capped: at the third loaded second
+/// without a full one, its dwell shows it serving more than the pace (a
+/// 4 ms dwell, 237), so the cap rises past it at once, with no probe, and
+/// clears.
+#[test]
+fn the_cap_rises_back_when_the_encoder_speeds_up() {
+    let mut h = paced(120, Duration::from_millis(11), true);
+    h.run(Duration::from_millis(1010), true);
+    assert!(h.engine.throughput.cap().is_some());
+    *h.fake.latency.lock() = Duration::from_millis(4);
+    h.run(Duration::from_millis(2980), true);
+    assert!(h.engine.throughput.cap().is_some(), "not before 3 s quiet");
+    h.run(Duration::from_millis(20), true);
+    assert_eq!(h.engine.throughput.cap(), None);
+    assert_eq!(h.shared.encoder_cap(), None);
+    h.run(Duration::from_millis(100), true);
+    assert_eq!(h.captures().last().unwrap().2.pace_fps, 120);
 }
 
 #[test]
@@ -2482,7 +2732,7 @@ impl<const PUSH: bool> Synth<PUSH> {
             room.peer_cursors.clone(),
             room.policy.clone(),
             room.cancel.child_token(),
-            Targets::new(limits.max_fps, 4_000_000),
+            Targets::new(limits.max_fps, 4_000_000, 10),
         ));
         room.set_slot(
             slot,

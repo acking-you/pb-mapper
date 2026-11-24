@@ -67,6 +67,10 @@ pub(crate) struct SessionShared {
     pub cursor: tokio::sync::watch::Sender<Option<CursorReport>>,
     /// C to every B-send in the room: each controlling viewer's pointer.
     pub peer_cursors: Arc<tokio::sync::watch::Sender<PeerCursorSnapshot>>,
+    /// C to B: the pace cap at the encoder's measured throughput, 0 for
+    /// none (`worker::throughput`). C paces within it itself; the session's
+    /// QoS takes it into the pace it expects and reports.
+    pub encoder_cap: AtomicU32,
     /// Wakes C's waiter.
     pub wake: Wake,
 }
@@ -107,8 +111,15 @@ impl SessionShared {
             state: tokio::sync::watch::Sender::new(EngineState::connecting(control_allowed)),
             cursor: tokio::sync::watch::Sender::new(None),
             peer_cursors,
+            encoder_cap: AtomicU32::new(0),
             wake,
         }
+    }
+
+    /// The pace cap thread C set at its encoder's throughput, if any.
+    pub fn encoder_cap(&self) -> Option<u32> {
+        let cap = self.encoder_cap.load(Ordering::Acquire);
+        (cap != 0).then_some(cap)
     }
 }
 
@@ -130,15 +141,21 @@ pub(crate) struct PeerCursorSnapshot {
 
 /// What the QoS controller asks of C, published after every change.
 pub(crate) struct Targets {
+    /// The pace before C's cap at its encoder's throughput, which C applies
+    /// itself and lifts once it reaches this.
     pub pace_fps: AtomicU32,
     pub encoder_bps: AtomicU32,
+    /// The preset's least pace: C caps the pace at its encoder's throughput
+    /// no lower.
+    pub min_fps: AtomicU32,
     pub paused: AtomicBool,
 }
 impl Targets {
-    pub fn new(pace_fps: u32, encoder_bps: u32) -> Self {
+    pub fn new(pace_fps: u32, encoder_bps: u32, min_fps: u32) -> Self {
         Self {
             pace_fps: AtomicU32::new(pace_fps),
             encoder_bps: AtomicU32::new(encoder_bps),
+            min_fps: AtomicU32::new(min_fps),
             paused: AtomicBool::new(false),
         }
     }

@@ -330,8 +330,13 @@ impl ClosingRate {
 /// What thread C is asked for, published after every change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TargetValues {
+    /// The pace before the encoder's cap (`Qos::set_encoder_cap`), which
+    /// thread C applies itself and lifts once the cap reaches this.
     pub pace_fps: u32,
+    /// At the pace within the encoder's cap, under the timestamp model.
     pub encoder_bps: u32,
+    /// The preset's least pace, below which thread C never caps.
+    pub min_fps: u32,
     pub paused: bool,
 }
 
@@ -339,8 +344,12 @@ pub(crate) struct TargetValues {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct QosView {
     pub fps: u32,
+    /// The capture pace, within the encoder's cap.
     pub pace_fps: u32,
     pub viewer_cap: Option<u32>,
+    /// Thread C's cap at its encoder's throughput, as this controller last
+    /// read it.
+    pub encoder_cap: Option<u32>,
     pub paused: bool,
     pub unresponsive: bool,
     pub bpf: u32,
@@ -557,6 +566,8 @@ pub(crate) struct Qos {
     one_way: bool,
     tainted: bool,
     viewer_cap: Option<u32>,
+    /// Thread C's cap at its encoder's throughput (`set_encoder_cap`).
+    encoder_cap: Option<u32>,
     paused: bool,
     unresponsive: bool,
     startup_until: Instant,
@@ -631,6 +642,7 @@ impl Qos {
             one_way: false,
             tainted: false,
             viewer_cap: None,
+            encoder_cap: None,
             paused: false,
             unresponsive: false,
             startup_until: now + STARTUP_HOLD,
@@ -729,6 +741,16 @@ impl Qos {
     /// The viewer's runtime fps cap; a cap at or above `limits.max_fps` clears it.
     pub fn set_viewer_cap(&mut self, fps: u32) {
         self.viewer_cap = (fps < self.limits.max_fps).then_some(fps);
+    }
+
+    /// Thread C's cap at its encoder's measured throughput, which it paces
+    /// within itself (`worker::throughput`): the pace this controller
+    /// expects, cuts from and reports takes it in as it does the viewer's
+    /// cap, while thread C is still asked for the pace without it
+    /// (`TargetValues::pace_fps`), so that it can tell when its cap no
+    /// longer holds anything back.
+    pub fn set_encoder_cap(&mut self, cap: Option<u32>) {
+        self.encoder_cap = cap;
     }
 
     pub fn set_paused(&mut self) {
@@ -1187,16 +1209,22 @@ impl Qos {
     }
 
     pub fn targets(&self, now: Instant) -> TargetValues {
-        let pace_fps = self.pace(now);
         let bps = match self.rate_model {
             RateModel::Nominal => self.bpf * f64::from(self.limits.max_fps),
-            RateModel::Timestamp => self.bpf * f64::from(pace_fps),
+            RateModel::Timestamp => self.bpf * f64::from(self.pace(now)),
         };
         TargetValues {
-            pace_fps,
+            pace_fps: self.clamp_output(self.probed_pace().min(self.rate_cap()), now),
             encoder_bps: encoder_bitrate(bps),
+            min_fps: self.min_fps,
             paused: self.paused,
         }
+    }
+
+    /// The capture pace, within the encoder's cap: what the credit window
+    /// expects frames at.
+    pub fn pace_fps(&self, now: Instant) -> u32 {
+        self.pace(now)
     }
 
     /// The per-frame budget the nominal model hands the encoder: its bitrate
@@ -1242,8 +1270,9 @@ impl Qos {
         let targets = self.targets(now);
         QosView {
             fps: self.fps,
-            pace_fps: targets.pace_fps,
+            pace_fps: self.pace(now),
             viewer_cap: self.viewer_cap,
+            encoder_cap: self.encoder_cap,
             paused: self.paused,
             unresponsive: self.unresponsive,
             bpf: self.bpf as u32,
@@ -1268,9 +1297,8 @@ impl Qos {
         }
     }
 
-    /// The pace before the receipts' cap and the output clamps: the probes'
-    /// fps within the ceiling and the viewer's cap.
-    fn natural_pace(&self) -> u32 {
+    /// The probes' fps within the ceiling and the viewer's cap.
+    fn probed_pace(&self) -> u32 {
         self.fps
             .min(self.ceiling_fps)
             .min(self.viewer_cap.unwrap_or(u32::MAX))
@@ -1278,22 +1306,39 @@ impl Qos {
             .max(1)
     }
 
-    /// The pace before the startup, unresponsive and JPEG clamps: the natural
-    /// pace within the receipts' cap.
-    fn steady_pace(&self) -> u32 {
-        self.natural_pace()
-            .min(self.rate_fps.unwrap_or(u32::MAX))
+    /// The pace before the receipts' cap and the output clamps: the probes'
+    /// fps within the ceiling, the viewer's cap and the encoder's.
+    fn natural_pace(&self) -> u32 {
+        self.probed_pace()
+            .min(self.encoder_cap.unwrap_or(u32::MAX))
             .max(1)
     }
 
+    /// The receipts' cap, `u32::MAX` for none.
+    fn rate_cap(&self) -> u32 {
+        self.rate_fps.unwrap_or(u32::MAX)
+    }
+
+    /// The pace before the startup, unresponsive and JPEG clamps: the natural
+    /// pace within the receipts' cap.
+    fn steady_pace(&self) -> u32 {
+        self.natural_pace().min(self.rate_cap()).max(1)
+    }
+
     /// The capture pace. The fps state is never changed by the startup cap,
-    /// the viewer cap, the receipts' cap, pause or unresponsiveness: those
-    /// clamp only the output.
+    /// the viewer cap, the encoder's, the receipts' cap, pause or
+    /// unresponsiveness: those clamp only the output.
     fn pace(&self, now: Instant) -> u32 {
+        self.clamp_output(self.steady_pace(), now)
+    }
+
+    /// `steady` within the startup, unresponsive and JPEG clamps; 0 while
+    /// paused.
+    fn clamp_output(&self, steady: u32, now: Instant) -> u32 {
         if self.paused {
             return 0;
         }
-        let mut pace = self.steady_pace();
+        let mut pace = steady;
         if now < self.startup_until {
             pace = pace.min(self.normal_fps.min((15.0 * self.scale).round() as u32));
         }
@@ -1774,6 +1819,42 @@ mod tests {
         );
         sample(&mut jpeg, t0, 20, false);
         assert!(jpeg.fps < 60, "{}", jpeg.fps);
+    }
+
+    /// Thread C's cap at its encoder's throughput: the pace the controller
+    /// expects, reports, cuts from and budgets a timestamp encoder at takes
+    /// it, as it does the viewer's cap, while the pace thread C is asked for
+    /// does not, so that thread C can tell when its cap holds nothing back.
+    #[test]
+    fn the_encoder_cap_holds_the_expected_pace_but_not_the_asked_one() {
+        let t0 = Instant::now();
+        let mut qos = Qos::new(
+            limits(120),
+            VideoCodec::H264,
+            QualityPreset::Balanced,
+            true,
+            RateModel::Timestamp,
+            None,
+            t0,
+        );
+        sample(&mut qos, t0, 20, false);
+        let now = t0 + STARTUP_HOLD;
+        assert_eq!(qos.targets(now).pace_fps, 120);
+        qos.set_encoder_cap(Some(86));
+        let (targets, view) = (qos.targets(now), qos.view(now));
+        assert_eq!((targets.pace_fps, targets.min_fps), (120, 10));
+        assert_eq!((view.pace_fps, view.encoder_cap), (86, Some(86)));
+        assert_eq!(qos.pace_fps(now), 86);
+        assert_eq!(qos.expected_bps(now), (qos.bpf * 86.0) as u64);
+        assert_eq!(targets.encoder_bps, encoder_bitrate(qos.bpf * 86.0));
+        // A cut to 85% of what the capped pace carries takes 15% of bits
+        // per frame, not 39% as at the pace without the cap.
+        let bpf = qos.bpf;
+        qos.cut_to(0.85 * bpf * 86.0, now);
+        assert!((qos.bpf - 0.85 * bpf).abs() < 1.0, "{} of {bpf}", qos.bpf);
+        assert_eq!((qos.rate_fps, qos.pace(now)), (None, 86));
+        qos.set_encoder_cap(None);
+        assert_eq!((qos.pace(now), qos.targets(now).pace_fps), (120, 120));
     }
 
     #[test]

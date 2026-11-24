@@ -234,7 +234,7 @@ impl Session {
                 peer_cursors_tx,
                 policy,
                 cancel,
-                Targets::new(targets.pace_fps, targets.encoder_bps),
+                Targets::new(targets.pace_fps, targets.encoder_bps, targets.min_fps),
             )),
             codec,
             offered_codecs,
@@ -328,12 +328,16 @@ impl Session {
 
     /// Change the controller and publish its targets to C. The targets are
     /// stored under the `qos` lock, so the newest decision is the one C reads.
+    /// The controller first takes C's newest cap at its encoder's throughput,
+    /// so every change, the QoS tick's included, sees it within a tick.
     /// A baseline a rebase moved then reaches the credit ledger, once the
     /// `qos` lock is released; the ledger keeps the newest generation, so of
     /// B-send's and B-recv's writes the older never lands last.
     fn update_qos(&self, now: Instant, change: impl FnOnce(&mut Qos)) {
+        let encoder_cap = self.shared.encoder_cap();
         let (changed, (generation, rebase)) = {
             let mut qos = self.qos.lock();
+            qos.set_encoder_cap(encoder_cap);
             change(&mut qos);
             (self.store_targets(qos.targets(now)), qos.rebase_state())
         };
@@ -356,6 +360,7 @@ impl Session {
                 .encoder_bps
                 .swap(values.encoder_bps, Ordering::AcqRel)
                 != values.encoder_bps)
+            | (targets.min_fps.swap(values.min_fps, Ordering::AcqRel) != values.min_fps)
             | (targets.paused.swap(values.paused, Ordering::AcqRel) != values.paused)
     }
 
@@ -374,7 +379,7 @@ impl Session {
         let (pace, expected, base, clamp) = {
             let qos = self.qos.lock();
             (
-                qos.targets(now).pace_fps,
+                qos.pace_fps(now),
                 qos.expected_bps(now),
                 qos.base_rtt(),
                 qos.clamp_rate(now),
