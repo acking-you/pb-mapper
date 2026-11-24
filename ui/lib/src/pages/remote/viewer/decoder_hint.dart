@@ -14,8 +14,10 @@ import '../../../theme/fonts.dart';
 import '../../../theme/viewer_palette.dart';
 import '../../settings_page.dart' show kRepositoryUrl;
 
-/// The Microsoft Store's HEVC Video Extensions, by Microsoft: the decoder
-/// MFT the Windows runner looks for (`SyncDecoders` in desktop_video.cpp).
+/// The Microsoft Store's HEVC Video Extensions, by Microsoft, a paid app:
+/// the decoder MFT the Windows runner looks for (`SyncDecoders` in
+/// desktop_video.cpp). A PC whose maker included the extensions has the MFT
+/// already and is never told of them.
 const hevcExtensionStoreId = '9NMZLZ57R3T7';
 
 /// [hint] in one line: what is missing and what installing it gives. The
@@ -64,14 +66,33 @@ List<Uri> decoderHintTargets(DecoderInstallHint hint, String localeName) =>
     };
 
 /// Opens the first of [hint]'s targets ([decoderHintTargets]) that
-/// [launch] opens.
+/// [launch] opens. A target that is not a web page is tried only where
+/// [canLaunch] finds an app registered for its scheme: Windows may answer a
+/// scheme no app handles, such as the Store's where the Store app was
+/// removed, with its own dialog instead of failing (url_launcher_windows
+/// calls `ShellExecuteW` without `SEE_MASK_FLAG_NO_UI`), and the Store's
+/// web page then opens directly.
 Future<void> openDecoderHint(
   DecoderInstallHint hint,
   String localeName, {
   Future<bool> Function(Uri uri) launch = _launch,
+  Future<bool> Function(Uri uri) canLaunch = _canLaunch,
 }) async {
   for (final uri in decoderHintTargets(hint, localeName)) {
+    final web = uri.isScheme('https') || uri.isScheme('http');
+    if (!web && !await canLaunch(uri)) continue;
     if (await launch(uri)) return;
+  }
+}
+
+/// Whether an app is registered for [uri]'s scheme (on Windows, a
+/// `URL Protocol` value under its key in `HKEY_CLASSES_ROOT`), which asks
+/// the system without opening anything; false where that cannot be read.
+Future<bool> _canLaunch(Uri uri) async {
+  try {
+    return await canLaunchUrl(uri);
+  } catch (_) {
+    return false;
   }
 }
 

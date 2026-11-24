@@ -1023,32 +1023,54 @@ void main() {
       "where Windows has none; Linux's hints open the guide in the app's "
       'language', () async {
     final opened = <Uri>[];
+    final asked = <Uri>[];
     Future<bool> Function(Uri) opens(bool Function(Uri) app) => (uri) async {
       opened.add(uri);
       return app(uri);
+    };
+    Future<bool> Function(Uri) registered(bool store) => (uri) async {
+      asked.add(uri);
+      return store;
     };
     await openDecoderHint(
       DecoderInstallHint.hevcExtension,
       'en',
       launch: opens((uri) => true),
+      canLaunch: registered(true),
     );
     expect(opened.single.scheme, 'ms-windows-store');
     expect(opened.single.queryParameters['ProductId'], hevcExtensionStoreId);
+    final web = Uri.parse(
+      'https://apps.microsoft.com/detail/$hevcExtensionStoreId',
+    );
     opened.clear();
+    // Registered, but it fails to open.
     await openDecoderHint(
       DecoderInstallHint.hevcExtension,
       'en',
       launch: opens((uri) => uri.scheme != 'ms-windows-store'),
+      canLaunch: registered(true),
     );
-    expect(
-      opened.last,
-      Uri.parse('https://apps.microsoft.com/detail/$hevcExtensionStoreId'),
-    );
+    expect(opened.last, web);
     opened.clear();
+    // Not registered: never handed to the shell, whose own dialog would
+    // come first, and the web page is not asked about.
+    asked.clear();
+    await openDecoderHint(
+      DecoderInstallHint.hevcExtension,
+      'en',
+      launch: opens((uri) => true),
+      canLaunch: registered(false),
+    );
+    expect(opened.single, web);
+    expect(asked.single.scheme, 'ms-windows-store');
+    opened.clear();
+    asked.clear();
     await openDecoderHint(
       DecoderInstallHint.gstreamer,
       'zh',
       launch: opens((uri) => true),
+      canLaunch: registered(false),
     );
     expect(opened.single.path, endsWith('/docs/user-guide.zh-CN.md'));
     opened.clear();
@@ -1056,9 +1078,11 @@ void main() {
       DecoderInstallHint.gpuDriver,
       'en',
       launch: opens((uri) => true),
+      canLaunch: registered(false),
     );
     expect(opened.single.path, endsWith('/docs/user-guide.md'));
     expect(opened.single.fragment, 'remote-desktop-in-the-app');
+    expect(asked, isEmpty);
   });
 
   testWidgets('the chip keeps its width as the figures change', (tester) async {
