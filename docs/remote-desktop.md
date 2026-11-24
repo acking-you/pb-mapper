@@ -3526,7 +3526,9 @@ The viewer's connection-quality panel (the toolbar's chip, or the path and
 frame-rate button in a phone's gutter) shows these figures in four groups,
 and scrolls within a landscape phone's height. A row whose figure is not
 reported, by an older host, on the relay or on a platform without it, is
-left out; while the connection is down the core rows show dashes.
+left out; while the connection is down the core rows show dashes. Above the
+groups, while the session goes without a decoder an install would add, it
+shows that install hint (see "What the viewer decodes").
 
 - **Network**: the path (LAN direct or direct, with the address family, from
   `link.kind` and `link.family`; or the relay and its carrier), the QUIC
@@ -3658,7 +3660,9 @@ largest of the viewer's resolution bounds that codec decodes at) or null,
 `display_max_hz`, the fastest refresh among the displays as they are set now,
 and, from the Windows and Linux runners, `window_refresh: true`: the runner
 answers `refresh_hz` and calls `display_changed` (see the fps cap's
-display rule below).
+display rule below). The Windows runner also answers `installable`, the
+codecs this computer's GPU decodes that no installed decoder takes (see the
+install hints below).
 An error, a missing channel, or a probe that has not answered within 2 s
 counts as H.264 at 1080p on Android and as no decoder everywhere else, where
 the session then takes JPEG, which Dart decodes, for the attempts made
@@ -3682,7 +3686,9 @@ bound. H.265 is reported where two conditions hold. First, `MFTEnumEx` finds a
 synchronous video decoder MFT for `MFVideoFormat_HEVC`, which the HEVC Video
 Extensions register and an unpackaged app finds. Second, Flutter's adapter has
 DXVA `HEVC_VLD_MAIN` to NV12. Its bound is the largest one the driver lists a
-decoder configuration for. The refresh comes from the active display paths as
+decoder configuration for. Where the adapter has `HEVC_VLD_MAIN` but no
+decoder MFT is registered, `installable` lists `hevc`. The refresh comes from
+the active display paths as
 an exact fraction (59.94, not 59), so Windows and Android report the same mode
 alike. A process outside the console session, such as one in a remote
 session, cannot query the paths and reads the display modes' whole hertz
@@ -3715,6 +3721,27 @@ thread. It takes hardware decoders only: `isHardwareAccelerated` on API 29 and
 later, otherwise not `OMX.google.*` or `c2.android.*`. For `video/avc` and
 `video/hevc` it reports the largest bound that `areSizeAndRateSupported`
 accepts at 60 fps. The refresh is the fastest rate `DisplayRefresh` would hold.
+
+**Install hints.** Where an install would add a decoder, the viewer says so
+at the top of the quality panel and under Display → Codec, with **Don't show
+again**, which `ViewerPrefs` keeps per device (`viewer_decoder_hints_dismissed`).
+Dart reads what is missing from the `decoders` answer
+(`DesktopDecoders.installable` and `missing`, `installHint`):
+
+- Windows, `installable` with `hevc`, on an H.264 session with the codec on
+  Auto: the HEVC Video Extensions, whose button opens Microsoft Store product
+  `9NMZLZ57R3T7` (`ms-windows-store://pdp/?ProductId=…`, or the Store's web
+  page where Windows has no Store app). Installed, their MFT is what the
+  probe finds once the app runs again (the store probes once a run).
+- Linux, from an answer the runner gave (not a failed probe, nor under the
+  software renderer, where an install changes nothing): no `h264` is
+  GStreamer's decoders missing, hinted on a JPEG session under either codec
+  preference, with the command that installs the user guide's "Always" and
+  "Software decoding" rows on Debian and Ubuntu, Fedora or Arch, read from
+  `os-release` (`ID`, then `ID_LIKE`); no `h265` is no hardware decoder for
+  it, hinted on an H.264 session on Auto. Both link to the guide's package
+  table, and the module, like the store, looks once a run.
+- An H.265 decoder that failed and was dropped for the run is not missing.
 
 **Units.** `PbDesktopVideoMetaV1.flags` and the JNI meta carry `FLAG_H265`
 (bit 4) on an H.265 unit. A unit carrying neither that bit nor the JPEG bit is
