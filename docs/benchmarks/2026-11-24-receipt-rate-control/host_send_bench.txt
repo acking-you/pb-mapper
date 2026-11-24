@@ -28,3 +28,23 @@ case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1133 allocs_per_unit=1
 case=video+pointer units_per_s=60.2 inputs_per_s=249.9 allocs_per_s=3525 allocs_per_unit=58.57 alloc_bytes_per_unit=47050
 case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.8 allocs_per_s=10022 allocs_per_unit=167.11 alloc_bytes_per_unit=100585
 case=peer_cursor samples=256 p50_us=284 p95_us=343 p99_us=505
+
+# The three runs below are on 5092e13 (the review fixes), after its five suite runs, not alternated with another build.
+
+# after run 1 (5092e13): 2026-11-24T11:00:22Z load: { 1.12 1.21 1.32 }
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1133 allocs_per_unit=18.90 alloc_bytes_per_unit=40255
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=3522 allocs_per_unit=58.71 alloc_bytes_per_unit=47160
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.8 allocs_per_s=10023 allocs_per_unit=167.13 alloc_bytes_per_unit=100586
+case=peer_cursor samples=256 p50_us=157 p95_us=332 p99_us=508
+
+# after run 2 (5092e13): 2026-11-24T11:00:41Z load: { 1.40 1.27 1.34 }
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1131 allocs_per_unit=18.86 alloc_bytes_per_unit=40268
+case=video+pointer units_per_s=60.2 inputs_per_s=249.7 allocs_per_s=3523 allocs_per_unit=58.54 alloc_bytes_per_unit=47060
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.8 allocs_per_s=10033 allocs_per_unit=167.30 alloc_bytes_per_unit=100604
+case=peer_cursor samples=256 p50_us=157 p95_us=333 p99_us=497
+
+# after run 3 (5092e13): 2026-11-24T11:01:00Z load: { 1.67 1.33 1.36 }
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1132 allocs_per_unit=18.87 alloc_bytes_per_unit=40284
+case=video+pointer units_per_s=60.2 inputs_per_s=249.9 allocs_per_s=3523 allocs_per_unit=58.54 alloc_bytes_per_unit=47049
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.9 allocs_per_s=10030 allocs_per_unit=167.18 alloc_bytes_per_unit=100587
+case=peer_cursor samples=256 p50_us=158 p95_us=330 p99_us=491
