@@ -395,7 +395,10 @@ Nothing in the SDK crates knows it exists.
     Media Foundation encoder in `codec.rs`, whose watcher thread waits for
     the MFT's events and wakes thread C, the D3D11 video processor in
     `converter.rs`, which turns, crops or scales each picture into its NV12
-    sample, the per-adapter H.265 probe in `probe.rs`; H.265 only for a viewer that lists `h265`, on a GPU
+    sample, the HDR tone map in `tonemap.rs`, which draws each picture of an
+    FP16 (Windows HDR) desktop as SDR at the display's SDR white level
+    before the video processor converts it and, failing alike each time,
+    turns FP16 duplication off for the process, the per-adapter H.265 probe in `probe.rs`; H.265 only for a viewer that lists `h265`, on a GPU
     whose hardware HEVC encoder passes a probe kept per adapter, and one
     encoder failure turns it off for the process; H.264 in a High profile
     with CABAC, Baseline where the encoder refuses High or may reorder in

@@ -342,6 +342,8 @@ impl Codec {
                     // Whether a watcher is asked for, which `Codec::new`
                     // is told.
                     poll_events: _,
+                    // The duplication's, which `Encoder` makes.
+                    sdr_duplication: _,
                 },
         } = settings;
         let transform: IMFTransform = unsafe {

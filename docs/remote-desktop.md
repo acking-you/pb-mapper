@@ -1547,7 +1547,8 @@ in its place, carrying the held one's presents, and otherwise the held one
 goes once the look found nothing newer, or 32 ms after the arming without
 that answer. Each frame is released as
 soon as it is converted, so no update is missed between ticks, and no
-full-size BGRA copy of the desktop is made. Both threads hold the device's
+full-size BGRA copy of the desktop is made (an HDR desktop's tone map,
+below, draws one). Both threads hold the device's
 own lock (`ID3D11Multithread`) across a picture's work on its one immediate
 context. A video processor that refuses the duplication's surface (it fails
 to make a view of it or to convert from it) has each picture copied out of
@@ -1651,6 +1652,63 @@ restricts to no privileges: there both calls go without it. Whether that
 worker should keep this one privilege is a separate decision, for after
 the device run. Each call may fail harmlessly, and what each did is logged
 once per process as `desktop_gpu_priority`.
+
+With Windows HDR (or Auto Color Management) on, Windows composes the desktop
+in FP16, linear scRGB in which 1.0 is 80 nits, with SDR content at the
+display's SDR white level, the SDR content brightness setting. A
+duplication that takes only BGRA8 gets DXGI's own conversion of that
+desktop, which is expected to leave the level out, so that SDR content
+would arrive brighter or darker than the display shows it; that conversion
+varies by driver, and no run here has recorded it yet. The duplication now
+lists FP16 first (`DuplicateOutput1` with `R16G16B16A16_FLOAT`, then
+`B8G8R8A8_UNORM`), which DXGI hands out only for a desktop composed in
+FP16: an SDR desktop still arrives in BGRA8, and its pictures take the
+same path as before, with nothing more read or drawn. Where the
+duplication's mode is FP16, thread C reads the display's SDR white level
+as it builds the encoder (`QueryDisplayConfig`, the active path whose
+source has the output's GDI device name, then
+`DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL` for its target), so a
+change of the setting reaches the next encoder. Where Windows tells no
+level, as it may not to a process outside the console session, the
+duplication is made again in BGRA8 only, which DXGI converts as before,
+rather than the tone map guessing the level. The first frame's texture,
+not the duplication's mode, decides whether pictures are tone mapped: for
+an FP16 one that the mode did not announce, the capture thread reads the
+level itself, and where Windows tells none there either, the capture fails
+and FP16 duplication goes off for the process. As the first FP16 picture
+arrives, the capture thread builds the tone map
+(`platform/windows/video/tonemap.rs`), compiling its shaders
+(`tonemap.hlsl`) with `D3DCompile` once per process: `d3dcompiler_47.dll`,
+which ships with Windows, is loaded from System32 for that and let go, so
+nothing imports it and a session that never sees an HDR desktop never
+loads it. Each FP16 picture is then drawn, while DXGI holds the frame, by
+one full-screen triangle into a BGRA8 texture of the tone map's: divided
+by the SDR white level, anything brighter than SDR white (HDR video, a
+game) brought down to it by one gain on all three channels, which keeps its
+hue but not its highlights' detail, a colour outside the sRGB gamut
+clipped to it, and encoded sRGB, so SDR content keeps the values it has on
+an SDR desktop. The draw is recorded on a deferred context once per
+texture DXGI hands out and replayed on the immediate context with that
+context's state restored (`ExecuteCommandList`), since the video processor
+and the encoder queue their work there too; the video processor then
+converts the texture, turning and scaling it, as it converts any, and
+direct conversion stays BGRA8's. A tone map that fails alike each time
+turns FP16 duplication off for the process and logs
+`desktop_capture_hdr_failed` once: shaders that cannot be compiled (no
+compiler, say) at once, and a tone map that fails to build, or to draw and
+convert a picture, on a device still present, three captures in a row with
+no picture between. That capture fails, and its retry duplicates in BGRA8,
+which DXGI converts as before. A failure on a device that was removed (a
+driver reset or update) does not count: the retry builds the tone map
+again on the new device. `desktop_video_encoder_opened` logs `duplication`
+(the formats the duplication lists), `hdr` (its mode was FP16) and
+`sdr_white_nits`, and `desktop_capture_hdr` the tone map's build
+(`compiled`, `build_ms`). The test
+`an_fp16_desktop_is_drawn_as_the_sdr_picture_the_display_shows` (in
+`tonemap.rs`) compiles the shaders and draws known FP16 pixels on WARP,
+which every Windows has, so CI runs it; no device with HDR on has shown the
+shared picture yet. `video_bench --greys` measures it there, against
+`--sdr-duplication`, the BGRA8-only duplication as before.
 
 macOS hosting uses
 ScreenCaptureKit, which scales the
@@ -3892,8 +3950,14 @@ out of the duplication first, as before direct conversion, the baseline of
 that comparison in the same build, and `--gpu-time` brackets each picture's
 GPU work (the conversion, with that copy where there is one, or a repeat's
 copy) with D3D11 timestamp queries and prints their p50, p95 and mean as a
-`gpu_time` line; a video processor on another engine of the GPU may not lie
-wholly inside the span, which GPUView or PIX tells. With
+`gpu_time` line, with an HDR desktop's tone map timed apart (`tone_map_*`);
+a video processor on another engine of the GPU may not lie wholly inside
+the span, which GPUView or PIX tells. `--greys` covers the display with 16
+still bands of grey and prints each band's luma in the last picture the
+encoder was given beside the luma its grey must become, which on a Windows
+HDR desktop, at each SDR content brightness, shows whether SDR content
+arrives as bright as on an SDR desktop; `--sdr-duplication` duplicates in
+BGRA8 only, as before the tone map, the baseline of that comparison. With
 `RUST_LOG` set (`pb_mapper_desktop::session=info`) the host's own events,
 such as `desktop_gpu_priority`, go to stderr.
 
