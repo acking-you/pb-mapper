@@ -25,7 +25,7 @@ use super::types::{
     ClientConfig, ConnectRequest, RegisterRequest, RemoteId, ServiceConnection, Transport,
 };
 use super::worker::TunnelWorker;
-use super::{ConnectOptions, LanTransport, PathPolicy, RegisterOptions};
+use super::{CongestionControl, ConnectOptions, LanTransport, PathPolicy, RegisterOptions};
 use crate::client::status::get_status_with_credential;
 use crate::client::{
     Bound, LocalTcpListener, LocalTcpListenerProvider, LocalUdpListener, LocalUdpListenerProvider,
@@ -250,6 +250,7 @@ impl Client {
                 idle_timeout: Some(idle_timeout),
                 ..Default::default()
             },
+            CongestionControl::Cubic,
         )
         .await
     }
@@ -261,25 +262,32 @@ impl Client {
         request: RegisterRequest,
         options: RegisterOptions,
     ) -> Result<Registration> {
-        if options.allow_direct && !cfg!(feature = "p2p") {
-            return Err(Error::invalid_config("built without p2p support"));
-        }
-        options.port_mapping.check_supported()?;
-        if let Some(timeout) = options.idle_timeout
-            && (request.transport.is_datagram()
-                || tokio::time::Instant::now().checked_add(timeout).is_none())
-        {
-            return Err(Error::invalid_config(
-                "idle deadline requires TCP and a representable duration",
-            ));
-        }
-        self.register_inner(request, options).await
+        check_register(&request, &options)?;
+        self.register_inner(request, options, CongestionControl::Cubic)
+            .await
+    }
+
+    /// [`Self::register_with_options`], with the direct sessions' QUIC on
+    /// this end sending under `congestion` rather than Cubic. Consumers,
+    /// relayed sessions and direct TCP keep their own controllers. For a
+    /// sender whose own rate control answers loss and queueing, as the
+    /// desktop host's receipts do; not part of the supported API.
+    #[doc(hidden)]
+    pub async fn register_with_sender_congestion(
+        &self,
+        request: RegisterRequest,
+        options: RegisterOptions,
+        congestion: CongestionControl,
+    ) -> Result<Registration> {
+        check_register(&request, &options)?;
+        self.register_inner(request, options, congestion).await
     }
 
     async fn register_inner(
         &self,
         request: RegisterRequest,
         options: RegisterOptions,
+        congestion: CongestionControl,
     ) -> Result<Registration> {
         let RegisterOptions {
             allow_direct,
@@ -307,6 +315,7 @@ impl Client {
             lan_first,
             LanTransport::Quic,
             lan_tcp,
+            congestion,
         );
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
@@ -380,6 +389,7 @@ impl Client {
             options.lan_first,
             options.lan_transport,
             false,
+            CongestionControl::Cubic,
         );
         #[cfg(feature = "p2p")]
         let memory = Arc::clone(&self.inner.direct_memory);
@@ -427,6 +437,7 @@ impl Client {
             options.lan_first,
             options.lan_transport,
             false,
+            CongestionControl::Cubic,
         );
         let handle = match request.transport {
             Transport::Tcp => worker.spawn(move |context| {
@@ -584,6 +595,23 @@ impl RelayMetricsStream {
         self.due = Some(tokio::time::Instant::now() + self.every);
         Some(client.endpoint.relay_diagnostics().await)
     }
+}
+
+/// What [`Client::register_with_options`] refuses before it starts a worker.
+fn check_register(request: &RegisterRequest, options: &RegisterOptions) -> Result<()> {
+    if options.allow_direct && !cfg!(feature = "p2p") {
+        return Err(Error::invalid_config("built without p2p support"));
+    }
+    options.port_mapping.check_supported()?;
+    if let Some(timeout) = options.idle_timeout
+        && (request.transport.is_datagram()
+            || tokio::time::Instant::now().checked_add(timeout).is_none())
+    {
+        return Err(Error::invalid_config(
+            "idle deadline requires TCP and a representable duration",
+        ));
+    }
+    Ok(())
 }
 
 /// Two connected loopback TCP sockets with Nagle off: the end

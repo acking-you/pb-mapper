@@ -1009,3 +1009,68 @@ async fn remembered_invitation_survives_restart_but_not_revocation() {
     );
     replacement.stop().await.unwrap();
 }
+
+/// A viewer that reaches the host directly gets its video under the
+/// controller the host registered with, which the host's end of the session
+/// names; the viewer's end sends under Cubic. This host asks for BBR, which
+/// no end has by default, so the test fails if the host stops registering
+/// with its own; outside tests that is `VIDEO_CONGESTION`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_video_goes_out_under_the_hosts_controller() {
+    let relay = pb_mapper_testkit::Relay::start_with_direct(
+        "desktop-direct-congestion",
+        Some(pb_mapper_testkit::loopback_direct()),
+    )
+    .await;
+    let client = Client::from_credential(
+        relay.addr().to_string(),
+        pb_mapper_testkit::admin_credential(),
+        true,
+        None,
+    );
+    let mut options = HostOptions::new("desktop:direct-congestion");
+    options.allow_direct = true;
+    options.sender_congestion = Some(CongestionControl::Bbr);
+    let host = Host::builder(options)
+        .backend(|| Ok(Pixel))
+        .start(&client)
+        .await
+        .unwrap();
+    let invitation = host.invitation().clone();
+    let (socket, connection) = client
+        .connect_tcp(
+            invitation.service.clone(),
+            ConnectOptions {
+                path: PathPolicy::Auto,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    // The handshake crosses the session, so both ends have opened it.
+    let stream = security::client(invitation.fingerprint)
+        .unwrap()
+        .connect(
+            quinn::rustls::pki_types::ServerName::try_from(security::NAME).unwrap(),
+            socket,
+        )
+        .await
+        .unwrap();
+    let link = |diagnostics: pb_mapper_client::sdk::TunnelDiagnostics| {
+        diagnostics
+            .direct
+            .and_then(|direct| direct.link)
+            .map(|link| (link.transport, link.congestion))
+    };
+    let quic = pb_mapper_client::sdk::DirectTransport::Quic;
+    assert_eq!(
+        link(host.shared.registration.diagnostics()),
+        Some((quic, Some(CongestionControl::Bbr)))
+    );
+    assert_eq!(
+        link(connection.diagnostics()),
+        Some((quic, Some(CongestionControl::Cubic)))
+    );
+    drop(stream);
+    host.stop().await.unwrap();
+}

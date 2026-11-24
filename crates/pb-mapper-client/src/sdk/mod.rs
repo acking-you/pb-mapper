@@ -27,9 +27,9 @@ pub use types::{
 /// The SDK version compiled into this process.
 pub const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use crate::diagnostics::{
-    AddressFamily, ByteCount, CandidateCounts, DirectAttempt, DirectLink, DirectStage,
-    EventsLagged, FallbackReason, InterfaceTier, LanCounts, LanEvidence, LanTcpMiss, LinkKind,
-    LinkSample, LinkStats, LinkVia, PathDiagnostics, PathTraffic, PortMappingDiagnostics,
+    AddressFamily, ByteCount, CandidateCounts, CongestionControl, DirectAttempt, DirectLink,
+    DirectStage, EventsLagged, FallbackReason, InterfaceTier, LanCounts, LanEvidence, LanTcpMiss,
+    LinkKind, LinkSample, LinkStats, LinkVia, PathDiagnostics, PathTraffic, PortMappingDiagnostics,
     PortMappingProtocol, PortMappingStage, PortMappingStatus, RecoveryFailure, RecoveryPhase,
     RelayHealth, SessionCounts, SetupTimings, StunOutcome, TunnelDiagnostics, TunnelEvent,
     TunnelEventKind, TunnelEvents, TunnelMetrics, TunnelMetricsStream,
@@ -41,3 +41,14 @@ pub use pb_mapper_protocol::direct::{
 pub use crate::relay::{
     QUIC_UNAVAILABLE, QuicConnectionDiagnostics, RelayDiagnostics, RelayTransport,
 };
+
+/// The transport every direct QUIC connection runs with, sending under
+/// `congestion`: for benchmarks and tests that build their own endpoints
+/// around it. Not part of the supported API.
+#[doc(hidden)]
+#[cfg(feature = "p2p")]
+pub fn direct_transport_config(
+    congestion: CongestionControl,
+) -> std::io::Result<quinn::TransportConfig> {
+    crate::direct::transport(congestion)
+}

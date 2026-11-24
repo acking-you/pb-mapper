@@ -23,8 +23,8 @@ use crate::{
 };
 use parking_lot::Mutex;
 use pb_mapper_client::sdk::{
-    Client, RegisterOptions, RegisterRequest, Registration, Transport, TunnelMetrics,
-    TunnelMetricsStream,
+    Client, CongestionControl, RegisterOptions, RegisterRequest, Registration, Transport,
+    TunnelMetrics, TunnelMetricsStream,
 };
 use pb_mapper_core::timeout::RetryBackoff;
 use std::{
@@ -54,6 +54,16 @@ const _: () = assert!(
     !RESTORE_RETRY.is_zero() && RESTORE_RETRY.as_nanos() <= RESTORE_RETRY_MAX.as_nanos(),
     "RetryBackoff::new's preconditions: the retry backs off from RESTORE_RETRY up to the cap"
 );
+/// What the host's end of a direct QUIC session sends its video under.
+/// Still Cubic: BBR, measured on loopback with the receipts setting the rate
+/// (docs/benchmarks/2026-11-24-host-direct-bbr), kept the rate and cut the
+/// keyframe wait on paths with random loss, where Cubic's cut on every loss
+/// held the video to a fraction of it, but lost more packets behind a
+/// policer and kept the keyframe waiting longer there: its window grew to
+/// megabytes, so quinn's pacing, which follows the window, no longer held a
+/// burst back. A viewer's end, relayed sessions and direct TCP keep their
+/// own controllers.
+pub(crate) const VIDEO_CONGESTION: CongestionControl = CongestionControl::Cubic;
 
 /// What a host's status reads, shared with its acceptor.
 struct Shared {
@@ -351,6 +361,10 @@ pub struct Host {
     /// The display-mode restore retry, when the launcher journals; it ends
     /// on `cancel`, and dropping the host aborts it.
     restore: Option<tokio::task::JoinHandle<()>>,
+    /// The loopback listener the registration forwards to, which a test
+    /// dials over a path of its own.
+    #[cfg(test)]
+    listening: SocketAddr,
 }
 impl Host {
     pub fn builder(options: HostOptions) -> HostBuilder {
@@ -385,11 +399,14 @@ impl Host {
         let tls = identity.acceptor()?;
         let invitation = identity.invitation(options.service.clone())?;
         let listener = pb_mapper_core::listener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+        let listening = listener.local_addr()?;
+        // The video goes out on direct QUIC under VIDEO_CONGESTION.
+        let congestion = options.sender_congestion();
         let registration = client
-            .register_with_options(
+            .register_with_sender_congestion(
                 RegisterRequest {
                     key: options.service.clone(),
-                    local_addr: listener.local_addr()?.to_string(),
+                    local_addr: listening.to_string(),
                     transport: Transport::Tcp,
                     codec: true,
                     force_namespace: false,
@@ -400,6 +417,7 @@ impl Host {
                     lan_tcp: options.lan_tcp,
                     ..Default::default()
                 },
+                congestion,
             )
             .await
             .map_err(io::Error::other)?;
@@ -463,7 +481,14 @@ impl Host {
             last: tokio::sync::watch::Sender::new(None),
             join: AsyncMutex::new(Some(join)),
             restore,
+            #[cfg(test)]
+            listening,
         })
+    }
+    /// The loopback listener the registration forwards to.
+    #[cfg(test)]
+    pub(crate) fn listening(&self) -> SocketAddr {
+        self.listening
     }
     /// The `pbd1` invitation to this host.
     pub fn invitation(&self) -> &Invitation {
