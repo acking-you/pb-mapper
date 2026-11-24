@@ -1,0 +1,8 @@
+vt_constrained_high_1080p profile_set=0 1920x1080 reorder=false low_latency=true sets=2764002aac1314501e0089f966a0404040f0804258,28ee3cb0
+vt_high_720p profile_set=0 1280x720 reorder=false low_latency=false sets=27640020ac56805005b9,28ee3cb0
+vt_high_reorder_720p profile_set=0 1280x720 reorder=true low_latency=false sets=27640020ac565014016e40,28ee3cb0
+vt_main_reorder_640x360 profile_set=0 640x360 reorder=true low_latency=false sets=274d001fab281405ff2a,28ee3c80
+vt_baseline_640x360 profile_set=0 640x360 reorder=false low_latency=false sets=2742001fab405017fca8,28ce3c80
+vt_constrained_high_709_1080p profile_set=0 1920x1080 reorder=false low_latency=true sets=2764002aac1314501e0089f966a0202020f0804258,28ee3cb0
+vt_constrained_high_2160p profile_set=0 3840x2160 reorder=false low_latency=true sets=27640034ac1314600f0010fa6a0404040f08042680,28ee3cb0
+vt_high_709_reorder_1080p profile_set=0 1920x1080 reorder=true low_latency=false sets=2764002aac56501e0089f966a020202040,28ee3cb0
