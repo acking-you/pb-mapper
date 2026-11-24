@@ -1176,7 +1176,7 @@ crates/pb-mapper-desktop/src/
 
 | Part | Windows | macOS |
 | --- | --- | --- |
-| `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope | `CGDirectDisplayID` from `CGGetActiveDisplayList`, named by its UUID, which finds it again; `CGDisplayBounds` × the current mode's pixels per point; a session that is not on the console, or a locked screen, is the secure desktop |
+| `Desktop` | `WinDesktop`: `OpenInputDesktop` checks on the ordinary desktop, or the helper worker's Winlogon binding; `GetMonitorInfoW` geometry, found again by `\\.\DISPLAYn` when the handle went stale; per-monitor DPI scope | `CGDirectDisplayID` from `CGGetActiveDisplayList`, named by its UUID, which finds it again; `CGDisplayBounds` × the current mode's pixels per point; a session that is not on the console, or a locked screen, is the secure desktop; capture and the pointer reuse a check that passed within 16 ms until the session's own mode change, input never |
 | `Video` | the DXGI → D3D11 video processor → Media Foundation encoder, one fused object (`platform/windows/video/`) that thread C polls: drained every 2 ms while it holds units, and, after a capture with no new present, asked again every 2 ms for 250 ms after an injected input or a new picture, and once a period otherwise | ScreenCaptureKit (NV12, scaled by the system to the encoder's size, no cursor, queue depth 6) → `VTCompressionSession`, zero copy, one fused object that pushes (`DRAIN = None`): the output callback queues the unit and wakes thread C |
 | `Input` | enigo; `SendInput` with `KEYEVENTF_SCANCODE` for physical keys (a HID usage to its set-1 scancode); absolute moves as one `SendInput` event each (see [Pointer moves on Windows](#pointer-moves-on-windows)); `LockWorkStation` | `CGEvent` at the HID tap: pointer and wheel in the bound display's points, click counts for double clicks, named letters and digits at the key the Mac's layout types them with, other keys and physical keys by `kVK_*` place, modifiers as flag changes with left and right apart, text as Unicode string events of at most 20 UTF-16 units; no lock (`LOCK = false`) |
 | `Cursor` | `GetCursorInfo`, separate, the injected pixel until it shows a move; the shape once per new `HCURSOR`: its kind from the `LoadCursorW` standard handles, its bitmap from `GetIconInfo` and `GetDIBits` (colour, alpha or AND mask; monochrome AND/XOR, an inverting pixel drawn black outlined in white) | `CGEventGetLocation`, separate, the injected pixel until it shows a move; the shape when the window server's cursor seed moves (a private `CGSCurrentCursorSeed`, looked up with `dlsym`; without it at most every 500 ms): `NSCursor.currentSystemCursor` drawn at the display's scale, a kind only where it equals a standard cursor pixel for pixel, else `custom` |
@@ -1412,11 +1412,24 @@ has waited more than a second, the queue is dropped and replaced by an IDR.
 The wait counts from when the unit was ready or from the last IDR
 receipt, whichever is later, and time spent behind an IDR still in flight
 never counts, since that IDR is already the resync. The desktop context is
-checked at most every 100 ms and inside each capture; the injection boundary
-re-checks it for every input. A failure that ends streaming may be a desktop
-switch, so it is retried at once. A failure before any unit since the last
-recovery is retried every 200 ms, and each retry captures right after its
-context check.
+checked at most every 100 ms and around each capture and pointer read; the
+injection boundary re-checks it for every input. On a Mac each check reads the
+login's session and the display's geometry from WindowServer, so the checks
+around a capture or a pointer read take one that passed within the last 16 ms
+as their answer. A failed check is never reused; every input, the 100 ms check
+and a display mode change read WindowServer anew, and the session's own mode
+change or restore leaves nothing to reuse. A lock, another login taking the
+screen, or a display changed from outside the session, can therefore stop
+capture and the pointer up to 16 ms later than input. A test loop that made the
+same reads through the same reuse, paced as a moving picture at 60 FPS with the
+pointer sampled, read WindowServer for 61 of its 245 checks a second instead of
+all of them; it ran on a Mac whose screen was locked, so it stood in for
+`MacDesktop`'s own check, which a lock fails, and a run on an unlocked Mac is
+still to be made
+([measurements](benchmarks/2026-11-24-mac-session-check/README.md)). A failure
+that ends streaming may be a desktop switch, so it is retried at once. A
+failure before any unit since the last recovery is retried every 200 ms, and
+each retry captures right after its context check.
 
 Windows hosting uses DXGI Desktop Duplication, D3D11 textures and GPU NV12
 conversion, followed by a low-latency Media Foundation hardware encoder, H.265

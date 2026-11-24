@@ -65,6 +65,20 @@ struct State {
     opened: usize,
     /// The dated display, once `Probe::date` set one.
     dated: Option<Dated>,
+    /// The desktop checks made so far.
+    checks: Checks,
+}
+
+/// How often each desktop check ran: a fresh one, and one that may answer
+/// from a check a moment ago (`Desktop::prepare_recent`); and how often the
+/// backend said to reuse none (`Desktop::forget_recent`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Checks {
+    pub prepare: u32,
+    pub prepare_recent: u32,
+    pub matches: u32,
+    pub matches_recent: u32,
+    pub forgets: u32,
 }
 
 /// The test's clock.
@@ -178,6 +192,10 @@ impl Probe {
     /// How many video sources were opened.
     pub(crate) fn opened(&self) -> usize {
         self.0.lock().opened
+    }
+    /// The desktop checks made since the last call.
+    pub(crate) fn checks(&self) -> Checks {
+        std::mem::take(&mut self.0.lock().checks)
     }
     /// From now on a pushing source is a display presenting at `hz` from
     /// `epoch` on `clock`, whose presents `land` delivers; set it before the
@@ -296,6 +314,11 @@ impl Desktop for SynDesktop {
     type Scope = ();
     fn scope(&self) {}
     fn prepare(&mut self, _: impl FnOnce()) -> Result<()> {
+        self.0.0.lock().checks.prepare += 1;
+        Ok(())
+    }
+    fn prepare_recent(&mut self, _: impl FnOnce()) -> Result<()> {
+        self.0.0.lock().checks.prepare_recent += 1;
         Ok(())
     }
     fn display(&mut self) -> Result<Display> {
@@ -303,6 +326,17 @@ impl Desktop for SynDesktop {
             return Err(BackendError::new(FailureKind::DisplayLost, "display unplugged").into());
         }
         Ok(self.0.current())
+    }
+    fn display_matches(&mut self, expected: &Display) -> Result<bool> {
+        self.0.0.lock().checks.matches += 1;
+        Ok(&self.display()? == expected)
+    }
+    fn display_matches_recent(&mut self, expected: &Display) -> Result<bool> {
+        self.0.0.lock().checks.matches_recent += 1;
+        Ok(&self.display()? == expected)
+    }
+    fn forget_recent(&mut self) {
+        self.0.0.lock().checks.forgets += 1;
     }
 }
 
