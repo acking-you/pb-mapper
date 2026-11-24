@@ -62,6 +62,11 @@ struct PlaneStats {
   // none carries one, as on an X11 desktop whose compositor reports no
   // frame timings, where GDK paces its frames at 1/60 s.
   double refresh_interval_ms = 0;
+  // The filter the last draw scaled the picture with (PlaneFilterName).
+  const char* filter = "none";
+  // While timed, where the context has timer queries: the GPU time of the
+  // draws' picture passes.
+  PlaneGpuTimes gpu;
 };
 
 }  // namespace pb_video
@@ -80,7 +85,8 @@ bool pb_plane_area_bound(PbPlaneArea* plane);
 // Shows `source`'s pictures once a viewer places them.
 void pb_plane_area_bind(PbPlaneArea* plane, const pb_video::PlaneSource& source);
 // Hides the plane, restores the view's opaque background, frees its
-// converter, which releases the pictures it holds, and lets the texture go.
+// converter, which releases the pictures it holds, and its enlargement's
+// texture, and lets the texture go.
 void pb_plane_area_unbind(PbPlaneArea* plane);
 // A newer picture waits: the placed picture is drawn again at the next
 // frame. If no frame takes it within 100 ms (the window covered, or on
@@ -93,7 +99,11 @@ void pb_plane_area_wake(PbPlaneArea* plane);
 void pb_plane_area_place(PbPlaneArea* plane, const pb_video::Placement& placement);
 // The reconnect's grey still, through the grey still's matrix.
 void pb_plane_area_grey(PbPlaneArea* plane, bool on);
-// `timings` starts the interval figures, or keeps them; false drops them.
+// How much a picture shown at least its own size is sharpened; the plane
+// draws it again at once. Every texture starts at Enhance::kOff.
+void pb_plane_area_enhance(PbPlaneArea* plane, pb_video::Enhance level);
+// `timings` starts the interval and GPU time figures, or keeps them; false
+// drops them.
 pb_video::PlaneStats pb_plane_area_stats(PbPlaneArea* plane, bool timings);
 
 #endif  // RUNNER_DESKTOP_VIDEO_PLANE_H_

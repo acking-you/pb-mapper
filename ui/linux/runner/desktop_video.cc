@@ -768,6 +768,18 @@ pb_video::Placement PlacementOf(FlValue* args) {
   return placement;
 }
 
+// An `enhance` call's level: Dart's PictureEnhancement by name.
+pb_video::Enhance EnhanceOf(FlValue* args) {
+  FlValue* level = fl_value_lookup_string(args, "level");
+  if (!level || fl_value_get_type(level) != FL_VALUE_TYPE_STRING) throw std::runtime_error("Missing enhance level");
+  const gchar* name = fl_value_get_string(level);
+  if (strcmp(name, "off") == 0) return pb_video::Enhance::kOff;
+  if (strcmp(name, "low") == 0) return pb_video::Enhance::kLow;
+  if (strcmp(name, "medium") == 0) return pb_video::Enhance::kMedium;
+  if (strcmp(name, "high") == 0) return pb_video::Enhance::kHigh;
+  throw std::runtime_error("Invalid enhance level");
+}
+
 class DesktopVideo {
  public:
   // `plane`: the video plane under the view, or null.
@@ -890,6 +902,12 @@ class DesktopVideo {
       if (!on || fl_value_get_type(on) != FL_VALUE_TYPE_BOOL) throw std::runtime_error("Missing grey");
       if (texture->state->plane) pb_plane_area_grey(texture->state->plane, fl_value_get_bool(on));
       fl_method_call_respond_success(call, nullptr, nullptr);
+    } else if (strcmp(method, "enhance") == 0) {
+      // How much the plane sharpens a picture it shows at least its own
+      // size; nothing for Flutter's texture, which Flutter scales bilinear.
+      const pb_video::Enhance level = EnhanceOf(args);
+      if (texture->state->plane) pb_plane_area_enhance(texture->state->plane, level);
+      fl_method_call_respond_success(call, nullptr, nullptr);
     } else if (strcmp(method, "stats") == 0) {
       // `timings` is optional and true when absent, as on Windows and
       // macOS.
@@ -940,15 +958,22 @@ class DesktopVideo {
       fl_value_set_string_take(result, "refreshHz", fl_value_new_float(window_hz > 1 ? window_hz : DisplayMaxHz()));
       if (texture->state->plane) {
         // The plane's own presentation: the refresh interval GDK's frames
-        // carry, left out when none does, and, while timed, the intervals
-        // between the frames that drew a newer picture.
+        // carry, left out when none does; the filter its last draw scaled
+        // the picture with; and, while timed, the intervals between the
+        // frames that drew a newer picture and, where GL has timer
+        // queries, the GPU time of the draws' picture passes.
         const pb_video::PlaneStats plane = pb_plane_area_stats(texture->state->plane, timings);
         if (plane.refresh_interval_ms > 0) {
           fl_value_set_string_take(result, "refreshIntervalMs", fl_value_new_float(plane.refresh_interval_ms));
         }
+        fl_value_set_string_take(result, "planeFilter", fl_value_new_string(plane.filter));
         if (timings && plane.intervals > 0) {
           fl_value_set_string_take(result, "planeIntervalP50Ms", fl_value_new_float(plane.interval_p50_ms));
           fl_value_set_string_take(result, "planeIntervalP95Ms", fl_value_new_float(plane.interval_p95_ms));
+        }
+        if (timings && plane.gpu.samples > 0) {
+          fl_value_set_string_take(result, "planeScaleGpuP50Ms", fl_value_new_float(plane.gpu.p50_ms));
+          fl_value_set_string_take(result, "planeScaleGpuP95Ms", fl_value_new_float(plane.gpu.p95_ms));
         }
       }
       fl_method_call_respond_success(call, result, nullptr);

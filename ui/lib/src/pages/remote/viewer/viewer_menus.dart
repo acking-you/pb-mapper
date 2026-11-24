@@ -167,7 +167,8 @@ List<ViewerMenuEntry> displayMenu(AppLocalizations l10n, ViewerActions a) => [
 
 /// How much an enlarged picture is sharpened, this device's choice: offered
 /// only while the runner presents the picture itself and can
-/// ([DesktopPicture.enhances]). Live, never a reconnect.
+/// ([DesktopPicture.enhances]: the macOS layer presenter, the Linux video
+/// plane). Live, never a reconnect.
 List<ViewerMenuEntry> _sharpening(AppLocalizations l10n, ViewerActions a) {
   if (a.desktop.picture.value?.enhances != true) return const [];
   final current = a.prefs.enhance;

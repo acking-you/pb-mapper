@@ -9,8 +9,11 @@
 // draws for a newer picture (queued at high priority from the decoder's
 // thread through desktop_video.cc), or because Flutter or an overlay drew.
 // Only the first takes and converts a picture; every render draws the last
-// converted one into the placed rectangle, cut to its clip. Flutter's view
-// above it is transparent there, where the viewer leaves a hole.
+// converted one into the placed rectangle, cut to its clip, scaled there by
+// the filter PlanPlane picks (desktop_video_gl.h): area-averaged when it
+// shows smaller than its own size, and enlarged with the viewer's
+// enhancement when it asks for one. Flutter's view above it is transparent
+// there, where the viewer leaves a hole.
 #define G_LOG_DOMAIN "pb-mapper-video"
 
 #include "desktop_video_plane.h"
@@ -51,6 +54,9 @@ struct PlaneState {
   // Whether the widget shows and the view is transparent.
   bool shown = false;
   bool grey = false;
+  pb_video::Enhance enhance = pb_video::Enhance::kOff;
+  // Changes whenever the converter holds another picture, or goes.
+  uint64_t serial = 0;
   // Since when a newer picture has waited for a frame, 0 when none does;
   // the timer that takes it after kStallUs.
   gint64 pending_since = 0;
@@ -137,22 +143,26 @@ bool Take(PbPlaneArea* self, bool wake) {
   const bool took = state->source.take(state->source.texture, state->gl.get(), wake);
   // Whatever waited is taken; a newer one says so again.
   state->pending_since = 0;
+  if (took) ++state->serial;
   return took;
 }
 
-// Frees the converter, which releases the pictures it holds, in the
-// plane's context, or forgets its objects when the context is gone.
+// Frees the converter, which releases the pictures it holds, and the
+// drawing's enlargement texture, in the plane's context, or forgets the
+// converter's objects when the context is gone.
 void FreeConverter(PbPlaneArea* self) {
   PlaneState* state = StateOf(self);
-  if (!state->gl) return;
   GtkGLArea* area = GTK_GL_AREA(self);
-  if (gtk_widget_get_realized(GTK_WIDGET(self)) && gtk_gl_area_get_context(area)) {
+  const bool context = gtk_widget_get_realized(GTK_WIDGET(self)) && gtk_gl_area_get_context(area);
+  if (context) {
     gtk_gl_area_make_current(area);
-    state->gl->Free();
+    if (state->gl) state->gl->Free();
+    state->draw.Trim();
     gdk_gl_context_clear_current();
-  } else {
+  } else if (state->gl) {
     state->gl->Free(true);
   }
+  if (state->gl) ++state->serial;
   state->gl.reset();
 }
 
@@ -270,8 +280,21 @@ static gboolean pb_plane_area_render(GtkGLArea* area, GdkGLContext*) {
   }
   if (!state->draw.Setup(&failure)) LogFailure(state, failure);
   const int scale = gtk_widget_get_scale_factor(widget);
-  state->draw.Draw(name, state->placement.picture, state->placement.clip, state->grey,
-                   gtk_widget_get_allocated_width(widget) * scale, gtk_widget_get_allocated_height(widget) * scale);
+  pb_video::PlaneFrame frame;
+  frame.texture = name;
+  frame.width = width;
+  frame.height = height;
+  frame.serial = state->serial;
+  frame.picture = state->placement.picture;
+  frame.clip = state->placement.clip;
+  frame.grey = state->grey;
+  frame.enhance = state->enhance;
+  frame.target_width = gtk_widget_get_allocated_width(widget) * scale;
+  frame.target_height = gtk_widget_get_allocated_height(widget) * scale;
+  std::string fallback;
+  state->draw.Draw(frame, &fallback);
+  // Once for each filter the context cannot run.
+  if (!fallback.empty()) g_warning("The video plane scales bilinear instead: %s", fallback.c_str());
   if (state->timing) {
     GdkFrameClock* clock = gtk_widget_get_frame_clock(widget);
     if (took && clock) {
@@ -413,9 +436,12 @@ void pb_plane_area_unbind(PbPlaneArea* self) {
   state->source = pb_video::PlaneSource{};
   state->placement = pb_video::Placement{};
   state->grey = false;
+  state->enhance = pb_video::Enhance::kOff;
   state->pending_since = 0;
   state->timing = false;
   ResetTimings(state);
+  // The drawing's GPU times too: the next texture's start from nothing.
+  state->draw.Time(false);
   if (texture) g_object_unref(texture);
 }
 
@@ -446,15 +472,26 @@ void pb_plane_area_grey(PbPlaneArea* self, bool on) {
   if (state->shown) QueuePicture(self);
 }
 
+void pb_plane_area_enhance(PbPlaneArea* self, pb_video::Enhance level) {
+  PlaneState* state = StateOf(self);
+  if (!state->source.texture || state->enhance == level) return;
+  state->enhance = level;
+  // Drawn again at once, though the desktop may be still.
+  if (state->shown) QueuePicture(self);
+}
+
 pb_video::PlaneStats pb_plane_area_stats(PbPlaneArea* self, bool timings) {
   PlaneState* state = StateOf(self);
   pb_video::PlaneStats stats;
   if (timings != state->timing) ResetTimings(state);
   state->timing = timings;
+  state->draw.Time(timings);
+  stats.filter = pb_video::PlaneFilterName(state->draw.last_filter());
   GdkFrameClock* clock = gtk_widget_get_realized(GTK_WIDGET(self)) ? gtk_widget_get_frame_clock(GTK_WIDGET(self))
                                                                      : nullptr;
   if (clock) stats.refresh_interval_ms = RefreshIntervalMs(clock);
   if (!timings) return stats;
+  stats.gpu = state->draw.GpuTimes();
   ResolveTimings(self);
   std::vector<double> sorted(state->intervals.begin(), state->intervals.end());
   stats.intervals = sorted.size();

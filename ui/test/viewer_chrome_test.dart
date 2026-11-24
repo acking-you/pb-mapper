@@ -1309,8 +1309,8 @@ void main() {
 
   testWidgets(
     'Sharpen enlarged picture is offered only for a picture the runner '
-    'presents itself, which hears the device\'s level as it shows and each '
-    'change at once',
+    'presents itself, on the macOS layer or the Linux plane, which hears the '
+    'device\'s level as it shows and each change at once',
     (tester) async {
       _size(tester, const Size(1280, 800));
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -1324,9 +1324,15 @@ void main() {
         ),
       );
       final submenu = find.byKey(const Key('display-sharpen'));
-      for (final viewType in [null, 'pb_mapper/desktop_video_view']) {
+      for (final (viewType, plane) in [
+        (null, false),
+        ('pb_mapper/desktop_video_view', false),
+        (null, true),
+      ]) {
         final api = FakeDesktopApi()..codec = 'h264';
-        final textures = FakeTextures()..platformViewType = viewType;
+        final textures = FakeTextures()
+          ..platformViewType = viewType
+          ..plane = plane;
         final store = DesktopStore(api, textures: textures.create);
         final demand = store.demand(DesktopDemand.viewer);
         await store.connect(_target);
@@ -1341,7 +1347,7 @@ void main() {
         final texture = textures.created.single;
         await tester.tap(find.byKey(const Key('viewer-display')));
         await tester.pump(const Duration(milliseconds: 300));
-        if (viewType == null) {
+        if (viewType == null && !plane) {
           // A Flutter texture: nothing to offer, nothing sent.
           expect(submenu, findsNothing);
           expect(texture.enhancements, isEmpty);

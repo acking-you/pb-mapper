@@ -178,10 +178,86 @@ struct PlaneRect {
   int32_t x = 0, y = 0, width = 0, height = 0;
 };
 
+// How much the plane sharpens a picture it shows at least its own size:
+// the viewer's "Sharpen enlarged picture" (`enhance`'s level).
+enum class Enhance { kOff, kLow, kMedium, kHigh };
+
+// AMD FidelityFX CAS's peak at `level`, as airhand weighs it
+// (client/src/lib/enhance.ts): how far a pixel's luma moves from its four
+// neighbours' mean where they hardly differ. 0 at kOff.
+float EnhancePeak(Enhance level);
+
+// How the plane scales the picture into its rectangle, by the scale s from
+// the picture's pixels to the rectangle's.
+enum class PlaneFilter {
+  // Nothing of the picture shows.
+  kNone,
+  // s >= 1 on both axes with no enhancement, and the black pixel before
+  // the first picture: bilinear, which at s = 1 is a one-to-one copy.
+  kBilinear,
+  // s < 1 on either axis: nine bilinear taps spread over the source pixels
+  // each pixel covers, averaged ...
+  kArea,
+  // ... and below s = 1/3, where the context mipmaps the picture, from its
+  // mipmaps (made once a picture), trilinear, each tap a third of the span.
+  kAreaMipmapped,
+  // s = 1 with an enhancement: luma sharpened, CAS.
+  kSharpen,
+  // s >= 1 on both axes and more on one, with an enhancement: Catmull-Rom
+  // from nine bilinear taps, clamped to the four nearest pixels (no
+  // ringing), into a texture of the visible region, then luma sharpened.
+  kUpscaleSharpen,
+};
+
+// Its name in the plane's stats.
+const char* PlaneFilterName(PlaneFilter filter);
+
+// How a picture `width` x `height` placed at `picture`, cut to `clip`, goes
+// into a framebuffer `target_width` x `target_height`. `mipmaps`: whether
+// the context can mipmap a texture of the picture's size.
+struct PlanePlan {
+  PlaneFilter filter = PlaneFilter::kNone;
+  // What of the picture shows: inside the clip and the framebuffer.
+  PlaneRect visible;
+  // kUpscaleSharpen: the part of the picture enlarged first, the visible
+  // part and a pixel around it within the picture, so that the sharpening
+  // at its edge sees the picture's pixels beyond.
+  PlaneRect region;
+};
+PlanePlan PlanPlane(uint32_t width, uint32_t height, const PlaneRect& picture, const PlaneRect& clip,
+                    Enhance enhance, bool mipmaps, int32_t target_width, int32_t target_height);
+
+// One draw of the video plane.
+struct PlaneFrame {
+  // The converted picture (RGBA, its first row the picture's top, clamped
+  // to its edge) and its size.
+  GLuint texture = 0;
+  uint32_t width = 0, height = 0;
+  // Changes whenever `texture` holds another picture: mipmaps are made once
+  // for each.
+  uint64_t serial = 0;
+  // Where it goes, which may reach past the framebuffer, and the part of
+  // the framebuffer it may cover.
+  PlaneRect picture, clip;
+  // Through the grey still's matrix: every channel the luma at half
+  // brightness.
+  bool grey = false;
+  Enhance enhance = Enhance::kOff;
+  // The bound framebuffer's size.
+  int32_t target_width = 0, target_height = 0;
+};
+
+// The GPU time of the plane's picture passes, while timed.
+struct PlaneGpuTimes {
+  size_t samples = 0;
+  double p50_ms = 0, p95_ms = 0;
+};
+
 // Draws the converted RGBA texture into the window for the video plane, in
 // the plane's own context: GL ES 2 or later (GLSL ES 1.00), or desktop GL
-// 3.2 or later (GLSL 1.50). It leaves the state it sets: nothing else draws
-// in that context.
+// 3.2 or later (GLSL 1.50). It leaves the state it sets, the framebuffer
+// bound before excepted: nothing else draws in that context. It sets the
+// minifying filter of the textures it is given, and leaves it linear.
 class PlaneGl {
  public:
   PlaneGl() = default;
@@ -190,24 +266,84 @@ class PlaneGl {
   // What it made belongs to the context: Free deletes it first.
   ~PlaneGl() = default;
 
-  // With the context current: builds the program. False, with `error`,
-  // when the context cannot run it; it is not tried again.
+  // With the context current: builds the bilinear program. False, with
+  // `error`, when the context cannot run it; it is not tried again. The
+  // other filters' programs are built when first used.
   bool Setup(std::string* error);
-  // Clears the bound framebuffer, `target_width` x `target_height` pixels,
-  // to black, then draws `texture` (RGBA, its first row the picture's top)
-  // stretched over `picture`, which may reach past the framebuffer,
-  // bilinear, cut to `clip`. `grey` puts it through the grey still's
-  // matrix: every channel the luma at half brightness.
-  void Draw(GLuint texture, const PlaneRect& picture, const PlaneRect& clip, bool grey, int32_t target_width,
-            int32_t target_height);
+  // Clears the bound framebuffer to black, then draws `frame`'s texture
+  // stretched over its rectangle, cut to its clip, through the filter
+  // PlanPlane chooses. A filter the context cannot run is not tried again,
+  // and the picture goes bilinear instead; `fallback` then says why, once
+  // for each filter. What it drew with is `last_filter`.
+  void Draw(const PlaneFrame& frame, std::string* fallback);
+  PlaneFilter last_filter() const { return last_filter_; }
+  // While on, the GPU time of each draw's picture passes, from the clear's
+  // end to the last pass's, is measured where the context has timer
+  // queries (desktop GL 3.3 or later); off drops the figures.
+  void Time(bool on);
+  // p50 and p95 of the last few hundred times measured. Any time, with no
+  // context current: draws read the GPU's answers without waiting, so the
+  // newest draws are not in them yet.
+  PlaneGpuTimes GpuTimes();
+  // With the context current: deletes what only an enhancement needs, the
+  // enlargement's texture, and forgets a size of it that could not be
+  // made, which the next enhancement tries again. Draw does at
+  // Enhance::kOff.
+  void Trim();
   // With the context current, or once it is gone (`context_gone`).
   void Free(bool context_gone = false);
 
  private:
-  bool tried_ = false, samplers_ = false;
+  // A program of the plane's quad and one of its fragment shaders.
+  struct Program {
+    GLuint name = 0;
+    GLint picture = -1, bounds = -1, window = -1, tone = -1;
+    GLint spacing = -1, bias = -1, size = -1, texel = -1, limit = -1, peak = -1;
+    // Why it did not build: it is not tried again.
+    std::string failure;
+  };
+  struct RunningQuery {
+    GLuint name = 0;
+    uint64_t epoch = 0;
+  };
+  enum Kind { kPlain, kAreaProgram, kUpscale, kSharpenProgram, kKinds };
+
+  // The program of `kind`, built the first time; null, with `error` the
+  // first time it fails, when it does not build.
+  const Program* Use(Kind kind, std::string* error);
+  // The texture the enlargement draws into, at least `width` x `height`,
+  // bound to its framebuffer; false when it cannot be.
+  bool Scaled(int32_t width, int32_t height);
+  // Draws the quad over `rect` of a framebuffer `target_width` x
+  // `target_height` (from its top left; GL's rows count from the bottom),
+  // its texture coordinates running from (s0, t0) at the rect's bottom
+  // left to (s1, t1) at its top right.
+  void Quad(const Program& program, const PlaneRect& rect, int32_t target_width, int32_t target_height, float s0,
+            float t0, float s1, float t1);
+  void PollQueries();
+
+  bool tried_ = false, samplers_ = false, desktop_ = false, mipmaps_ = false, timer_queries_ = false;
+  GLint max_texture_ = 0;
   std::string failure_;
-  GLuint program_ = 0, quad_ = 0, vertex_array_ = 0;
-  GLint picture_ = -1, bounds_ = -1, tone_ = -1;
+  Program programs_[kKinds];
+  GLuint quad_ = 0, vertex_array_ = 0;
+  // kUpscaleSharpen's texture and framebuffer, grown in 256-pixel steps;
+  // the size that could not be made, which no draw asks for again until
+  // Trim (a smaller one is tried); whether a failure was said, once.
+  GLuint scaled_ = 0, scaled_framebuffer_ = 0;
+  int32_t scaled_width_ = 0, scaled_height_ = 0;
+  int32_t refused_width_ = 0, refused_height_ = 0;
+  bool scaled_failed_ = false;
+  // The texture and picture whose mipmaps were made last.
+  GLuint mipmapped_texture_ = 0;
+  uint64_t mipmapped_serial_ = 0;
+  PlaneFilter last_filter_ = PlaneFilter::kNone;
+  // Timer queries: those still running on the GPU, and the times read.
+  bool timing_ = false;
+  uint64_t timing_epoch_ = 0;
+  std::vector<GLuint> queries_;
+  std::deque<RunningQuery> running_;
+  std::deque<double> gpu_ms_;
 };
 
 }  // namespace pb_video

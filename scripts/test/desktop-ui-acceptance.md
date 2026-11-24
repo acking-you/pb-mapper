@@ -256,9 +256,12 @@ Each sample's `native` holds the decoder's counts, `timings.decode`,
 `timings.convert` and `timings.surface_consume` (`frame_ready` to the
 texture's `populate`, or to the plane's render taking the picture),
 `refreshHz`, `dmabuf` and `videoconvert`; with the plane also
-`refreshIntervalMs`, the refresh interval GDK's recent frames carry, and
+`refreshIntervalMs`, the refresh interval GDK's recent frames carry,
 `planeIntervalP50Ms` and `planeIntervalP95Ms`, the intervals between the
-frames that drew a newer picture. Without `refreshIntervalMs` no frame
+frames that drew a newer picture, `planeFilter`, the filter its last draw
+scaled the picture with, and, on desktop GL 3.3 or later,
+`planeScaleGpuP50Ms` and `planeScaleGpuP95Ms`, the GPU time of those
+draws. Without `refreshIntervalMs` no frame
 carried one, as on an X11 desktop whose compositor reports no frame
 timings, where GDK paces the window at 1/60 s whatever the monitor. On
 Wayland GDK puts its own 1/60 s (16.667) for an output whose mode it does
@@ -292,6 +295,26 @@ KDE Wayland, GNOME X11 and Xfce X11, on a 60 Hz and a 144 Hz monitor, at
   method's preedit, a window drag and resize, and the tray menu, since
   every Linux build now puts the Flutter view in a `GtkOverlay` over the
   hidden plane.
+
+The plane's scaling
+([its record](../../docs/benchmarks/2026-11-24-linux-plane-scaling/README.md)
+ran only on a Mac's OpenGL) needs its own runs, on the plane bundle built
+once with `--dart-define=enhance=off` and once with `high` (the report
+repeats it as `enhance`), against a `desktop_ui_host` text clip or a real
+host showing text, on an Intel iGPU and an NVIDIA desktop:
+
+- a 1440p or 4K picture in a window sized for 0.375x, 0.5x and 0.75x, and
+  a 1080p one zoomed to 1.5x and 2x and full screen on a 1440p or 4K
+  monitor, with `planeFilter` in the samples saying which filter drew;
+- screenshots of the same region at each, with `grim` on Wayland or
+  `import -window root` on X11, side by side, and their SSIM against a CPU
+  Lanczos-3 reference of the same host frame (`plane_reference.h` has one);
+- `planeScaleGpuP50Ms` and `planeScaleGpuP95Ms` beside `intel_gpu_top` or
+  `nvidia-smi dmon`, off against high;
+- presented fps and `planeIntervalP95Ms` at 120 frames a second, which the
+  filters must leave unchanged;
+- a pinch zoom, a pan and a resize while the remote desktop is still,
+  which must redraw at the new scale with nothing from the host.
 
 A 240 fps camera filming a flashing pattern on both screens gives the time
 from glass to glass, optionally. Record the runs under `docs/benchmarks/`
