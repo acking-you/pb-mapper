@@ -37,7 +37,12 @@ match against the context's display) through the same `Reuse` policy, taking
 the session's answer as a pass, and counted each read. It also timed
 `MacDesktop`'s own recent checks while the lock failed them: each read
 WindowServer, so a failure was not reused. On an unlocked Mac the test times
-`MacDesktop`'s checks instead; that run is still to be made.
+`MacDesktop`'s checks instead; that run is still to be made. WindowServer's
+CPU below was likewise measured with the lock screen up.
+
+After review the branch made the session's own display mode change and
+restore forget what is reused (`Desktop::forget_recent`). These loops change
+no mode, so that does not touch their figures.
 
 Before is the base, `perf2/wave1` (`bdbcd76`), with the same test where every
 check makes both reads and nothing is reused, and `available` made
@@ -83,12 +88,16 @@ varies with what else draws (34 ms/s in the first before run, against 5 to 9
 in the others). With reuse, 61 of the 245 checks a second read WindowServer,
 each making both reads; the thread spent 8.8 ms/s of CPU against 25.9 before
 (the medians; 8.6–9.9 against 20.4–30.8), and WindowServer 17 ms/s against
-36–38 with 5–9 idle.
+36–38 with 5–9 idle. The WindowServer figures move by more than that from
+run to run on this shared machine, and the lock screen was up, so take them
+as a direction only.
 
-Paced, a check that reads costs the thread several times its back-to-back
+Paced, a check that reads cost the thread several times its back-to-back
 cost: 245 of them took 25.9 ms/s of CPU before, about 100 µs each against
-18 µs back to back, as the thread wakes for each tick. The back-to-back figure
-alone understates what reuse saves.
+18 µs back to back. The idle arm, which wakes on the same ticks without
+checking, used about 1.2 ms/s, so the wakeups alone do not account for it;
+these runs do not show what does. The back-to-back figure alone understates
+what reuse saves.
 
 ## Not measured here
 
@@ -96,6 +105,9 @@ These need a Mac whose owner is signed in with the screen unlocked, and the
 live ones a viewer:
 
 - `session_check_cost` there, which then times `MacDesktop`'s own checks;
+- what reuse saves on a still screen, where a Mac host submits a picture only
+  at its liveness or keyframe deadline and the pointer's checks are most of
+  them: the loops above pace a moving picture alone;
 - during `target/release/examples/deployed APP_CONFIG_PATH OUT/<arm>-<n>
   selftest 40 --tcp`, view-only and with the pointer moving, before and after:
   `sample <host pid> 10` for the share of `CGSessionCopyCurrentDictionary`,
