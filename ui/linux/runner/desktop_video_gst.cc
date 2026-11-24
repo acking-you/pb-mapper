@@ -78,7 +78,7 @@ constexpr uint32_t kBounds[][2] = {{3840, 2160}, {2560, 1440}, {1920, 1080}, {12
 constexpr uint32_t kSoftwareWidth = 1920, kSoftwareHeight = 1080;
 // Units inside the pipeline and not yet decoded. The decoder thread pulls
 // the next one only below this, so a backlog builds in Rust's sink, which
-// drops it to the next keyframe, and never here.
+// drains it while it asks for a keyframe, and never here.
 constexpr size_t kMaxInFlight = 4;
 // A pipeline holding units this long without a picture is rebuilt.
 constexpr auto kStall = std::chrono::seconds(2);

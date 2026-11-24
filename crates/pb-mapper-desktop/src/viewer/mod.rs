@@ -16,8 +16,8 @@
 //!
 //! The sink keeps only the newest decodable frames (`sink`), recovery
 //! asks for IDRs on a limited backoff (`recovery`), and when the consumer
-//! falls behind the host is capped to what it presents (`fps_cap`). A decoder
-//! that cannot recover ends the session with `decoder_failed`.
+//! falls behind the host is capped below what it can take (`fps_cap`). A
+//! decoder that cannot recover ends the session with `decoder_failed`.
 mod config;
 mod error;
 mod fps_cap;
