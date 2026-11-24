@@ -22,6 +22,8 @@ use tracing_subscriber::{Layer, filter::Targets, layer::SubscriberExt};
 
 /// Balanced's start at 1080p and 60 fps: 66 667 bits per frame (perf 5.9.1).
 const START_BPS: u64 = 4_000_000;
+/// Balanced's most bits per frame at 1080p.
+const BPF_MAX: u64 = 133_333;
 /// Balanced's ceiling under the viewer's 60 fps limit.
 const CEILING_FPS: u64 = 60;
 /// The synthetic encoder's usual latency, and when an output left in it is
@@ -71,6 +73,14 @@ struct Interval {
     /// The receipts' one-way queues, from a viewer that stamps arrival times.
     forward_queue_ms: Option<u64>,
     reverse_queue_ms: Option<u64>,
+    /// The fps cap the receipts set from the delivery rate, if any.
+    rate_fps: Option<u64>,
+    /// The receipts' standing queue.
+    standing_ms: Option<u64>,
+    /// The receipts' rate cuts since the session began.
+    cuts: u64,
+    /// What a rebase added to the probes' baseline, if anything.
+    rebase_ms: Option<u64>,
 }
 impl Interval {
     fn new(at: Instant) -> Self {
@@ -98,6 +108,10 @@ impl Interval {
             rtt_ms: None,
             forward_queue_ms: None,
             reverse_queue_ms: None,
+            rate_fps: None,
+            standing_ms: None,
+            cuts: 0,
+            rebase_ms: None,
         }
     }
 
@@ -105,10 +119,11 @@ impl Interval {
     fn print(&self, case: &str, from: Instant, phase: &str) {
         let millis = |value: Option<u64>| value.map_or_else(|| "-".to_owned(), |ms| ms.to_string());
         println!(
-            "{case} t_ms={} phase={phase} pace_fps={} fps={} bpf={} encoder_bitrate={} sent_bitrate={} clamped={} adaptation={} window_frames={} window_bytes={} rtt_ms={} delay_ms={} ack_queue_ms={} forward_queue_ms={} reverse_queue_ms={}",
+            "{case} t_ms={} phase={phase} pace_fps={} fps={} rate_fps={} bpf={} encoder_bitrate={} sent_bitrate={} clamped={} adaptation={} window_frames={} window_bytes={} rtt_ms={} delay_ms={} ack_queue_ms={} forward_queue_ms={} reverse_queue_ms={} standing_ms={} cuts={} rebase_ms={}",
             self.at.saturating_duration_since(from).as_millis(),
             self.pace_fps,
             self.fps,
+            millis(self.rate_fps),
             self.bpf,
             self.encoder_bitrate,
             self.sent_bitrate,
@@ -121,6 +136,9 @@ impl Interval {
             self.ack_queue_ms,
             millis(self.forward_queue_ms),
             millis(self.reverse_queue_ms),
+            millis(self.standing_ms),
+            self.cuts,
+            millis(self.rebase_ms),
         );
     }
 }
@@ -147,6 +165,10 @@ impl tracing::field::Visit for Interval {
             "delay_ms" => self.delay_ms = Some(value),
             "ack_queue_ms" => self.ack_queue_ms = value,
             "rtt_ms" => self.rtt_ms = Some(value),
+            "rate_fps" => self.rate_fps = Some(value),
+            "standing_ms" => self.standing_ms = Some(value),
+            "cuts" => self.cuts = value,
+            "rebase_ms" => self.rebase_ms = Some(value),
             "forward_queue_ms" => self.forward_queue_ms = Some(value),
             "reverse_queue_ms" => self.reverse_queue_ms = Some(value),
             _ => {}
@@ -1005,8 +1027,9 @@ fn mean(samples: &[f32]) -> f32 {
 
 /// A short fixed delay, as on a LAN or a nearby direct path: the pace reaches
 /// the ceiling within 8 s, and the viewer then receives at least 58 fps.
+/// Reports, over 30 s, when bits per frame reached Balanced's maximum.
 #[test]
-#[ignore = "explicit ~18-second short-path acceptance"]
+#[ignore = "explicit ~30-second short-path acceptance"]
 fn lan_rtt_keeps_60() {
     traced(|trace| async move {
         let shape = Arc::new(Shape::default());
@@ -1022,13 +1045,21 @@ fn lan_rtt_keeps_60() {
             .map(|interval| interval.at - started);
         let received = received_fps(&rig.viewer, 10).await;
         let status = rig.viewer.status();
+        let bpf_max = first_after(&trace, started, Duration::from_secs(30), |interval| {
+            interval.bpf >= BPF_MAX
+        })
+        .await;
+        let last = trace.last();
         rig.stop().await;
         println!(
-            "lan_rtt one_way_ms={SHORT_PATH_MS} ceiling_after_ms={:?} received_fps_mean={:.1} received_fps={received:?} presented_fps={:.1} rtt_ms={:?} state={:?}",
+            "lan_rtt one_way_ms={SHORT_PATH_MS} ceiling_after_ms={:?} received_fps_mean={:.1} received_fps={received:?} presented_fps={:.1} rtt_ms={:?} bpf_max_after_ms={:?} last_bpf={} cuts={} state={:?}",
             ceiling.map(|after| after.as_millis()),
             mean(&received),
             status.stats.presented_fps,
             status.stats.rtt_ms,
+            bpf_max.map(|after| after.as_millis()),
+            last.bpf,
+            last.cuts,
             status.state
         );
         assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
@@ -1045,7 +1076,8 @@ fn lan_rtt_keeps_60() {
 /// probes in flight, and none may collapse the frame rate. The pace never
 /// falls below half its value before a stall, and is at 55 or more again
 /// within 4 s of the stall ending. Three stalls, so that at least one delays a
-/// probe even when they come only once a second.
+/// probe even when they come only once a second. A stall is no congestion:
+/// the receipts never cut the rate for one.
 #[test]
 #[ignore = "explicit ~26-second isolated stall acceptance"]
 fn isolated_stall_does_not_collapse_fps() {
@@ -1058,9 +1090,12 @@ fn isolated_stall_does_not_collapse_fps() {
         let rig = Rig::start("stall", Some(shape.clone()), TYPICAL).await;
         let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
         tokio::time::sleep(Duration::from_secs(8)).await;
+        let first = trace.last();
         let mut stalls = Vec::new();
+        let mut encoder = Vec::new();
         for _ in 0..3 {
             let before = trace.last().pace_fps;
+            let before_encoder = trace.last().encoder_bitrate;
             // Every byte read from now on waits behind one held for the stall.
             shape
                 .delay_ms
@@ -1085,12 +1120,20 @@ fn isolated_stall_does_not_collapse_fps() {
                         .map_or(SPACING, |back| back.at.saturating_duration_since(ended))
                 });
             stalls.push((before, lowest, recovered));
+            let lowest_encoder = after
+                .iter()
+                .map(|interval| interval.encoder_bitrate)
+                .min()
+                .unwrap();
+            encoder.push((before_encoder, lowest_encoder));
         }
+        let last = trace.last();
         let status = rig.viewer.status();
         rig.stop().await;
         println!(
-            "isolated_stall one_way_ms={SHORT_PATH_MS} stall_ms={} (pace_before, lowest_pace, back_at_55_after)={stalls:?} received_fps={:.1} state={:?}",
+            "isolated_stall one_way_ms={SHORT_PATH_MS} stall_ms={} (pace_before, lowest_pace, back_at_55_after)={stalls:?} (encoder_bitrate_before, lowest_encoder_bitrate)={encoder:?} cuts={} received_fps={:.1} state={:?}",
             STALL.as_millis(),
+            last.cuts - first.cuts,
             status.stats.received_fps,
             status.state
         );
@@ -1099,6 +1142,7 @@ fn isolated_stall_does_not_collapse_fps() {
             assert!(lowest * 2 >= before, "{lowest} is below half of {before}");
             assert!(recovered <= RECOVERY, "back at 55 only after {recovered:?}");
         }
+        assert_eq!(last.cuts, first.cuts, "a stall is no congestion to cut for");
         trace.assert_never_latched();
     });
 }
@@ -1145,14 +1189,22 @@ fn fixed_wan_keeps_full_rate_at_fixed_resolution() {
         shape.delay_ms.store(175, Ordering::Relaxed);
         let rig = Rig::start("fixed-wan", Some(shape), TYPICAL).await;
         let decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+        let started = Instant::now();
         tokio::time::sleep(Duration::from_secs(20)).await;
         let status = rig.viewer.status();
         let last = trace.last();
         rig.stop().await;
+        let ceiling = trace
+            .between(started, Instant::now())
+            .into_iter()
+            .find(|interval| interval.pace_fps == CEILING_FPS)
+            .map(|interval| interval.at - started);
         let sizes = decoder.sizes();
         let configured = rig.probe.configured.load(Ordering::Relaxed);
         println!(
-            "fixed_wan roundtrip_ms=350 pace_fps={} bitrate={} encoder_bitrate={} presented_fps={:.1} received_fps={:.1} rtt_ms={:?} keyframes={} sizes={sizes:?} configured={configured} expired_encoder_outputs={} state={:?}",
+            "fixed_wan roundtrip_ms=350 ceiling_after_ms={:?} cuts={} pace_fps={} bitrate={} encoder_bitrate={} presented_fps={:.1} received_fps={:.1} rtt_ms={:?} keyframes={} sizes={sizes:?} configured={configured} expired_encoder_outputs={} state={:?}",
+            ceiling.map(|after| after.as_millis()),
+            last.cuts,
             last.pace_fps,
             last.bitrate,
             last.encoder_bitrate,
@@ -1176,82 +1228,203 @@ fn fixed_wan_keeps_full_rate_at_fixed_resolution() {
     });
 }
 
-/// What one run of the bandwidth-limit case saw.
-struct BandwidthRun {
-    status: ViewerStatus,
-    before: Interval,
-    clamped: Option<Duration>,
-    lowest_pace: u64,
-    /// The encoder bitrate in each interval of the limit.
-    encoder_trace: Vec<u64>,
-    recovered: Option<Duration>,
-    expired: u32,
+/// How long a link-limit case lets the session run unlimited first.
+#[derive(Clone, Copy)]
+enum Settle {
+    /// This long.
+    For(Duration),
+    /// Until bits per frame reach Balanced's maximum, or this long.
+    BpfMax(Duration),
 }
 
-/// A 1 Mbit/s link for 8 s after 6 s unlimited, then an unlimited one again,
-/// for an encoder of `sizes`; printed as `case`.
-async fn bandwidth_limit(trace: &Trace, case: &str, sizes: Sizes) -> BandwidthRun {
+/// What one run of a link-limit case saw.
+struct LimitRun {
+    status: ViewerStatus,
+    /// The host's last interval before the limit.
+    before: Interval,
+    /// When bits per frame reached Balanced's maximum, after the session
+    /// began, for a case that waited for it.
+    bpf_max: Option<Duration>,
+    limited: Instant,
+    lifted: Instant,
+    /// The host's intervals traced while the link was limited.
+    limit: Vec<Interval>,
+    /// The viewer's received fps at the end of each second of the limit.
+    received: Vec<(Instant, f32)>,
+    recovered: Option<Duration>,
+    expired: u32,
+    rate_model: RateModelRun,
+}
+impl LimitRun {
+    /// The limit's last `LAST_SECONDS` seconds.
+    const LAST_SECONDS: Duration = Duration::from_secs(5);
+
+    fn lowest(&self, value: fn(&Interval) -> u64) -> u64 {
+        self.limit.iter().map(value).min().unwrap()
+    }
+    fn highest(&self, value: fn(&Interval) -> u64) -> u64 {
+        self.limit.iter().map(value).max().unwrap()
+    }
+    /// The intervals traced over the limit's last seconds.
+    fn last_intervals(&self) -> Vec<Interval> {
+        let from = self.lifted - Self::LAST_SECONDS;
+        self.limit
+            .iter()
+            .filter(|interval| interval.at >= from)
+            .copied()
+            .collect()
+    }
+    /// The viewer's received fps over the limit's last seconds.
+    fn last_received(&self) -> Vec<f32> {
+        let from = self.lifted - Self::LAST_SECONDS;
+        self.received
+            .iter()
+            .filter(|(at, _)| *at > from)
+            .map(|(_, fps)| *fps)
+            .collect()
+    }
+    /// When the window first clamped, after the limit began.
+    fn clamped(&self) -> Option<Duration> {
+        self.limit
+            .iter()
+            .find(|interval| interval.window_clamped)
+            .map(|interval| interval.at - self.limited)
+    }
+    /// The receipts' cuts during the limit.
+    fn cuts(&self) -> u64 {
+        self.limit
+            .last()
+            .map_or(0, |last| last.cuts.saturating_sub(self.before.cuts))
+    }
+    /// The encoder bitrate in each interval of the limit.
+    fn encoder_trace(&self) -> Vec<u64> {
+        self.limit
+            .iter()
+            .map(|interval| interval.encoder_bitrate)
+            .collect()
+    }
+    /// The figures the record compares, on one line.
+    fn print(&self, case: &str, link_bytes_per_second: u64) {
+        let last = self.last_intervals();
+        let mean_ack = |intervals: &[Interval]| {
+            intervals
+                .iter()
+                .map(|interval| interval.ack_queue_ms)
+                .sum::<u64>() as f64
+                / intervals.len().max(1) as f64
+        };
+        // An interval's figures cover the second before it.
+        let sent: Vec<u64> = self
+            .limit
+            .iter()
+            .filter(|interval| interval.at >= self.limited + session::STATS_INTERVAL)
+            .map(|interval| interval.sent_bitrate)
+            .collect();
+        let sent_over_link = sent.iter().sum::<u64>() as f64
+            / sent.len().max(1) as f64
+            / (link_bytes_per_second * 8) as f64;
+        println!(
+            "{case} summary link_kbit_s={} before_pace={} before_bpf={} before_encoder_bitrate={} bpf_max_after_ms={:?} clamped_after_ms={:?} lowest_pace={} lowest_bpf={} lowest_encoder_bitrate={} mean_pace_last5={:.1} received_fps_last5={:.1} ack_queue_p95_ms={:?} ack_queue_peak_ms={} ack_queue_mean_last5={:.0} sent_over_link={:.2} cuts={} recovered_after_ms={:?} expired_encoder_outputs={} {} state={:?}",
+            link_bytes_per_second * 8 / 1000,
+            self.before.pace_fps,
+            self.before.bpf,
+            self.before.encoder_bitrate,
+            self.bpf_max.map(|after| after.as_millis()),
+            self.clamped().map(|after| after.as_millis()),
+            self.lowest(|interval| interval.pace_fps),
+            self.lowest(|interval| interval.bpf),
+            self.lowest(|interval| interval.encoder_bitrate),
+            mean_pace(&last),
+            mean(&self.last_received()),
+            p95(self
+                .limit
+                .iter()
+                .map(|interval| interval.ack_queue_ms)
+                .collect()),
+            self.highest(|interval| interval.ack_queue_ms),
+            mean_ack(&last),
+            sent_over_link,
+            self.cuts(),
+            self.recovered.map(|after| after.as_millis()),
+            self.expired,
+            self.rate_model,
+            self.status.state
+        );
+    }
+}
+
+/// A link limited to `rate` bytes a second for `limit`, after it ran
+/// unlimited as `settle` says, then unlimited again, for an encoder of
+/// `sizes`; printed as `case`.
+async fn link_limit(
+    trace: &Trace,
+    case: &str,
+    sizes: Sizes,
+    settle: Settle,
+    rate: u64,
+    limit: Duration,
+) -> LimitRun {
     let shape = Arc::new(Shape::default());
     let rig = Rig::start(case, Some(shape.clone()), sizes).await;
     let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
-    tokio::time::sleep(Duration::from_secs(6)).await;
+    let started = Instant::now();
+    let bpf_max = match settle {
+        Settle::For(settle) => {
+            tokio::time::sleep(settle).await;
+            None
+        }
+        Settle::BpfMax(longest) => {
+            first_after(trace, started, longest, |interval| interval.bpf >= BPF_MAX).await
+        }
+    };
     let before = trace.last();
     let limited = Instant::now();
-    shape.rate.store(125_000, Ordering::Relaxed);
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    shape.rate.store(rate, Ordering::Relaxed);
+    let mut received = Vec::new();
+    for _ in 0..limit.as_secs() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        received.push((Instant::now(), rig.viewer.status().stats.received_fps));
+    }
     shape.rate.store(0, Ordering::Relaxed);
     let lifted = Instant::now();
-    let recovered = loop {
-        let recovered = trace
-            .between(lifted, Instant::now())
-            .into_iter()
-            .find(|interval| interval.bitrate * 5 >= START_BPS * 4);
-        if recovered.is_some() || lifted.elapsed() > Duration::from_secs(30) {
-            break recovered.map(|interval| interval.at - lifted);
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    };
+    let recovered = first_after(trace, lifted, Duration::from_secs(30), |interval| {
+        interval.bitrate * 5 >= START_BPS * 4
+    })
+    .await;
     let status = rig.viewer.status();
     rig.stop().await;
     let phase = |at: Instant| if at < lifted { "limited" } else { "lifted" };
     for interval in trace.between(limited, Instant::now()) {
         interval.print(case, limited, phase(interval.at));
     }
-    let rate_model = RateModelRun::read(trace, &rig.probe, limited, Instant::now());
-    let limit = trace.between(limited, lifted);
-    let clamped = limit
-        .iter()
-        .find(|interval| interval.window_clamped)
-        .map(|interval| interval.at - limited);
-    let lowest = |value: fn(&Interval) -> u64| limit.iter().map(value).min().unwrap();
-    let lowest_pace = lowest(|interval| interval.pace_fps);
-    let lowest_bitrate = lowest(|interval| interval.bitrate);
-    let lowest_encoder = lowest(|interval| interval.encoder_bitrate);
-    let encoder_trace: Vec<u64> = limit
-        .iter()
-        .map(|interval| interval.encoder_bitrate)
-        .collect();
-    println!(
-        "{case} link_mbps=1 limit_s=8 before_pace={} before_bitrate={} before_encoder_bitrate={} clamped_after_ms={:?} lowest_pace={lowest_pace} lowest_bitrate={lowest_bitrate} lowest_encoder_bitrate={lowest_encoder} recovered_after_ms={:?} final_pace={} final_bitrate={} expired_encoder_outputs={} {rate_model} state={:?}",
-        before.pace_fps,
-        before.bitrate,
-        before.encoder_bitrate,
-        clamped.map(|after| after.as_millis()),
-        recovered.map(|after| after.as_millis()),
-        status.stats.pace_fps,
-        status.stats.bitrate,
-        rig.expired(),
-        status.state
-    );
-    BandwidthRun {
+    let run = LimitRun {
         status,
         before,
-        clamped,
-        lowest_pace,
-        encoder_trace,
+        bpf_max,
+        limited,
+        lifted,
+        limit: trace.between(limited, lifted),
+        received,
         recovered,
         expired: rig.expired(),
-    }
+        rate_model: RateModelRun::read(trace, &rig.probe, limited, Instant::now()),
+    };
+    run.print(case, rate);
+    run
+}
+
+/// The 1 Mbit/s link of the bandwidth-limit cases, for 8 s after 6 s
+/// unlimited.
+async fn bandwidth_limit(trace: &Trace, case: &str, sizes: Sizes) -> LimitRun {
+    link_limit(
+        trace,
+        case,
+        sizes,
+        Settle::For(Duration::from_secs(6)),
+        125_000,
+        Duration::from_secs(8),
+    )
+    .await
 }
 
 /// A 1 Mbit/s link for 8 s, then an unlimited one: the delivery rate clamps
@@ -1263,40 +1436,239 @@ async fn bandwidth_limit(trace: &Trace, case: &str, sizes: Sizes) -> BandwidthRu
 fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
     traced(|trace| async move {
         let run = bandwidth_limit(&trace, "bandwidth_limit", TYPICAL).await;
-        let BandwidthRun {
-            status,
-            before,
-            clamped,
-            lowest_pace,
-            encoder_trace,
-            recovered,
-            expired,
-        } = run;
+        let status = &run.status;
         assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
         // The trace samples once a second, so this is "within 1 s" to its
         // resolution.
+        let clamped = run.clamped();
         assert!(
             clamped.is_some_and(|after| after <= Duration::from_secs(1) + session::STATS_INTERVAL),
             "the window must clamp within 1 s of the limit: {clamped:?}"
         );
+        let lowest_pace = run.lowest(|interval| interval.pace_fps);
         assert!(lowest_pace <= 15, "{lowest_pace}");
         // Bits per frame may have risen past the start before the limit, and
         // go on rising for a window or two while the clamp holds the delay
         // down, so the fall is any step down from where they had reached.
+        let encoder_trace = run.encoder_trace();
         assert!(
-            std::iter::once(&before.encoder_bitrate)
+            std::iter::once(&run.before.encoder_bitrate)
                 .chain(&encoder_trace)
                 .zip(&encoder_trace)
                 .any(|(earlier, later)| later < earlier),
             "bits per frame must fall during the limit: before {} then {encoder_trace:?}",
-            before.encoder_bitrate
+            run.before.encoder_bitrate
         );
         assert!(
-            recovered.is_some(),
+            run.recovered.is_some(),
             "the bitrate must recover to 80% of the start within 30 s"
         );
-        assert_eq!(expired, 0, "a full window must never starve the encoder");
+        assert_eq!(
+            run.expired, 0,
+            "a full window must never starve the encoder"
+        );
         trace.assert_never_latched();
+    });
+}
+
+/// A 3 Mbit/s link for 10 s after 6 s unlimited: below what the session
+/// sends, but far above Balanced's floor at 60 FPS. Bits per frame absorb
+/// it: the pace stays at 55 or more from 1 s into the limit, and the viewer
+/// receives 55 fps or more over its last 5 s (a full window skips capture
+/// ticks at any pace).
+#[test]
+#[ignore = "explicit ~25-second moderate limit acceptance"]
+fn moderate_limit_keeps_60() {
+    traced(|trace| async move {
+        let run = link_limit(
+            &trace,
+            "moderate_limit",
+            TYPICAL,
+            Settle::For(Duration::from_secs(6)),
+            375_000,
+            Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(
+            run.status.state,
+            ViewerState::Streaming,
+            "{}",
+            run.status.message
+        );
+        let from = run.limited + Duration::from_secs(1);
+        for interval in run.limit.iter().filter(|interval| interval.at >= from) {
+            assert!(interval.pace_fps >= 55, "the pace fell: {interval:?}");
+        }
+        let received = run.last_received();
+        assert!(
+            mean(&received) >= 55.0,
+            "the viewer received less: {received:?}"
+        );
+        assert!(
+            run.recovered.is_some(),
+            "the bitrate must recover to 80% of the start within 30 s"
+        );
+        assert_eq!(run.expired, 0);
+        trace.assert_never_latched();
+    });
+}
+
+/// An unlimited link until bits per frame reach their maximum (8 Mbit/s at
+/// 60 FPS, or for at most 40 s), then 5 Mbit/s for 10 s: the queue the drop
+/// leaves peaks at 300 ms or less and is at 100 ms or less from 2 s in.
+#[test]
+#[ignore = "explicit ~30 to 70-second sudden drop acceptance"]
+fn sudden_drop() {
+    traced(|trace| async move {
+        let run = link_limit(
+            &trace,
+            "sudden_drop",
+            TYPICAL,
+            Settle::BpfMax(Duration::from_secs(40)),
+            625_000,
+            Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(
+            run.status.state,
+            ViewerState::Streaming,
+            "{}",
+            run.status.message
+        );
+        let peak = run.highest(|interval| interval.ack_queue_ms);
+        assert!(peak <= 300, "the queue peaked at {peak} ms");
+        let from = run.limited + Duration::from_secs(2);
+        for interval in run.limit.iter().filter(|interval| interval.at >= from) {
+            assert!(interval.ack_queue_ms <= 100, "{interval:?}");
+        }
+        assert_eq!(run.expired, 0);
+        trace.assert_never_latched();
+    });
+}
+
+/// A route that becomes 60 ms longer each way, 120 ms on the round trip,
+/// with no path change reported: no congestion. At most two receipt cuts
+/// before the longer delay becomes the receipts' baseline, and the encoder
+/// bitrate back where it was within 15 s.
+#[test]
+#[ignore = "explicit ~30-second added route delay acceptance"]
+fn added_route_delay() {
+    const ADDED_MS: u64 = 60;
+    const BACK_WITHIN: Duration = Duration::from_secs(15);
+    traced(|trace| async move {
+        let shape = Arc::new(Shape::default());
+        shape.delay_ms.store(SHORT_PATH_MS, Ordering::Relaxed);
+        let rig = Rig::start("route-delay", Some(shape.clone()), TYPICAL).await;
+        let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+        let started = Instant::now();
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        let before = trace.last();
+        let changed = Instant::now();
+        shape
+            .delay_ms
+            .store(SHORT_PATH_MS + ADDED_MS, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        let status = rig.viewer.status();
+        rig.stop().await;
+        let phase = |at: Instant| if at < changed { "short" } else { "longer" };
+        for interval in trace.between(started, Instant::now()) {
+            interval.print("added_route_delay", started, phase(interval.at));
+        }
+        let after = trace.between(changed, Instant::now());
+        let last = *after.last().unwrap();
+        let cuts = last.cuts - before.cuts;
+        let lowest = after
+            .iter()
+            .map(|interval| interval.encoder_bitrate)
+            .min()
+            .unwrap();
+        // From the last interval below the bitrate before the change.
+        let back = after
+            .iter()
+            .rposition(|interval| interval.encoder_bitrate < before.encoder_bitrate)
+            .map_or(Some(Duration::ZERO), |low| {
+                after
+                    .get(low + 1)
+                    .map(|back| back.at.saturating_duration_since(changed))
+            });
+        let rebased = after.iter().any(|interval| interval.rebase_ms.is_some());
+        println!(
+            "added_route_delay one_way_ms={SHORT_PATH_MS}+{ADDED_MS} before_pace={} before_encoder_bitrate={} cuts={cuts} rebased={rebased} lowest_pace={} lowest_encoder_bitrate={lowest} back_after_ms={:?} final_encoder_bitrate={} state={:?}",
+            before.pace_fps,
+            before.encoder_bitrate,
+            after
+                .iter()
+                .map(|interval| interval.pace_fps)
+                .min()
+                .unwrap(),
+            back.map(|after| after.as_millis()),
+            last.encoder_bitrate,
+            status.state
+        );
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        assert!(cuts <= 2, "a longer route is no congestion: {cuts} cuts");
+        assert!(
+            back.is_some_and(|back| back <= BACK_WITHIN),
+            "the encoder bitrate must be back at {} within {BACK_WITHIN:?}: {back:?}",
+            before.encoder_bitrate
+        );
+        trace.assert_never_latched();
+    });
+}
+
+/// Stalls of 300 ms every second on a short path, for 10 s, as a policer or
+/// a lossy path makes: they recur, so they are congestion, and the encoder
+/// bitrate falls.
+#[test]
+#[ignore = "explicit ~25-second recurring stall acceptance"]
+fn recurring_stalls_cut() {
+    const STALL: Duration = Duration::from_millis(300);
+    const EVERY: Duration = Duration::from_secs(1);
+    const STALLS: u32 = 10;
+    traced(|trace| async move {
+        let shape = Arc::new(Shape::default());
+        shape.delay_ms.store(SHORT_PATH_MS, Ordering::Relaxed);
+        let rig = Rig::start("recurring-stalls", Some(shape.clone()), TYPICAL).await;
+        let _decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        let before = trace.last();
+        let stalled = Instant::now();
+        for _ in 0..STALLS {
+            shape
+                .delay_ms
+                .store(SHORT_PATH_MS + STALL.as_millis() as u64, Ordering::Relaxed);
+            tokio::time::sleep(STALL).await;
+            shape.delay_ms.store(SHORT_PATH_MS, Ordering::Relaxed);
+            tokio::time::sleep(EVERY - STALL).await;
+        }
+        let ended = Instant::now();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let status = rig.viewer.status();
+        rig.stop().await;
+        let phase = |at: Instant| if at < ended { "stalls" } else { "after" };
+        for interval in trace.between(stalled, Instant::now()) {
+            interval.print("recurring_stalls", stalled, phase(interval.at));
+        }
+        let during = trace.between(stalled, ended + session::STATS_INTERVAL);
+        let lowest = |value: fn(&Interval) -> u64| during.iter().map(value).min().unwrap();
+        let lowest_encoder = lowest(|interval| interval.encoder_bitrate);
+        let last = *during.last().unwrap();
+        println!(
+            "recurring_stalls stall_ms={} every_ms={} before_encoder_bitrate={} lowest_encoder_bitrate={lowest_encoder} lowest_pace={} cuts={} received_fps={:.1} state={:?}",
+            STALL.as_millis(),
+            EVERY.as_millis(),
+            before.encoder_bitrate,
+            lowest(|interval| interval.pace_fps),
+            last.cuts - before.cuts,
+            status.stats.received_fps,
+            status.state
+        );
+        assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        assert!(
+            lowest_encoder < before.encoder_bitrate,
+            "recurring stalls must lower the encoder bitrate from {}",
+            before.encoder_bitrate
+        );
     });
 }
 
