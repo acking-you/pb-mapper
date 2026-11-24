@@ -208,6 +208,8 @@ pub(super) struct Leg {
     /// When its session began: what its arrival times and read times count
     /// from.
     pub(super) epoch: Instant,
+    /// Its read times are kept: a session without standbys keeps none.
+    watched: bool,
     /// When it last read a byte, and the end of a whole message: in
     /// microseconds since `epoch`.
     read_at: AtomicU64,
@@ -221,9 +223,10 @@ pub(super) struct Leg {
     pub(super) connection: Option<Arc<Connection>>,
 }
 impl Leg {
-    /// The session's first leg, live from the start.
-    pub(super) fn live(connection: Option<Arc<Connection>>) -> Arc<Self> {
-        Self::new(Role::Live, Instant::now(), None, false, connection)
+    /// The session's first leg, live from the start, its read times kept
+    /// when it is `watched`.
+    pub(super) fn live(connection: Option<Arc<Connection>>, watched: bool) -> Arc<Self> {
+        Self::new(Role::Live, watched, Instant::now(), None, false, connection)
     }
     /// A standby's leg, whose session began at `epoch`, stamping arrival
     /// times from then for a host that, by `arrival_time`, reads them.
@@ -235,6 +238,7 @@ impl Leg {
     ) -> Arc<Self> {
         Self::new(
             Role::Standby,
+            true,
             epoch,
             arrival_time.then_some(epoch),
             keyframe_seq,
@@ -243,6 +247,7 @@ impl Leg {
     }
     fn new(
         role: Role,
+        watched: bool,
         epoch: Instant,
         arrival_epoch: Option<Instant>,
         keyframe_seq: bool,
@@ -251,6 +256,7 @@ impl Leg {
         Arc::new(Self {
             role: AtomicU8::new(role as u8),
             epoch,
+            watched,
             read_at: AtomicU64::new(0),
             message_at: AtomicU64::new(0),
             outbound: Outbound::new(arrival_epoch, keyframe_seq),
@@ -318,7 +324,8 @@ impl<R: AsyncRead + Unpin> AsyncRead for Stamped<'_, R> {
     ) -> Poll<io::Result<()>> {
         let before = buf.filled().len();
         let polled = Pin::new(&mut self.inner).poll_read(cx, buf);
-        if matches!(polled, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+        if self.leg.watched && matches!(polled, Poll::Ready(Ok(()))) && buf.filled().len() > before
+        {
             self.leg.stamp(&self.leg.read_at);
         }
         polled
@@ -443,7 +450,9 @@ impl Reader<'_> {
             if let Err(ended) = handled {
                 return ended;
             }
-            self.leg.stamp(&self.leg.message_at);
+            if self.leg.watched {
+                self.leg.stamp(&self.leg.message_at);
+            }
         }
     }
 

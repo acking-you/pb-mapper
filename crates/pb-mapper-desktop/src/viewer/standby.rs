@@ -630,7 +630,7 @@ pub(super) async fn drive<S: AsyncRead + AsyncWrite + Send + 'static>(
 ) {
     let started = Instant::now();
     let _ends = Ends(session.clone());
-    let leg = Leg::live(connection.lock().clone());
+    let leg = Leg::live(connection.lock().clone(), plan.is_some());
     let mut live = Live {
         run: Box::pin(run_leg(stream, leg.clone(), session.clone())),
         leg,
@@ -778,6 +778,7 @@ pub(super) async fn drive<S: AsyncRead + AsyncWrite + Send + 'static>(
         // promotion does: the host hears the `Resume` before the close.
         if !matches!(cause, Cause::Transport) {
             old.leg.retire();
+            session.shared.outbound.wake_all();
             let run = old.run;
             retiring = Some(Box::pin(async move {
                 let _ = tokio::time::timeout(RETIRE_GRACE, run).await;
@@ -921,6 +922,18 @@ pub(crate) mod tests {
                 .find(|(_, read, _, _)| *read > after)
                 .map(|(shown, _, keyframe, discontinuity)| (*shown, *keyframe && *discontinuity))
         }
+        /// When the first IDR after a discontinuity read after `after` was
+        /// presented.
+        pub(crate) fn first_restart_after(&self, after: Instant) -> Option<Instant> {
+            self.units
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(_, read, keyframe, discontinuity)| {
+                    *read > after && *keyframe && *discontinuity
+                })
+                .map(|(shown, _, _, _)| *shown)
+        }
     }
 
     /// A renderer that presents every unit at once, noting each.
@@ -954,7 +967,7 @@ pub(crate) mod tests {
         pub(crate) keyframes: Arc<Keyframes>,
         pub(crate) live: Arc<Shape>,
         pub(crate) clients: [Client; 2],
-        _links: [ShapedLink; 2],
+        links: [Option<ShapedLink>; 2],
         _relay: Relay,
     }
     impl Pair {
@@ -983,9 +996,14 @@ pub(crate) mod tests {
                 keyframes,
                 live,
                 clients: [client(links[0].addr()), client(links[1].addr())],
-                _links: links,
+                links: links.map(Some),
                 _relay: relay,
             }
+        }
+        /// The live session's link goes away, closing every connection it
+        /// carries, both ways.
+        pub(crate) fn cut_live(&mut self) {
+            self.links[0] = None;
         }
         /// A viewer through the first link, relay only, with a standby
         /// through the second when `standby`.
@@ -1056,6 +1074,46 @@ pub(crate) mod tests {
         let host = pair.host.status();
         assert_eq!(host.viewers.len(), 1);
         assert_ne!(host.viewers[0].started_unix_ms, started);
+        viewer.stop().await.unwrap();
+        stop.store(true, Ordering::Release);
+        renderer.join().unwrap();
+        pair.host.stop().await.unwrap();
+    }
+
+    /// A live connection that fails gives way at once to a standby that
+    /// lives, without waiting out the silence: the picture comes back from
+    /// an IDR, and control with it, whether the host saw the failure before
+    /// the viewer's resume, and handed the standby the place paused, or
+    /// after.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_session_gives_way_at_once() {
+        let mut pair = Pair::start("standby-failed").await;
+        let viewer = pair.viewer(true).await;
+        let stop = Arc::new(AtomicBool::new(false));
+        let (shown, renderer) = render(&viewer, stop.clone());
+        status_until(&viewer, |status| status.fresh).await;
+        viewer.request_control(true).unwrap();
+        status_until(&viewer, |status| status.controlling && status.fresh).await;
+        until_within(Duration::from_secs(10), || pair.relayed() == 2).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let cut = Instant::now();
+        pair.cut_live();
+        // What the old connection still had in flight may come after the
+        // cut; the new session starts with an IDR after a discontinuity.
+        until_within(Duration::from_secs(3), || {
+            shown.first_restart_after(cut).is_some()
+        })
+        .await;
+        let back = shown.first_restart_after(cut).unwrap();
+        assert!(
+            back.duration_since(cut) < SILENCE_MIN,
+            "{:?}",
+            back.duration_since(cut)
+        );
+        let status = status_until(&viewer, |status| status.controlling && status.fresh).await;
+        assert_ne!(status.state, crate::ViewerState::Stopped);
+        assert_eq!(pair.host.status().viewers.len(), 1);
         viewer.stop().await.unwrap();
         stop.store(true, Ordering::Release);
         renderer.join().unwrap();

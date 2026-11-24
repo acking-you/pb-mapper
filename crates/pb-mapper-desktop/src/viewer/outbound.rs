@@ -29,7 +29,7 @@ use crate::{
 };
 use std::{
     collections::VecDeque,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -123,8 +123,6 @@ struct Slots {
     arrival_epoch: Option<Instant>,
     /// The host listed `keyframe_seq`.
     keyframe_seq: bool,
-    /// A standby's `Resume`, which promotes it: written before anything else.
-    promote: bool,
     /// The newest probe's nonce, and when it was read.
     probe: Option<(u64, Instant)>,
     /// The newest seq read, and when it was read whole.
@@ -181,6 +179,8 @@ pub(crate) struct Outbound {
     /// that takes another's place goes on from where it stood: the host
     /// counts nothing below it.
     sequence: AtomicU64,
+    /// A standby's `Resume`, which promotes it: written before anything else.
+    promote: AtomicBool,
 }
 impl Outbound {
     /// `arrival_epoch`: stamp receipts and probe echoes with arrival times
@@ -196,6 +196,7 @@ impl Outbound {
             notify: tokio::sync::Notify::new(),
             inputs: parking_lot::Mutex::default(),
             sequence: AtomicU64::new(1),
+            promote: AtomicBool::new(false),
         }
     }
 
@@ -216,15 +217,22 @@ impl Outbound {
         *self.slots.lock() = Slots {
             arrival_epoch,
             keyframe_seq,
-            promote: true,
             ..Slots::default()
         };
+        self.promote.store(true, Ordering::Release);
         self.notify.notify_one();
     }
 
     /// Wake the writer: its connection changed role.
     pub fn wake(&self) {
         self.notify.notify_one();
+    }
+
+    /// Wake every writer waiting here now, storing nothing: one whose
+    /// connection was retired then waits elsewhere, and no later wake is
+    /// spent on it.
+    pub fn wake_all(&self) {
+        self.notify.notify_waiters();
     }
 
     /// Answer here the probe `other` took and has not answered: the host
@@ -381,7 +389,7 @@ impl Outbound {
     /// The next message to write, in priority order, or when something will
     /// next be due. `last_write` is when the writer last wrote anything.
     pub fn next(&self, now: Instant, last_write: Instant) -> Next {
-        if std::mem::take(&mut self.slots.lock().promote) {
+        if self.promote.load(Ordering::Relaxed) && self.promote.swap(false, Ordering::AcqRel) {
             return Next::Send(ViewerMessage::Resume {});
         }
         // Never hold `controls` while taking `inputs`: `submit` takes them in

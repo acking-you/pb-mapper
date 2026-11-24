@@ -209,7 +209,7 @@ struct CursorSlot {
     y: i32,
     visible: bool,
     /// Advances with every update, so a reader can tell a new position.
-    pub(super) seq: u64,
+    seq: u64,
     /// The generation and sequence of the last move written to the host.
     moved: Option<(u64, u64)>,
     /// The slot of the pointer's shape, from the host's last report that

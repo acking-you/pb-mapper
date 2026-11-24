@@ -495,7 +495,6 @@ impl Room {
                         let outcome = pair.session.outcome();
                         ended = standby.map(|standby| (standby, outcome));
                         freed = held.take().map(|pair| pair.permit);
-                        self.shared.clear_slot(slot, conn_id);
                     }
                 },
                 Some(pair) => {
@@ -513,6 +512,7 @@ impl Room {
             }
             empty
         };
+        self.shared.clear_slot(slot, conn_id);
         if let Some((standby, outcome)) = ended {
             match outcome {
                 Some((reason, message)) => standby.session.end(reason, message),
