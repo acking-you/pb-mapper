@@ -2475,7 +2475,9 @@ the queue has stayed under 10 ms for 500 ms, raises climb at 50% a second
 toward 0.9 × the expected rate congestion began at. A climb that a cut stops
 short of that falls back to 15% and 4% a second until a raise passes 1.2 × the
 capacity, which shows the link carries more, as when a limit lifts; then it
-climbs again.
+climbs again. A start that a closed session's rate lowered climbs back to the
+preset's start at the same 50% a second, a light picture's too, until its
+first cut (see the next section).
 
 For 2 s after a cut, a rebase or a drain, while receipts come, the probe
 controller yields its frame rate cuts to the receipts: a delay from 150 to 600
@@ -2569,6 +2571,56 @@ it, and the session never closes because of it. Changing the preset
 mid-session restarts the controller at the preset's start values, without an
 IDR, an encoder reconfiguration or a resolution change. Pausing sets the pace
 to 0.
+
+An H.264 or H.265 session that its transport ended (the viewer closed it,
+the connection failed, or the viewer went silent for 3 s) leaves the host one
+record: its bits per frame relative to 1080p, its preset, and when it ended.
+A session of the same preset and such a codec that opens a room within 2 min
+of that end, by both the monotonic clock and the wall clock (a Mac's
+monotonic clock stands still while it sleeps), starts its bits per frame at
+the lower of the preset's start and that record, scaled to its own picture;
+its frame rate starts as above, Balanced's fast start included. A JPEG
+session neither takes nor leaves a record, since bits per frame do not size
+its pictures. A viewer that joins a room already streaming starts at the
+preset's start: the room's encoder runs at the least of its viewers' rates,
+so a record would lower the picture of every viewer already watching. The
+record never raises a start, and a later such end replaces it. A session the
+host ended (Disconnect, a stop, a restart, a revoke, a codec change, a
+protocol error or a capture failure) leaves none, and so does a session a
+record lowered that nothing of its own has moved since (no cut or step down
+by either controller, no raise of its bits per frame, and no preset change):
+the record keeps its own end, which a quiet session never renews. The host traces `desktop_start_rate_remembered` when a
+record lowers a start.
+
+A start a record lowered climbs back to the preset's start, a still or light
+picture's too, at the recovery's 50% a second plus 100 kbit/s a second, from
+0.5 s after the startup cap once the receipts' queue has stayed under 10 ms
+for 500 ms: by then a link that cannot carry the full pace has queued, and the
+first cut, or the probes' first step down, ends the climb before it begins.
+From there the session runs as any does.
+
+A viewer that reconnects over the link that ended its session so sends its
+first IDR, and its startup second, at about the rate that link last carried
+rather than queueing them behind the link: in the slow-link suite's reconnect
+on a 1 Mbit/s link, with that suite's synthetic encoder, the reconnect's
+first picture was presented 105 to 109 ms after `Viewer::connect` instead of
+303 to 311 ms, its IDR was 8 332 bytes instead of 33 332, and the host's ack
+queue was 0 ms at each of its first three once-a-second samples instead of
+peaking at 263 to 266 ms. Its frame rate paid for that: started at the floor,
+its first cut had no bits per frame left to take and lowered the pace to
+36 FPS in its second interval, and its sampled pace averaged 44.8 to 47.3 FPS
+over intervals 2 to 7 against 47.0 to 48.2 before. Any other viewer of that
+preset that opens a room within those 2 min starts as low, its first IDR
+included, and climbs back: in the same case a viewer on an unlimited link
+reached 80% of Balanced's start 4.0 s after it connected (7.0 s while such a
+start climbed only at the raises' 15% a second), where without a record it
+starts above that
+([measurements](benchmarks/2026-11-24-reconnect-start-rate/README.md)). A
+viewer that reconnects before the host saw its old session end joins the room
+that session is still in and starts at the preset's start, though the room's
+encoder runs at the old session's rate until that one times out. The record
+lives as long as the host: a restart, such as a display switch, starts
+without one.
 
 The encoder bitrate depends on how the encoder budgets. A per-frame-budget MFT
 (the `nominal` rate model, the default) gets `bits per frame × nominal fps` and
@@ -3335,12 +3387,13 @@ The background service writes its host's lines to `service-host.log`, beside
 `service.log` in the protected installation root (SYSTEM and administrators
 write it, users may read it): `pb_mapper_desktop::session`,
 `pb_mapper_desktop::feedback` and `pb_mapper_client::direct` at info, which
-are the session lifecycle above, `desktop_rate_model_latched`, and
-`session_path_selected` with the path, the service and the peer address. No
-other target is written; none of these logs an invitation, a key or a
-credential. The once-a-second `desktop_feedback_interval` is debug and is not
-written; the viewer's statistics carry those numbers. At 1 MiB the file
-becomes `service-host.log.1`, replacing the previous one.
+are the session lifecycle above, `desktop_rate_model_latched`,
+`desktop_start_rate_remembered`, and `session_path_selected` with the path,
+the service and the peer address. No other target is written; none of these
+logs an invitation, a key or a credential. The once-a-second
+`desktop_feedback_interval` is debug and is not written; the viewer's
+statistics carry those numbers. At 1 MiB the file becomes
+`service-host.log.1`, replacing the previous one.
 
 ### The quality panel
 
@@ -4022,6 +4075,18 @@ FPS), `injected_backlog_at_120_recovers` (one second at 20 ms a frame in a
 1 Mbit/s twin (a 2 ms decoder that stalls once for 400 ms). The 67 ms decoder
 case now runs 60 s. [Viewer fps cap measurements](benchmarks/2026-11-24-viewer-fps-cap/README.md)
 has three runs of each before and after the cap measured its decoder.
+`reconnect_on_a_slow_link` stops a viewer after 8 s on a 1 Mbit/s link,
+connects another over it 3 s later for 8 s, and 3 s after that one stops
+connects a third on an unlimited link. It reports, for each session, the time
+from `Viewer::connect` to its first presented picture, that picture's bytes and
+the host's ack queue in its first three trace intervals, and how long the
+third took to reach 80% of Balanced's start; it asserts that each picture
+came, each first picture was an IDR, the reconnect's IDR was smaller than the
+first session's, and the third climbed within 20 s.
+[Reconnect start rate measurements](benchmarks/2026-11-24-reconnect-start-rate/README.md)
+has five runs before and after a reconnect started at the rate its last
+session ended at, and five on a first version whose lowered start climbed
+back only at the receipts' plain raise.
 
 `video_bench 10 60 --animate --max-width 1920 --max-height 1080` still reaches
 59.9 unique capture and encode FPS at a mean 1.9 ms encode with one unit in

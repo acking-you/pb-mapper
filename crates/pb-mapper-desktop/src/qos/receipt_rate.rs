@@ -52,7 +52,9 @@
 //! spends more than expected is raised, since the link carries what it
 //! sends. After an episode, a recovery climbs back toward where congestion
 //! began, once; a climb cut short climbs again only once a raise has passed
-//! 1.2 × the capacity it was cut at.
+//! 1.2 × the capacity it was cut at. A start that a closed session's rate
+//! lowered (`restore_bps`) climbs back toward the preset's start at the
+//! recovery's rate, a light picture's too, until the first cut.
 //!
 //! With arrival times (`arrival_time`) each receipt is timed on the viewer's
 //! clock, when it read its newest unit, and its delay is that unit's queue
@@ -257,6 +259,11 @@ pub(crate) struct Inputs {
     pub blocked: bool,
     /// The receipts' pace cap is set.
     pub capped: bool,
+    /// The preset's start at the pace, while a closed session's rate lowered
+    /// this one's start and nothing has cut it since: raises climb back to
+    /// it at `RECOVER_PER_S` once the queue has been quiet, though the
+    /// picture be light, which then raises bits per frame too.
+    pub restore_bps: Option<f64>,
 }
 
 /// A raise the QoS tick applies.
@@ -778,11 +785,18 @@ impl ReceiptRate {
     /// rate, raises only the pace cap, while one is set: it costs little at
     /// the full pace, and a queue it builds is cut within a round trip. One
     /// that spends more than expected is raised as any other, and what it
-    /// sends may clear the capacity.
+    /// sends may clear the capacity. Below `restore_bps`, once the queue has
+    /// been quiet for `RECOVER_QUIET`, raises climb at `RECOVER_PER_S` up to
+    /// it, a light picture's bits per frame too: where the session would
+    /// have started but for the closed session's rate.
     pub fn raise(&mut self, now: Instant, inputs: Inputs) -> Option<Lift> {
         let expected = inputs.expected_bps;
         let used = self.used_bps().map(|used| used as f64);
         let light = used.is_some_and(|used| used < RAISE_USED_MIN * expected);
+        let quiet = self
+            .quiet_since
+            .is_some_and(|quiet| now.saturating_duration_since(quiet) >= RECOVER_QUIET);
+        let restoring = inputs.restore_bps.filter(|to| quiet && expected < *to);
         let clear = self.fresh(now)
             && self
                 .base(inputs.base)
@@ -798,14 +812,11 @@ impl ReceiptRate {
                 .is_none_or(|at| now.saturating_duration_since(at) >= RAISE_AFTER_REBASE)
             && expected > 0.0
             && used.is_some()
-            && (!light || inputs.capped);
+            && (!light || inputs.capped || restoring.is_some());
         if !clear {
             self.raise = Raise::default();
             return None;
         }
-        let quiet = self
-            .quiet_since
-            .is_some_and(|quiet| now.saturating_duration_since(quiet) >= RECOVER_QUIET);
         let recovery = &mut self.recovery;
         if recovery.to.is_some_and(|to| expected >= to) {
             *recovery = Recovery::default();
@@ -813,7 +824,7 @@ impl ReceiptRate {
             recovery.climb = Climb::Climbing;
         }
         let climbing = recovery.to.filter(|_| recovery.climb == Climb::Climbing);
-        let per_s = if climbing.is_some() {
+        let per_s = if climbing.is_some() || restoring.is_some() {
             RECOVER_PER_S
         } else if self
             .capacity
@@ -842,6 +853,9 @@ impl ReceiptRate {
             next = to.max(expected);
             self.recovery = Recovery::default();
         }
+        if let Some(to) = restoring {
+            next = next.min(to);
+        }
         // Well past the last capacity with no queue: the link carries more
         // now, as when a limit lifts, and a climb cut short may climb again.
         // What it carries is the used rate when that is higher, as for an
@@ -857,7 +871,7 @@ impl ReceiptRate {
         }
         Some(Lift {
             to: next,
-            pace_only: light,
+            pace_only: light && restoring.is_none(),
         })
     }
 
@@ -1081,6 +1095,8 @@ mod tests {
         blocked: bool,
         /// The receipts' pace cap is set.
         capped: bool,
+        /// Where a lowered start climbs back to.
+        restore: Option<f64>,
         verdicts: Vec<Verdict>,
     }
     impl Feed {
@@ -1093,6 +1109,7 @@ mod tests {
                 expected,
                 blocked: false,
                 capped: false,
+                restore: None,
                 verdicts: Vec::new(),
             }
         }
@@ -1112,6 +1129,7 @@ mod tests {
                 rtt: Some(BASE),
                 blocked: self.blocked,
                 capped: self.capped,
+                restore_bps: self.restore,
             }
         }
 
@@ -1509,6 +1527,38 @@ mod tests {
         }
         assert!(feed.expected > 2.0 * start, "{raises:?}");
         assert!(feed.expected <= 3_600_000.0 + 1.0, "{raises:?}");
+    }
+
+    /// A start a closed session's rate lowered climbs back to the preset's
+    /// start at the recovery's rate once the queue has been quiet, a light
+    /// picture's bits per frame too, and no further.
+    #[test]
+    fn a_lowered_start_climbs_back_at_the_recovery_rate_a_light_picture_too() {
+        // 1 Mbit/s expected of a picture that uses 240 kbit/s of it, which
+        // would start at 4 Mbit/s but for the record.
+        let mut feed = Feed::new(1_000_000.0);
+        feed.restore = Some(4_000_000.0);
+        feed.steady(0, 20, 17, 2, 500);
+        // Not before the queue has been quiet for 500 ms.
+        assert_eq!(feed.lift(340), None);
+        let mut at = 340;
+        let mut raises = Vec::new();
+        for _ in 0..16 {
+            feed.steady(at, 15, 17, 2, 500);
+            at += 250;
+            raises.extend(feed.tick(at));
+        }
+        // 50% a second plus 100 kbit/s a second, each tick's applied ...
+        let first = raises.first().copied().unwrap_or_default();
+        assert!(
+            (first - (1_000_000.0 * 1.125 + 25_000.0)).abs() < 1.0,
+            "{raises:?}"
+        );
+        // ... up to the start and no further: a light picture raises nothing
+        // past it.
+        assert!(raises.len() < 16, "{raises:?}");
+        assert_eq!(feed.expected, 4_000_000.0, "{raises:?}");
+        assert!(raises.iter().all(|raise| *raise <= 4_000_000.0));
     }
 
     #[test]

@@ -616,11 +616,21 @@ impl Pace {
     }
 }
 
+/// The first unit a `Decoder` presented: when, its bytes, and whether it was
+/// an IDR.
+#[derive(Clone, Copy, Debug)]
+struct FirstPresented {
+    at: Instant,
+    bytes: usize,
+    keyframe: bool,
+}
+
 /// A simulated decoder on its own thread, as a native consumer runs: it pulls
 /// a unit, spends its `Pace` on it, then presents it.
 struct Decoder {
     stop: Arc<AtomicBool>,
     sizes: Arc<Mutex<BTreeSet<(u32, u32)>>>,
+    first: Arc<Mutex<Option<FirstPresented>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 impl Decoder {
@@ -631,7 +641,8 @@ impl Decoder {
         let consumer = viewer.video_sink().attach().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let sizes = Arc::new(Mutex::new(BTreeSet::new()));
-        let (done, seen) = (stop.clone(), sizes.clone());
+        let first = Arc::new(Mutex::new(None));
+        let (done, seen, shown) = (stop.clone(), sizes.clone(), first.clone());
         let thread = traced_thread(move || {
             while !done.load(Ordering::Acquire) {
                 match consumer.next(Duration::from_millis(50), wire::MAX_PAYLOAD) {
@@ -651,6 +662,11 @@ impl Decoder {
                             pace.decode_us.load(Ordering::Relaxed),
                         ));
                         if consumer.presented(unit.generation, unit.frame_id) {
+                            shown.lock().unwrap().get_or_insert(FirstPresented {
+                                at: Instant::now(),
+                                bytes: unit.bytes.len(),
+                                keyframe: unit.keyframe,
+                            });
                             let mut stall = pace.stall.lock().unwrap();
                             if stall.first_fresh.is_none()
                                 && stall.began.is_some_and(|began| unit.received_at >= began)
@@ -667,11 +683,15 @@ impl Decoder {
         Self {
             stop,
             sizes,
+            first,
             thread: Some(thread),
         }
     }
     fn sizes(&self) -> Vec<(u32, u32)> {
         self.sizes.lock().unwrap().iter().copied().collect()
+    }
+    fn first(&self) -> Option<FirstPresented> {
+        *self.first.lock().unwrap()
     }
 }
 impl Drop for Decoder {
@@ -876,6 +896,8 @@ impl Drop for Resyncing {
 struct Rig {
     host: Host,
     viewer: Viewer,
+    /// When the viewer began `Viewer::connect`.
+    connecting: Instant,
     probe: Arc<Probe>,
     /// The host's client, on the relay itself, and the viewer's.
     clients: [Client; 2],
@@ -959,10 +981,12 @@ impl Rig {
             }
             None => (client(relay.addr()), None),
         };
+        let connecting = Instant::now();
         let viewer = connect_viewer_at(&remote, &host, fps).await;
         Self {
             host,
             viewer,
+            connecting,
             probe,
             clients: [local, remote],
             _link: link,
@@ -1914,6 +1938,188 @@ fn idr_slower_than_a_second_is_followed_not_replaced() {
             status.stats.received_fps >= 2.0,
             "P-frames must follow the IDR: {:.1} fps",
             status.stats.received_fps
+        );
+        trace.assert_never_latched();
+    });
+}
+
+/// The reconnect case's 1 Mbit/s link, how long each of its sessions runs,
+/// and how long after a viewer stops the next one connects: within the app's
+/// reconnect backoff, and after the host saw the stop.
+const RECONNECT_LINK_BYTES_PER_SECOND: u64 = 125_000;
+const RECONNECT_SESSION: Duration = Duration::from_secs(8);
+const RECONNECT_AFTER: Duration = Duration::from_secs(3);
+/// A session's start: its first three trace intervals, each covering the
+/// second before it.
+const START_SPAN: Duration = Duration::from_secs(3);
+const START_INTERVALS: usize = 3;
+/// How long the last session of the reconnect case may take to climb.
+const CLIMB_LIMIT: Duration = Duration::from_secs(20);
+
+/// How one session of the reconnect case started.
+struct SessionStart {
+    /// From `Viewer::connect` until its first unit was presented.
+    presented_after: Option<Duration>,
+    first: Option<FirstPresented>,
+    /// The host's first `START_INTERVALS` intervals of the session.
+    start: Vec<Interval>,
+}
+impl SessionStart {
+    fn read(trace: &Trace, connecting: Instant, decoder: &Decoder) -> Self {
+        let first = decoder.first();
+        Self {
+            presented_after: first.map(|first| first.at.saturating_duration_since(connecting)),
+            first,
+            start: trace
+                .between(
+                    connecting,
+                    connecting + START_SPAN + session::STATS_INTERVAL,
+                )
+                .into_iter()
+                .take(START_INTERVALS)
+                .collect(),
+        }
+    }
+    fn ack_queue_peak_ms(&self) -> Option<u64> {
+        self.start
+            .iter()
+            .map(|interval| interval.ack_queue_ms)
+            .max()
+    }
+    fn print(&self, case: &str, session: &str) {
+        let each =
+            |value: fn(&Interval) -> u64| -> Vec<u64> { self.start.iter().map(value).collect() };
+        println!(
+            "{case} session={session} presented_after_ms={} first_bytes={:?} first_keyframe={:?} ack_queue_peak_ms={:?} start_ack_queue_ms={:?} start_bpf={:?} start_pace_fps={:?} start_sent_bitrate={:?}",
+            self.presented_after.map_or_else(
+                || "-".to_owned(),
+                |after| format!("{:.1}", after.as_secs_f64() * 1000.0)
+            ),
+            self.first.map(|first| first.bytes),
+            self.first.map(|first| first.keyframe),
+            self.ack_queue_peak_ms(),
+            each(|interval| interval.ack_queue_ms),
+            each(|interval| interval.bpf),
+            each(|interval| interval.pace_fps),
+            each(|interval| interval.sent_bitrate),
+        );
+    }
+}
+
+/// Stop the rig's viewer and its decoder, then, `RECONNECT_AFTER` after the
+/// stop, connect another viewer through `client`, with a decoder. Returns
+/// how soon after the stop the host's status showed no viewer, when the new
+/// viewer began to connect, and its decoder.
+async fn reconnect(
+    rig: &mut Rig,
+    client: &Client,
+    decoder: Decoder,
+) -> (Option<Duration>, Instant, Decoder) {
+    drop(decoder);
+    rig.viewer.stop().await.unwrap();
+    let stopped = Instant::now();
+    let noticed = loop {
+        if rig.host.status().viewer.is_none() {
+            break Some(stopped.elapsed());
+        }
+        if stopped.elapsed() >= RECONNECT_AFTER {
+            break None;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    tokio::time::sleep_until((stopped + RECONNECT_AFTER).into()).await;
+    let connecting = Instant::now();
+    rig.viewer = connect_viewer(client, &rig.host).await;
+    rig.connecting = connecting;
+    let decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+    (noticed, connecting, decoder)
+}
+
+/// A 1 Mbit/s link: a viewer watches for 8 s, stops, and 3 s later connects
+/// again over the same link for 8 s; 3 s after that one stops, a viewer on
+/// the relay's unlimited link connects. Reports, for each session, the time
+/// from `Viewer::connect` to its first presented picture, that picture's
+/// bytes, and the host's ack queue over its first 3 s; and for the last, how
+/// long its encoder bitrate took to reach 80% of Balanced's start. The
+/// reconnect starts at the rate the first session ended at, so its IDR is
+/// smaller than the first session's.
+#[test]
+#[ignore = "explicit ~45-second reconnect measurement on a 1 Mbit/s link"]
+fn reconnect_on_a_slow_link() {
+    const CASE: &str = "reconnect";
+    traced(|trace| async move {
+        let shape = Arc::new(Shape::default());
+        shape
+            .rate
+            .store(RECONNECT_LINK_BYTES_PER_SECOND, Ordering::Relaxed);
+        let mut rig = Rig::start("reconnect", Some(shape), TYPICAL).await;
+        let (slow, fast) = (rig.clients[1].clone(), rig.clients[0].clone());
+        let cold_at = rig.connecting;
+        let decoder = Decoder::start(&rig.viewer, Duration::ZERO);
+        tokio::time::sleep(RECONNECT_SESSION).await;
+        let cold = SessionStart::read(&trace, cold_at, &decoder);
+        let cold_status = rig.viewer.status();
+        let cold_end = trace.last();
+        let (cold_noticed, again_at, decoder) = reconnect(&mut rig, &slow, decoder).await;
+        tokio::time::sleep(RECONNECT_SESSION).await;
+        let again = SessionStart::read(&trace, again_at, &decoder);
+        let again_status = rig.viewer.status();
+        let again_end = trace.last();
+        let (again_noticed, fast_at, decoder) = reconnect(&mut rig, &fast, decoder).await;
+        let climbed = first_after(&trace, fast_at, CLIMB_LIMIT, |interval| {
+            interval.encoder_bitrate * 5 >= START_BPS * 4
+        })
+        .await;
+        // Its start's last interval is traced by then.
+        tokio::time::sleep_until((fast_at + START_SPAN + session::STATS_INTERVAL).into()).await;
+        let fast_start = SessionStart::read(&trace, fast_at, &decoder);
+        let fast_status = rig.viewer.status();
+        drop(decoder);
+        rig.stop().await;
+        for (phase, from, to) in [
+            ("cold", cold_at, cold_at + RECONNECT_SESSION),
+            ("again", again_at, again_at + RECONNECT_SESSION),
+            ("fast", fast_at, Instant::now()),
+        ] {
+            for interval in trace.between(from, to) {
+                interval.print(CASE, from, phase);
+            }
+        }
+        cold.print(CASE, "cold");
+        again.print(CASE, "again");
+        fast_start.print(CASE, "fast");
+        println!(
+            "{CASE} summary link_kbit_s={} cold_end_bpf={} cold_end_pace={} host_saw_stop_ms={:?} again_end_bpf={} again_end_pace={} host_saw_second_stop_ms={:?} fast_at_80pct_of_start_after_ms={:?}",
+            RECONNECT_LINK_BYTES_PER_SECOND * 8 / 1000,
+            cold_end.bpf,
+            cold_end.pace_fps,
+            cold_noticed.map(|after| after.as_millis()),
+            again_end.bpf,
+            again_end.pace_fps,
+            again_noticed.map(|after| after.as_millis()),
+            climbed.map(|after| after.as_millis()),
+        );
+        for status in [&cold_status, &again_status, &fast_status] {
+            assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+        }
+        assert!(
+            cold_noticed.is_some() && again_noticed.is_some(),
+            "the host must see each stop before the next viewer connects"
+        );
+        for start in [&cold, &again, &fast_start] {
+            assert!(
+                start.first.is_some_and(|first| first.keyframe),
+                "a session's first picture is its IDR"
+            );
+        }
+        let bytes = |start: &SessionStart| start.first.map_or(0, |first| first.bytes);
+        assert!(
+            bytes(&again) < bytes(&cold),
+            "the reconnect's IDR must be smaller than the first session's"
+        );
+        assert!(
+            climbed.is_some(),
+            "the last viewer's bitrate must reach 80% of the start within {CLIMB_LIMIT:?}"
         );
         trace.assert_never_latched();
     });

@@ -16,7 +16,7 @@ use crate::{
 };
 use std::{
     sync::{Arc, atomic::Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::AsyncWriteExt,
@@ -223,6 +223,12 @@ impl Acceptor {
             worker_room.wait_for_session(session_cancel).await
         })
         .await;
+        // Recorded before the slot frees, so a viewer that reconnects once
+        // this one is gone starts from it. A session that leaves none keeps
+        // the record as it was, with its own end.
+        if let Some(rate) = session.closing_rate(Instant::now()) {
+            *self.shared.closing_rate.lock() = Some(rate);
+        }
         {
             let mut active = self.room.lock().await;
             release.armed = false;
@@ -306,6 +312,9 @@ impl Acceptor {
                 }
                 room.set_codec(codec);
             }
+            // A closed session's rate starts only a session that opens a
+            // room: one that joins shares an encoder that runs at the least
+            // of its viewers' rates, and would pull down those watching.
             let session = Session::new_in_room(
                 slot,
                 room.shared.wake.clone(),
@@ -317,6 +326,7 @@ impl Acceptor {
                 request.limits,
                 request.quality,
                 room.rate_model,
+                None,
                 &request.capabilities,
                 &capabilities,
                 self.shared.changes.clone(),
@@ -379,6 +389,7 @@ impl Acceptor {
         .ok()?;
         let room_shared = RoomShared::new(self.shared.policy.clone(), codec);
         let slot = PeerSlot::FIRST;
+        let previous = *self.shared.closing_rate.lock();
         let session = Session::new_in_room(
             slot,
             room_shared.wake.clone(),
@@ -390,6 +401,7 @@ impl Acceptor {
             request.limits,
             request.quality,
             caps.rate_model,
+            previous,
             &request.capabilities,
             &capabilities,
             self.shared.changes.clone(),
