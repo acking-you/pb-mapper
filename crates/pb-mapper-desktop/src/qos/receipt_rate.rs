@@ -7,9 +7,9 @@
 //!   transfer: at the busy rate, and at most a frame interval (a frame
 //!   interval without a busy rate, when the link carried each unit before
 //!   the next). The baseline is the probes' base RTT or, once a rebase set
-//!   one, the receipts' own when higher: the least queue the rebase found,
-//!   which every lower receipt lowers further. The probes' base is never
-//!   touched.
+//!   one, the receipts' own when higher: the least delay, less each unit's
+//!   transfer, of the receipts the rebase found the queue standing on, which
+//!   every lower receipt lowers further. The probes' base is never touched.
 //! - The standing queue is the least queue over the newest receipts: at least
 //!   three, spanning at least two frame intervals and 50 ms. A burst a few
 //!   milliseconds long never makes one on its own. The queue before it is
@@ -20,10 +20,12 @@
 //!   frame interval apart are compression, not delivery: such a pair is no
 //!   sample, and its later receipt's bytes count toward the pair before it.
 //! - The used rate is what the receipts covered over their newest second.
-//! - A stall is a receipt gap of at least three frame intervals; the receipts
-//!   that come after it compressed, or each with less delay than the one
-//!   before, are what it held, and decide nothing. Stalls recur when three
-//!   end within 2 s, or two that cover 15% of it.
+//! - A stall is a receipt gap of at least three frame intervals whose first
+//!   receipt waited through at least half of it (a still picture's idle gap
+//!   waits for nothing); the receipts that come after it compressed, or each
+//!   with less delay than the one before, are what it held, and decide
+//!   nothing. Stalls recur when three end within 2 s, or two that cover 15%
+//!   of it.
 //!
 //! The queue is congested above `QUEUE_HIGH`, or above `QUEUE_LOW` while a
 //! clamped window refused a unit, and stalls that recur are congestion too.
@@ -31,8 +33,14 @@
 //! holds; two cuts that left it where it was rebase the baseline onto it (a
 //! longer route, not a rate the host sends); and otherwise the rate is cut to
 //! `min(0.85 × busy, 0.9 × used)`, or `0.85 × used` when stalls recur. Without
-//! a busy rate the probe controller remains: there is no blind cut. Two stall
-//! cuts that left the stalls as they were excuse them until they stop.
+//! a busy rate the probe controller remains: there is no blind cut. A cut to
+//! within 5% of the rate already asked for only holds again, and counts
+//! toward no rebase. Two stall cuts that left the stalls as they were excuse
+//! them until they stop.
+//!
+//! Raises follow on the QoS tick (`raise`). After an episode, a recovery
+//! climbs back toward where congestion began, once; a climb cut short climbs
+//! again only once a raise has passed 1.2 × the capacity it was cut at.
 //!
 //! With arrival times (`arrival_time`) each receipt is timed on the viewer's
 //! clock, when it read its newest unit, and its delay is that unit's queue

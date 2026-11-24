@@ -38,6 +38,23 @@ of silently deviating.
   fixed for the session except on explicit user choice or display switch.
   Delete the automatic resolution ladder. A long-term low-bandwidth
   resolution step is NOT part of this cut.
+  - Deviation (2026-11-24, receipt-driven rate control): transport receipts
+    now drive the rate as well, and CONTRACT-perf R13 ("probe for fps and
+    bitrate, plus a transport ack-queue clamp on the byte window") no longer
+    holds. The owner directed the work to give every PC platform the best
+    performance airhand's design inspires, and airhand does all rate control
+    on per-frame acks. Evidence: with the probe owning both, congestion cost
+    frame rate first (the recorded 1 Mbit/s case fell to pace 10 while bits
+    per frame barely moved,
+    `docs/benchmarks/2026-11-24-desktop-pipeline/slow_link.txt`). Receipts
+    now cut bits per frame, and the frame rate only
+    below the preset's cut floor and from the delivery rate; the probe keeps
+    fps for delays of 600 ms or more, and all of it whenever the receipts do
+    not own the queue. Resolution, pacing and the no-pause rule are
+    unchanged. Measurements:
+    `docs/benchmarks/2026-11-24-receipt-rate-control/README.md`; the
+    behaviour is in `docs/remote-desktop.md`, "QoS: frame rate and bits per
+    frame".
 - D6. Changing fps at runtime must not rebuild the encoder: run the encoder at
   the session's max fps and drop/skip capture ticks (or use a variable frame
   rate timestamp model) — the design must pick one and verify CBR budgets.
