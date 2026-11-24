@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 #include <system_error>
@@ -113,32 +114,155 @@ const char kDownscaleShader[] =
     "  FRAG_COLOR = sum / 16.0;\n"
     "}\n";
 
-// The video plane's quad: the corners of `bounds` (left, top, right, bottom
-// in clip space), the picture's first row at the top.
+// The video plane's quads: corner (0, 0), the one GL draws at its origin's
+// side, at `bounds.xy` and corner (1, 1) at `bounds.zw`, in clip space, with
+// the texture coordinates `window.xy` and `window.zw` there.
 const char kPlaneVertexShader[] =
     "ATTRIBUTE vec2 position;\n"
     "uniform vec4 bounds;\n"
+    "uniform vec4 window;\n"
     "VARYING vec2 coordinate;\n"
     "void main() {\n"
     "  vec2 corner = position * 0.5 + 0.5;\n"
-    "  coordinate = vec2(corner.x, 1.0 - corner.y);\n"
-    "  gl_Position = vec4(mix(bounds.x, bounds.z, corner.x), mix(bounds.w, bounds.y, corner.y), 0.0, 1.0);\n"
+    "  coordinate = mix(window.xy, window.zw, corner);\n"
+    "  gl_Position = vec4(mix(bounds.xy, bounds.zw, corner), 0.0, 1.0);\n"
     "}\n";
 
-// The converted picture through `tone`: the identity, or the grey still's
-// matrix.
-const char kPlaneFragmentShader[] =
-    "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
-    "precision highp float;\n"
-    "#else\n"
-    "precision mediump float;\n"
-    "#endif\n"
+// The plane's fragment shaders, after airhand's (client/src/lib/enhance.ts)
+// for the enlargement. Each reads `picture` on unit 0, clamped to its edge;
+// texture coordinates run from the picture's top left. GLSL ES 1.00 has no
+// texelFetch, so a texel is read at its centre.
+#define PB_PLANE_PRECISION      \
+  "#ifdef GL_FRAGMENT_PRECISION_HIGH\n" \
+  "precision highp float;\n"    \
+  "#else\n"                     \
+  "precision mediump float;\n"  \
+  "#endif\n"
+
+// Bilinear, through `tone`: the identity, or the grey still's matrix.
+const char kPlaneFragmentShader[] = PB_PLANE_PRECISION
     "VARYING vec2 coordinate;\n"
     "uniform sampler2D picture;\n"
     "uniform mat3 tone;\n"
     "void main() {\n"
     "  FRAG_COLOR = vec4(clamp(tone * TEXTURE(picture, coordinate).rgb, 0.0, 1.0), 1.0);\n"
     "}\n";
+
+// Shrinking: the mean of nine bilinear taps over the picture's pixels one
+// pixel covers, `spacing` apart (AreaSpread), so that text does not alias.
+// With mipmaps, `bias` takes each tap to the level a third of the span
+// covers.
+const char kPlaneAreaShader[] = PB_PLANE_PRECISION
+    "VARYING vec2 coordinate;\n"
+    "uniform sampler2D picture;\n"
+    "uniform mat3 tone;\n"
+    "uniform vec2 spacing;\n"
+    "uniform float bias;\n"
+    "void main() {\n"
+    "  vec3 sum = vec3(0.0);\n"
+    "  for (int i = 0; i < 3; ++i) {\n"
+    "    for (int j = 0; j < 3; ++j) {\n"
+    "      sum += TEXTURE(picture, coordinate + (vec2(float(i), float(j)) - 1.0) * spacing, bias).rgb;\n"
+    "    }\n"
+    "  }\n"
+    "  FRAG_COLOR = vec4(clamp(tone * (sum / 9.0), 0.0, 1.0), 1.0);\n"
+    "}\n";
+
+// Enlarging, with an enhancement: Catmull-Rom from nine bilinear taps (the
+// sixteen texels' weights folded into nine positions), clamped to the four
+// texels nearest, so that it never rings beside text. `size`: the
+// picture's size in texels.
+const char kPlaneUpscaleShader[] = PB_PLANE_PRECISION
+    "VARYING vec2 coordinate;\n"
+    "uniform sampler2D picture;\n"
+    "uniform vec2 size;\n"
+    "vec3 tap(vec2 at) { return TEXTURE(picture, at).rgb; }\n"
+    "void main() {\n"
+    "  vec2 pos = coordinate * size;\n"
+    "  vec2 t1 = floor(pos - 0.5) + 0.5;\n"
+    "  vec2 f = pos - t1;\n"
+    "  vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));\n"
+    "  vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);\n"
+    "  vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));\n"
+    "  vec2 w3 = f * f * (-0.5 + 0.5 * f);\n"
+    "  vec2 w12 = w1 + w2;\n"
+    "  vec2 t0 = (t1 - 1.0) / size;\n"
+    "  vec2 t3 = (t1 + 2.0) / size;\n"
+    "  vec2 t12 = (t1 + w2 / w12) / size;\n"
+    "  vec3 c = (tap(vec2(t0.x, t0.y)) * w0.x + tap(vec2(t12.x, t0.y)) * w12.x\n"
+    "            + tap(vec2(t3.x, t0.y)) * w3.x) * w0.y\n"
+    "      + (tap(vec2(t0.x, t12.y)) * w0.x + tap(vec2(t12.x, t12.y)) * w12.x\n"
+    "         + tap(vec2(t3.x, t12.y)) * w3.x) * w12.y\n"
+    "      + (tap(vec2(t0.x, t3.y)) * w0.x + tap(vec2(t12.x, t3.y)) * w12.x\n"
+    "         + tap(vec2(t3.x, t3.y)) * w3.x) * w3.y;\n"
+    "  vec2 n0 = t1 / size;\n"
+    "  vec2 n1 = (t1 + 1.0) / size;\n"
+    "  vec3 a = tap(n0);\n"
+    "  vec3 b = tap(vec2(n1.x, n0.y));\n"
+    "  vec3 d = tap(vec2(n0.x, n1.y));\n"
+    "  vec3 e = tap(n1);\n"
+    "  FRAG_COLOR = vec4(clamp(c, min(min(a, b), min(d, e)), max(max(a, b), max(d, e))), 1.0);\n"
+    "}\n";
+
+// Sharpening luma alone, as AMD FidelityFX CAS does: a pixel moves toward or
+// away from its four neighbours' mean by `peak`, less where its 3x3 already
+// has contrast, and every channel by the same amount, so that chroma, which
+// 4:2:0 carries at half the resolution, keeps its edges. `texel`: one texel
+// of `picture`, which is drawn one to one; `limit`: the centre of the last
+// texel drawn into, which may lie inside the texture, beyond which the
+// neighbours are the edge's. Then through `tone`.
+const char kPlaneSharpenShader[] = PB_PLANE_PRECISION
+    "VARYING vec2 coordinate;\n"
+    "uniform sampler2D picture;\n"
+    "uniform mat3 tone;\n"
+    "uniform vec2 texel;\n"
+    "uniform vec2 limit;\n"
+    "uniform float peak;\n"
+    "float luma(vec2 offset) {\n"
+    "  vec2 at = clamp(coordinate + offset * texel, 0.5 * texel, limit);\n"
+    "  return dot(TEXTURE(picture, at).rgb, vec3(0.2126, 0.7152, 0.0722));\n"
+    "}\n"
+    "void main() {\n"
+    "  vec3 rgb = TEXTURE(picture, coordinate).rgb;\n"
+    "  float e = dot(rgb, vec3(0.2126, 0.7152, 0.0722));\n"
+    "  float a = luma(vec2(-1.0, -1.0));\n"
+    "  float b = luma(vec2(0.0, -1.0));\n"
+    "  float c = luma(vec2(1.0, -1.0));\n"
+    "  float d = luma(vec2(-1.0, 0.0));\n"
+    "  float f = luma(vec2(1.0, 0.0));\n"
+    "  float g = luma(vec2(-1.0, 1.0));\n"
+    "  float h = luma(vec2(0.0, 1.0));\n"
+    "  float i = luma(vec2(1.0, 1.0));\n"
+    "  float mn = min(min(min(d, e), min(f, b)), h);\n"
+    "  mn += min(mn, min(min(a, c), min(g, i)));\n"
+    "  float mx = max(max(max(d, e), max(f, b)), h);\n"
+    "  mx += max(mx, max(max(a, c), max(g, i)));\n"
+    "  float amp = sqrt(clamp(min(mn, 2.0 - mx) / max(mx, 0.00001), 0.0, 1.0));\n"
+    "  float w = amp * peak;\n"
+    "  float l = (e + w * (b + d + f + h)) / (1.0 + 4.0 * w);\n"
+    "  FRAG_COLOR = vec4(clamp(tone * clamp(rgb + (l - e), 0.0, 1.0), 0.0, 1.0), 1.0);\n"
+    "}\n";
+#undef PB_PLANE_PRECISION
+
+// A tap's level of detail with mipmaps: a third of the span a pixel covers.
+constexpr float kAreaBias = -1.5849625f;  // -log2(3)
+
+// How far apart, in source pixels, the area filter's taps go on an axis
+// where a pixel covers `span` source pixels. With mipmaps, a third of the
+// span, each tap reading a level that wide. Without, each bilinear tap
+// already spreads a pixel's worth, so the three are placed to give the
+// spread of the exact area average (a source pixel's box over the span's
+// box, variance (1 + span^2) / 12): sqrt((span^2 - 1) / 8), which is a
+// third of the span at three and nothing at one to one.
+double AreaSpread(double span, bool mipmapped) {
+  if (mipmapped) return span / 3;
+  return std::sqrt(std::max(span * span - 1, 0.0) / 8);
+}
+// The enlargement's texture grows in steps of this many pixels a side.
+constexpr int32_t kScaledStep = 256;
+// Timer queries a plane keeps, and the GPU times its stats keep.
+constexpr size_t kMaxQueries = 8;
+constexpr size_t kMaxGpuTimes = 360;
 
 // GreyStill's ColorFilter (viewer_overlays.dart), column by column: each
 // channel takes BT.709's luma weights at half brightness.
@@ -1152,35 +1276,111 @@ bool VideoGl::TakeDmabufRefusal() {
   return true;
 }
 
+float EnhancePeak(Enhance level) {
+  switch (level) {
+    case Enhance::kOff:
+      return 0.0f;
+    case Enhance::kLow:
+      return -0.06f;
+    case Enhance::kMedium:
+      return -0.1f;
+    case Enhance::kHigh:
+      return -0.14f;
+  }
+  return 0.0f;
+}
+
+const char* PlaneFilterName(PlaneFilter filter) {
+  switch (filter) {
+    case PlaneFilter::kNone:
+      return "none";
+    case PlaneFilter::kBilinear:
+      return "bilinear";
+    case PlaneFilter::kArea:
+      return "area";
+    case PlaneFilter::kAreaMipmapped:
+      return "areaMipmapped";
+    case PlaneFilter::kSharpen:
+      return "sharpen";
+    case PlaneFilter::kUpscaleSharpen:
+      return "upscaleSharpen";
+  }
+  return "none";
+}
+
+PlanePlan PlanPlane(uint32_t width, uint32_t height, const PlaneRect& picture, const PlaneRect& clip,
+                    Enhance enhance, bool mipmaps, int32_t target_width, int32_t target_height) {
+  PlanePlan plan;
+  const int64_t left = std::max<int64_t>({clip.x, picture.x, 0});
+  const int64_t top = std::max<int64_t>({clip.y, picture.y, 0});
+  const int64_t right = std::min<int64_t>(
+      {static_cast<int64_t>(clip.x) + clip.width, static_cast<int64_t>(picture.x) + picture.width, target_width});
+  const int64_t bottom = std::min<int64_t>(
+      {static_cast<int64_t>(clip.y) + clip.height, static_cast<int64_t>(picture.y) + picture.height, target_height});
+  if (width == 0 || height == 0 || picture.width <= 0 || picture.height <= 0 || right <= left || bottom <= top) {
+    return plan;
+  }
+  // Within the framebuffer: each fits an int32_t.
+  plan.visible.x = static_cast<int32_t>(left);
+  plan.visible.y = static_cast<int32_t>(top);
+  plan.visible.width = static_cast<int32_t>(right - left);
+  plan.visible.height = static_cast<int32_t>(bottom - top);
+  const int64_t placed_width = picture.width, placed_height = picture.height;
+  if (width <= 1 && height <= 1) {
+    // The black pixel before the first picture.
+    plan.filter = PlaneFilter::kBilinear;
+  } else if (placed_width < width || placed_height < height) {
+    const bool third = placed_width * 3 < width || placed_height * 3 < height;
+    plan.filter = (mipmaps && third) ? PlaneFilter::kAreaMipmapped : PlaneFilter::kArea;
+  } else if (enhance == Enhance::kOff) {
+    plan.filter = PlaneFilter::kBilinear;
+  } else if (placed_width == width && placed_height == height) {
+    plan.filter = PlaneFilter::kSharpen;
+  } else {
+    plan.filter = PlaneFilter::kUpscaleSharpen;
+    const int64_t region_left = std::max<int64_t>(left - 1, picture.x);
+    const int64_t region_top = std::max<int64_t>(top - 1, picture.y);
+    const int64_t region_right = std::min<int64_t>(right + 1, static_cast<int64_t>(picture.x) + picture.width);
+    const int64_t region_bottom = std::min<int64_t>(bottom + 1, static_cast<int64_t>(picture.y) + picture.height);
+    // At most a pixel beyond the framebuffer on each side.
+    plan.region.x = static_cast<int32_t>(region_left);
+    plan.region.y = static_cast<int32_t>(region_top);
+    plan.region.width = static_cast<int32_t>(region_right - region_left);
+    plan.region.height = static_cast<int32_t>(region_bottom - region_top);
+  }
+  return plan;
+}
+
 bool PlaneGl::Setup(std::string* error) {
-  if (program_ != 0) return true;
+  if (programs_[kPlain].name != 0) return true;
   if (tried_) {
     *error = failure_;
     return false;
   }
   tried_ = true;
-  const bool desktop = epoxy_is_desktop_gl();
+  desktop_ = epoxy_is_desktop_gl();
   const int version = epoxy_gl_version();
-  if (desktop && version < 32) {
+  if (desktop_ && version < 32) {
     failure_ = "The video plane needs desktop GL 3.2 or later, or GL ES";
     *error = failure_;
     return false;
   }
   ClearErrors();
-  const GLuint program = Build(ShaderHeader(desktop, GL_VERTEX_SHADER) + kPlaneVertexShader,
-                               ShaderHeader(desktop, GL_FRAGMENT_SHADER) + kPlaneFragmentShader, &failure_);
-  if (program == 0) {
+  std::string failure;
+  if (!Use(kPlain, &failure)) {
+    failure_ = failure;
     *error = failure_;
     return false;
   }
-  program_ = program;
-  picture_ = glGetUniformLocation(program_, "picture");
-  bounds_ = glGetUniformLocation(program_, "bounds");
-  tone_ = glGetUniformLocation(program_, "tone");
-  samplers_ = desktop ? version >= 33 : version >= 30;
+  samplers_ = desktop_ ? version >= 33 : version >= 30;
+  // GL ES 2 mipmaps a texture whose sides are not powers of two only with
+  // GL_OES_texture_npot.
+  mipmaps_ = desktop_ || version >= 30 || epoxy_has_gl_extension("GL_OES_texture_npot");
+  timer_queries_ = desktop_ && version >= 33;
+  glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_);
   // Desktop GL has no default vertex array object; GL ES 3 takes one too,
   // which then holds the quad's attribute for good.
-  if (desktop || version >= 30) {
+  if (desktop_ || version >= 30) {
     glGenVertexArrays(1, &vertex_array_);
     glBindVertexArray(vertex_array_);
   }
@@ -1201,38 +1401,164 @@ bool PlaneGl::Setup(std::string* error) {
   return true;
 }
 
-void PlaneGl::Draw(GLuint texture, const PlaneRect& picture, const PlaneRect& clip, bool grey, int32_t target_width,
-                   int32_t target_height) {
+const PlaneGl::Program* PlaneGl::Use(Kind kind, std::string* error) {
+  Program& program = programs_[kind];
+  if (!program.failure.empty()) return nullptr;
+  if (program.name == 0) {
+    const char* fragment = kind == kAreaProgram      ? kPlaneAreaShader
+                           : kind == kUpscale        ? kPlaneUpscaleShader
+                           : kind == kSharpenProgram ? kPlaneSharpenShader
+                                                     : kPlaneFragmentShader;
+    std::string failure;
+    const GLuint name = Build(ShaderHeader(desktop_, GL_VERTEX_SHADER) + kPlaneVertexShader,
+                              ShaderHeader(desktop_, GL_FRAGMENT_SHADER) + fragment, &failure);
+    if (name == 0) {
+      program.failure = failure.empty() ? "Cannot build the video plane's shader" : failure;
+      *error = program.failure;
+      return nullptr;
+    }
+    program.name = name;
+    program.picture = glGetUniformLocation(name, "picture");
+    program.bounds = glGetUniformLocation(name, "bounds");
+    program.window = glGetUniformLocation(name, "window");
+    program.tone = glGetUniformLocation(name, "tone");
+    program.spacing = glGetUniformLocation(name, "spacing");
+    program.bias = glGetUniformLocation(name, "bias");
+    program.size = glGetUniformLocation(name, "size");
+    program.texel = glGetUniformLocation(name, "texel");
+    program.limit = glGetUniformLocation(name, "limit");
+    program.peak = glGetUniformLocation(name, "peak");
+  }
+  glUseProgram(program.name);
+  glUniform1i(program.picture, 0);
+  return &program;
+}
+
+bool PlaneGl::Scaled(int32_t width, int32_t height) {
+  if (width <= 0 || height <= 0 || width > max_texture_ || height > max_texture_) return false;
+  if (scaled_ == 0 || width > scaled_width_ || height > scaled_height_) {
+    const auto grown = [this](int32_t wanted, int32_t had) {
+      const int64_t stepped = (static_cast<int64_t>(wanted) + kScaledStep - 1) / kScaledStep * kScaledStep;
+      return static_cast<int32_t>(std::min<int64_t>(max_texture_, std::max<int64_t>(had, stepped)));
+    };
+    const int32_t grown_width = grown(width, scaled_width_), grown_height = grown(height, scaled_height_);
+    // A size that could not be made is not specified again at every draw.
+    if (refused_width_ != 0 && grown_width >= refused_width_ && grown_height >= refused_height_) return false;
+    if (scaled_ == 0) {
+      glGenTextures(1, &scaled_);
+      glBindTexture(GL_TEXTURE_2D, scaled_);
+      // Read one to one, at texel centres.
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    } else {
+      glBindTexture(GL_TEXTURE_2D, scaled_);
+    }
+    // GL ES 2 takes no sized format.
+    const bool sized = desktop_ || epoxy_gl_version() >= 30;
+    glTexImage2D(GL_TEXTURE_2D, 0, sized ? GL_RGBA8 : GL_RGBA, grown_width, grown_height, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    if (scaled_framebuffer_ == 0) glGenFramebuffers(1, &scaled_framebuffer_);
+    glBindFramebuffer(GL_FRAMEBUFFER, scaled_framebuffer_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, scaled_, 0);
+    scaled_width_ = scaled_height_ = 0;
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+      refused_width_ = grown_width;
+      refused_height_ = grown_height;
+      return false;
+    }
+    scaled_width_ = grown_width;
+    scaled_height_ = grown_height;
+    return true;
+  }
+  glBindFramebuffer(GL_FRAMEBUFFER, scaled_framebuffer_);
+  return true;
+}
+
+void PlaneGl::Trim() {
+  if (scaled_ != 0) glDeleteTextures(1, &scaled_);
+  if (scaled_framebuffer_ != 0) glDeleteFramebuffers(1, &scaled_framebuffer_);
+  scaled_ = scaled_framebuffer_ = 0;
+  scaled_width_ = scaled_height_ = 0;
+  refused_width_ = refused_height_ = 0;
+}
+
+void PlaneGl::Quad(const Program& program, const PlaneRect& rect, int32_t target_width, int32_t target_height,
+                   float s0, float t0, float s1, float t1) {
+  const double width = target_width, height = target_height;
+  const double left = rect.x, right = left + rect.width;
+  const double top = rect.y, bottom = top + rect.height;
+  glUniform4f(program.bounds, static_cast<GLfloat>(2 * left / width - 1), static_cast<GLfloat>(1 - 2 * bottom / height),
+              static_cast<GLfloat>(2 * right / width - 1), static_cast<GLfloat>(1 - 2 * top / height));
+  glUniform4f(program.window, s0, t0, s1, t1);
+  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+void PlaneGl::PollQueries() {
+  while (!running_.empty()) {
+    const RunningQuery front = running_.front();
+    GLint available = 0;
+    glGetQueryObjectiv(front.name, GL_QUERY_RESULT_AVAILABLE, &available);
+    if (!available) return;
+    GLuint64 elapsed = 0;
+    glGetQueryObjectui64v(front.name, GL_QUERY_RESULT, &elapsed);
+    running_.pop_front();
+    queries_.push_back(front.name);
+    if (!timing_ || front.epoch != timing_epoch_) continue;
+    gpu_ms_.push_back(static_cast<double>(elapsed) / 1e6);
+    if (gpu_ms_.size() > kMaxGpuTimes) gpu_ms_.pop_front();
+  }
+}
+
+void PlaneGl::Time(bool on) {
+  if (on == timing_) return;
+  timing_ = on;
+  ++timing_epoch_;
+  gpu_ms_.clear();
+}
+
+PlaneGpuTimes PlaneGl::GpuTimes() {
+  PlaneGpuTimes times;
+  std::vector<double> sorted(gpu_ms_.begin(), gpu_ms_.end());
+  times.samples = sorted.size();
+  if (sorted.empty()) return times;
+  std::sort(sorted.begin(), sorted.end());
+  times.p50_ms = sorted[sorted.size() / 2];
+  times.p95_ms = sorted[std::min(sorted.size() - 1, sorted.size() * 95 / 100)];
+  return times;
+}
+
+void PlaneGl::Draw(const PlaneFrame& frame, std::string* fallback) {
+  last_filter_ = PlaneFilter::kNone;
+  const int32_t target_width = frame.target_width, target_height = frame.target_height;
   if (target_width <= 0 || target_height <= 0) return;
+  // GTK's framebuffer for the area, which the enlargement leaves and comes
+  // back to.
+  GLint framebuffer = 0;
+  glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
   for (const GLenum cap : {GL_SCISSOR_TEST, GL_BLEND, GL_DEPTH_TEST, GL_STENCIL_TEST, GL_CULL_FACE}) glDisable(cap);
   glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
   glViewport(0, 0, target_width, target_height);
   glClearColor(0, 0, 0, 1);
   glClear(GL_COLOR_BUFFER_BIT);
-  // What of the picture shows: inside the clip and the framebuffer.
-  const int64_t left = std::max<int64_t>({clip.x, picture.x, 0});
-  const int64_t top = std::max<int64_t>({clip.y, picture.y, 0});
-  const int64_t right = std::min<int64_t>(
-      {static_cast<int64_t>(clip.x) + clip.width, static_cast<int64_t>(picture.x) + picture.width, target_width});
-  const int64_t bottom = std::min<int64_t>(
-      {static_cast<int64_t>(clip.y) + clip.height, static_cast<int64_t>(picture.y) + picture.height, target_height});
-  if (program_ == 0 || texture == 0 || picture.width <= 0 || picture.height <= 0 || right <= left || bottom <= top) {
-    return;
+  // What only an enhancement needs goes once the viewer turns it off.
+  if (frame.enhance == Enhance::kOff && scaled_ != 0) Trim();
+  if (timer_queries_) PollQueries();
+  const PlanePlan plan = PlanPlane(frame.width, frame.height, frame.picture, frame.clip, frame.enhance, mipmaps_,
+                                   target_width, target_height);
+  if (programs_[kPlain].name == 0 || frame.texture == 0 || plan.filter == PlaneFilter::kNone) return;
+  GLuint query = 0;
+  if (timing_ && timer_queries_ && (!queries_.empty() || running_.size() < kMaxQueries)) {
+    if (queries_.empty()) {
+      glGenQueries(1, &query);
+    } else {
+      query = queries_.back();
+      queries_.pop_back();
+    }
+    if (query != 0) glBeginQuery(GL_TIME_ELAPSED, query);
   }
-  // GL counts rows from the bottom.
-  glEnable(GL_SCISSOR_TEST);
-  glScissor(static_cast<GLint>(left), static_cast<GLint>(target_height - bottom), static_cast<GLsizei>(right - left),
-            static_cast<GLsizei>(bottom - top));
-  const double width = target_width, height = target_height;
-  const double x0 = picture.x, y0 = picture.y;
-  const double x1 = x0 + picture.width, y1 = y0 + picture.height;
-  glUseProgram(program_);
-  glUniform4f(bounds_, static_cast<GLfloat>(2 * x0 / width - 1), static_cast<GLfloat>(1 - 2 * y0 / height),
-              static_cast<GLfloat>(2 * x1 / width - 1), static_cast<GLfloat>(1 - 2 * y1 / height));
-  glUniformMatrix3fv(tone_, 1, GL_FALSE, grey ? kGreyTone : kIdentityTone);
-  glUniform1i(picture_, 0);
   glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D, texture);
   if (samplers_) glBindSampler(0, 0);
   if (vertex_array_ != 0) {
     glBindVertexArray(vertex_array_);
@@ -1241,19 +1567,146 @@ void PlaneGl::Draw(GLuint texture, const PlaneRect& picture, const PlaneRect& cl
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
     glEnableVertexAttribArray(0);
   }
-  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-  glDisable(GL_SCISSOR_TEST);
+  const GLfloat* tone = frame.grey ? kGreyTone : kIdentityTone;
+  const PlaneRect& placed = frame.picture;
+  const PlaneRect& shown = plan.visible;
+  // The visible part's texture coordinates in the picture: at its bottom
+  // left as GL counts rows, and at its top right.
+  const auto across = [&placed](int64_t x) {
+    return static_cast<float>(static_cast<double>(x - placed.x) / placed.width);
+  };
+  const auto down = [&placed](int64_t y) {
+    return static_cast<float>(static_cast<double>(y - placed.y) / placed.height);
+  };
+  const float s0 = across(shown.x), s1 = across(static_cast<int64_t>(shown.x) + shown.width);
+  const float t_bottom = down(static_cast<int64_t>(shown.y) + shown.height), t_top = down(shown.y);
+  PlaneFilter filter = plan.filter;
+  std::string failure;
+  const Program* program = nullptr;
+  if (filter == PlaneFilter::kArea || filter == PlaneFilter::kAreaMipmapped) {
+    program = Use(kAreaProgram, &failure);
+    if (program) {
+      const bool mipmapped = filter == PlaneFilter::kAreaMipmapped;
+      glBindTexture(GL_TEXTURE_2D, frame.texture);
+      if (mipmapped) {
+        // Once a picture, never for a redraw of it.
+        if (frame.texture != mipmapped_texture_ || frame.serial != mipmapped_serial_) {
+          glGenerateMipmap(GL_TEXTURE_2D);
+          mipmapped_texture_ = frame.texture;
+          mipmapped_serial_ = frame.serial;
+        }
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+      }
+      glUniformMatrix3fv(program->tone, 1, GL_FALSE, tone);
+      const double span_x = static_cast<double>(frame.width) / placed.width;
+      const double span_y = static_cast<double>(frame.height) / placed.height;
+      glUniform2f(program->spacing, static_cast<GLfloat>(AreaSpread(span_x, mipmapped) / frame.width),
+                  static_cast<GLfloat>(AreaSpread(span_y, mipmapped) / frame.height));
+      glUniform1f(program->bias, mipmapped ? kAreaBias : 0.0f);
+      Quad(*program, shown, target_width, target_height, s0, t_bottom, s1, t_top);
+      // The converter's own reads (a still) sample its base level.
+      if (mipmapped) glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    }
+  } else if (filter == PlaneFilter::kSharpen) {
+    program = Use(kSharpenProgram, &failure);
+    if (program) {
+      glBindTexture(GL_TEXTURE_2D, frame.texture);
+      glUniformMatrix3fv(program->tone, 1, GL_FALSE, tone);
+      const GLfloat width = static_cast<GLfloat>(frame.width), height = static_cast<GLfloat>(frame.height);
+      glUniform2f(program->texel, 1.0f / width, 1.0f / height);
+      glUniform2f(program->limit, (width - 0.5f) / width, (height - 0.5f) / height);
+      glUniform1f(program->peak, EnhancePeak(frame.enhance));
+      Quad(*program, shown, target_width, target_height, s0, t_bottom, s1, t_top);
+    }
+  } else if (filter == PlaneFilter::kUpscaleSharpen) {
+    const Program* upscale = Use(kUpscale, &failure);
+    const Program* sharpen = upscale ? Use(kSharpenProgram, &failure) : nullptr;
+    const PlaneRect& region = plan.region;
+    if (sharpen && !Scaled(region.width, region.height)) {
+      failure = scaled_failed_ ? "" : "Cannot make the video plane's enlarged picture";
+      scaled_failed_ = true;
+      glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(framebuffer));
+    } else if (sharpen) {
+      // The region enlarged, its first row the region's top, ...
+      glViewport(0, 0, region.width, region.height);
+      glUseProgram(upscale->name);
+      glBindTexture(GL_TEXTURE_2D, frame.texture);
+      glUniform2f(upscale->size, static_cast<GLfloat>(frame.width), static_cast<GLfloat>(frame.height));
+      PlaneRect whole;
+      whole.width = region.width;
+      whole.height = region.height;
+      Quad(*upscale, whole, region.width, region.height, across(region.x), down(region.y),
+           across(static_cast<int64_t>(region.x) + region.width), down(static_cast<int64_t>(region.y) + region.height));
+      // ... then its visible part sharpened one to one into the window.
+      glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(framebuffer));
+      glViewport(0, 0, target_width, target_height);
+      glUseProgram(sharpen->name);
+      glBindTexture(GL_TEXTURE_2D, scaled_);
+      glUniformMatrix3fv(sharpen->tone, 1, GL_FALSE, tone);
+      const double across_scaled = scaled_width_, down_scaled = scaled_height_;
+      glUniform2f(sharpen->texel, static_cast<GLfloat>(1 / across_scaled), static_cast<GLfloat>(1 / down_scaled));
+      // The region only: what lies beyond it in the texture is not drawn.
+      glUniform2f(sharpen->limit, static_cast<GLfloat>((region.width - 0.5) / across_scaled),
+                  static_cast<GLfloat>((region.height - 0.5) / down_scaled));
+      glUniform1f(sharpen->peak, EnhancePeak(frame.enhance));
+      Quad(*sharpen, shown, target_width, target_height, static_cast<float>((shown.x - region.x) / across_scaled),
+           static_cast<float>((static_cast<int64_t>(shown.y) + shown.height - region.y) / down_scaled),
+           static_cast<float>((static_cast<int64_t>(shown.x) + shown.width - region.x) / across_scaled),
+           static_cast<float>((shown.y - region.y) / down_scaled));
+      program = sharpen;
+    }
+  } else {
+    program = &programs_[kPlain];
+  }
+  if (!program) {
+    // The filter the context cannot run: bilinear instead.
+    if (!failure.empty() && fallback) *fallback = failure;
+    filter = PlaneFilter::kBilinear;
+    program = &programs_[kPlain];
+  }
+  if (filter == PlaneFilter::kBilinear) {
+    glUseProgram(program->name);
+    glBindTexture(GL_TEXTURE_2D, frame.texture);
+    glUniformMatrix3fv(program->tone, 1, GL_FALSE, tone);
+    Quad(*program, shown, target_width, target_height, s0, t_bottom, s1, t_top);
+  }
+  if (query != 0) {
+    glEndQuery(GL_TIME_ELAPSED);
+    RunningQuery started;
+    started.name = query;
+    started.epoch = timing_epoch_;
+    running_.push_back(started);
+  }
+  last_filter_ = filter;
 }
 
 void PlaneGl::Free(bool context_gone) {
   if (!context_gone) {
-    if (program_ != 0) glDeleteProgram(program_);
+    for (const Program& program : programs_) {
+      if (program.name != 0) glDeleteProgram(program.name);
+    }
     if (quad_ != 0) glDeleteBuffers(1, &quad_);
     if (vertex_array_ != 0) glDeleteVertexArrays(1, &vertex_array_);
+    Trim();
+    std::vector<GLuint> queries(queries_);
+    for (const RunningQuery& query : running_) queries.push_back(query.name);
+    if (!queries.empty()) glDeleteQueries(static_cast<GLsizei>(queries.size()), queries.data());
   }
-  program_ = quad_ = vertex_array_ = 0;
-  picture_ = bounds_ = tone_ = -1;
-  samplers_ = tried_ = false;
+  for (Program& program : programs_) program = Program{};
+  quad_ = vertex_array_ = scaled_ = scaled_framebuffer_ = 0;
+  scaled_width_ = scaled_height_ = 0;
+  refused_width_ = refused_height_ = 0;
+  scaled_failed_ = false;
+  mipmapped_texture_ = 0;
+  mipmapped_serial_ = 0;
+  timing_ = false;
+  timing_epoch_ = 0;
+  queries_.clear();
+  running_.clear();
+  gpu_ms_.clear();
+  last_filter_ = PlaneFilter::kNone;
+  samplers_ = tried_ = desktop_ = mipmaps_ = timer_queries_ = false;
+  max_texture_ = 0;
   failure_.clear();
 }
 

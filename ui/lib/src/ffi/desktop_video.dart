@@ -89,7 +89,7 @@ abstract interface class DesktopVideoTexture {
   Future<void> grey(bool on);
 
   /// Whether the runner can sharpen the picture while it shows it enlarged
-  /// ([enhance]): the macOS layer presenter.
+  /// ([enhance]): the macOS layer presenter and the Linux video plane.
   bool get enhances;
 
   /// How much the runner sharpens the picture while it shows it at least
@@ -334,9 +334,11 @@ class _ChannelVideoTexture implements DesktopVideoTexture {
     });
   }
 
-  /// The macOS layer presenter's enhancement (DesktopVideo.swift).
+  /// The macOS layer presenter's enhancement (DesktopVideo.swift), and the
+  /// Linux video plane's (desktop_video_plane.cc), which also area-averages
+  /// a picture it shows smaller whatever the level.
   @override
-  bool get enhances => platformViewType != null;
+  bool get enhances => platformViewType != null || plane;
 
   @override
   Future<void> enhance(PictureEnhancement level) async {

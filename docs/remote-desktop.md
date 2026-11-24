@@ -4209,7 +4209,8 @@ With the layer presenter, the Display menu also offers **Sharpen enlarged
 picture**: Off, Low, Medium or High, one choice for the device
 (`viewer_enhance` in the viewer's preferences), Off until chosen, offered
 only for a picture the runner presents itself and sent at once as the
-channel's `enhance {textureId, level}`. It follows airhand's enhancement
+channel's `enhance {textureId, level}`. The Linux video plane takes the
+same choice ([its scaling](#the-linux-video-plane)). It follows airhand's enhancement
 (`client/src/lib/enhance.ts`). While the level is not Off and the picture
 shows on screen at least its own size on both axes, but no larger than its
 screen, the decoder thread hands each picture to a presenter thread of its
@@ -4503,7 +4504,8 @@ Smooth, or a frame-rate limit above 60 (Balanced's ceiling is 60). A waiting
 picture is taken and converted in GDK's context (the converter above, in
 GLSL 1.50 with R8 and RG8 planes and a vertex array object of its own on
 desktop GL), which is its receipt, and drawn into the placed rectangle, cut
-to its clip, bilinear. A redraw that Flutter or an overlay causes takes
+to its clip, through the filter its scale calls for (below). A redraw that
+Flutter or an overlay causes takes
 nothing and draws the last picture again. On Wayland GDK's context is EGL on
 the display Flutter uses, so dma-bufs are imported as for the texture; on
 X11 GDK 3 draws through GLX, so the decoder is told this presenter imports
@@ -4535,6 +4537,52 @@ frame, so while zooming or panning the picture can trail the overlays by a
 frame. `grey` puts the plane through the grey still's matrix, and the grey
 still asks for it as for the Mac's layer.
 
+The plane scales the converted picture (RGBA at its own size) into the
+placed rectangle by the scale s from the picture's pixels to the screen's
+(`PlanPlane` in `desktop_video_gl.cc`), drawing only the part in view, and
+`stats` names the filter its last draw used as `planeFilter`:
+
+- **Smaller on either axis** (`area`): always, whatever the level, an area
+  filter, so that text shrunk into a window does not alias as bilinear's
+  skipped pixels did: nine bilinear taps over the pixels each screen pixel
+  covers, averaged, spread so that together they weigh the picture as the
+  exact area average does (sqrt((1/s² − 1)/8) pixels apart, a third of the
+  span at s = 1/3). Below s = 1/3, where the context mipmaps the picture
+  (desktop GL, GL ES 3, or GL ES 2 with `GL_OES_texture_npot`), the taps
+  read its mipmaps trilinearly a third of the span apart, each from the
+  level a third of the span wide (`areaMipmapped`); the mipmaps are made
+  once for each new picture, never for a redraw, and the picture's own
+  minifying filter is left linear for the converter's still. The Flutter
+  texture is unchanged: Flutter scales it bilinear.
+- **At least its own size**, with Sharpen at Off: bilinear (`bilinear`),
+  which at s = 1 is a one-to-one copy, as before.
+- **With Sharpen at Low, Medium or High**, as on the Mac and after airhand:
+  at s = 1 the picture's luma is sharpened (`sharpen`); larger, the visible
+  part and a pixel around it are first enlarged into a texture of the
+  plane's by Catmull-Rom from nine bilinear taps, clamped to the four
+  nearest pixels so that it never rings beside text, and that is then
+  sharpened one to one into the window (`upscaleSharpen`). The sharpening
+  is CAS on luma alone, with airhand's peaks (−0.06, −0.1, −0.14), every
+  channel moved by the luma's change; its neighbours stop at the enlarged
+  region's edge. Unlike the Mac's, it keeps working when a zoom takes the
+  picture past the window, since only the part in view is enlarged.
+
+The plane works on RGB, since the converter has already made it; the Mac's
+enhancement reads the decoder's planes. The shaders come from one source
+in GLSL 1.50 for desktop GL and GLSL ES 1.00 for GL ES, as the converter's
+do, and a filter whose shader the context cannot build is logged once and
+drawn bilinear instead; the plane itself never fails for it. So is an
+enlargement whose texture the GPU cannot make, which is not asked for
+again at that size or larger, only at a smaller one, until Sharpen is
+turned off or the texture is unbound. `enhance`
+redraws the picture at once, though the host sends nothing while the
+desktop is still; a new texture starts at Off, and the enlargement's
+texture goes when Sharpen is turned off or the texture is unbound. While
+the stats are timed, on desktop GL 3.3 or later, `planeScaleGpuP50Ms` and
+`planeScaleGpuP95Ms` give the GPU time of the passes that draw the picture
+(timer queries, read a frame later without waiting); unbinding the texture
+drops them, so the next viewer's start from nothing.
+
 `stats` adds `refreshIntervalMs`, the refresh interval the newest of GDK's
 recent frames carries (what an X11 compositor reports, or on Wayland the
 mode of the output, where GDK puts 1/60 s for an output it does not know)
@@ -4555,7 +4603,17 @@ improve.
 None of this has run on a Linux device yet. The clip harness checks the
 plane's drawing pixel by pixel (placement, clip, orientation, grey) in its
 GL ES context and, with a converter of the plane's, in a desktop GL 3.2
-core context, and CI builds the runner. When the Flutter pin moves to 3.50
+core context, and there that each scale and level draws with its filter,
+whose output matches a CPU reference of its arithmetic
+(`ui/linux/test/plane_reference.h`), and that the mipmaps are made again
+for another picture in the same texture but not for a redraw; and CI
+builds the runner. The runner's GL code also ran on a Mac's OpenGL 4.1 core profile,
+the desktop GL path, where every filter matched its reference, the area
+filters came closer to a Lanczos-3 reference than bilinear at 0.75x to
+0.25x, the enhancement raised edge contrast towards Lanczos-3's, and the
+enlargement and sharpening of 1080p to 2560x1440 took 0.47 ms of GPU time
+a picture; its GLSL ES 1.00 shaders compiled in WebGL
+([measurements](benchmarks/2026-11-24-linux-plane-scaling/README.md)). When the Flutter pin moves to 3.50
 or later, whose renderers differ (a Wayland subsurface, X11's
 `fl_opengl_frame`), check that Flutter's buffer keeps its alpha over the
 plane before shipping.
@@ -4657,7 +4715,11 @@ What each platform's new code has been through:
   GNOME and KDE on Wayland and GNOME and Xfce on X11, the picture through a
   transparent Flutter view, clicks over it, a covered window's receipts and
   the separate UI thread are outstanding; they decide whether it becomes
-  the Linux default.
+  the Linux default. Its scaling ran on a Mac's OpenGL, with its GL ES
+  shaders compiled in WebGL
+  ([measurements](benchmarks/2026-11-24-linux-plane-scaling/README.md));
+  its look on a Linux screen, its GPU time on Linux drivers and an
+  unchanged picture rate with it are outstanding.
 - **macOS host.** Compiled, linked, linted and unit-tested on a macOS
   runner in CI. The unit tests cover the VideoToolbox encoder, the display
   list, the system pointer read off the main thread in a window-server

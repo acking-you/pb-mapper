@@ -1,0 +1,80 @@
+GL: 4.1 Metal - 91.7 | Apple M6 | GLSL 4.10
+
+checks: the plane's filters against the CPU references, a 1280x720 text picture
+  ok   the runner's converter converts the NV12 picture in desktop GL
+  ok   the plane builds its bilinear program in desktop GL (GLSL 1.50) 
+  1:1, cut to a clip: bilinear, 1152x624 visible, PSNR 99.0 dB, largest difference 0, 0 pixels lit outside
+  ok   it draws with bilinear
+  ok   it matches the reference, black around, no GL error
+  0.5x, area: area, 640x360 visible, PSNR 66.7 dB, largest difference 1, 0 pixels lit outside
+  ok   it draws with area
+  ok   it matches the reference, black around, no GL error
+  0.75x with an enhancement, area and no sharpening: area, 960x540 visible, PSNR 67.7 dB, largest difference 1, 0 pixels lit outside
+  ok   it draws with area
+  ok   it matches the reference, black around, no GL error
+  0.375x, area: area, 480x270 visible, PSNR 66.2 dB, largest difference 1, 0 pixels lit outside
+  ok   it draws with area
+  ok   it matches the reference, black around, no GL error
+  0.25x, mipmapped area (against the exact area average): areaMipmapped, 320x180 visible, PSNR 41.8 dB, largest difference 14, 0 pixels lit outside
+  ok   it draws with areaMipmapped
+  ok   it matches the reference, black around, no GL error
+  1.5x, bilinear with no enhancement: bilinear, 1328x760 visible, PSNR 62.6 dB, largest difference 1, 0 pixels lit outside
+  ok   it draws with bilinear
+  ok   it matches the reference, black around, no GL error
+  1:1 sharpened (medium): sharpen, 1280x720 visible, PSNR 99.0 dB, largest difference 0, 0 pixels lit outside
+  ok   it draws with sharpen
+  ok   it matches the reference, black around, no GL error
+  2x zoomed past the window, enlarged and sharpened (high), the picture's corner in view: upscaleSharpen, 1288x730 visible, PSNR 66.5 dB, largest difference 3, 0 pixels lit outside
+  ok   it draws with upscaleSharpen
+  ok   it matches the reference, black around, no GL error
+  1.5x enlarged and sharpened (low), cut to a clip: upscaleSharpen, 1180x600 visible, PSNR 63.3 dB, largest difference 2, 0 pixels lit outside
+  ok   it draws with upscaleSharpen
+  ok   it matches the reference, black around, no GL error
+  1.25x enlarged and sharpened (medium), grey: upscaleSharpen, 1328x760 visible, PSNR 59.2 dB, largest difference 1, 0 pixels lit outside
+  ok   it draws with upscaleSharpen
+  ok   it matches the reference, black around, no GL error
+  0.25x against the area average: 41.8 dB mipmapped area, 22.1 dB bilinear
+  ok   the mipmapped area filter is far closer to the area average than bilinear
+  ok   the picture's minifying filter is linear again after the draw
+  the converter's still after the draw: 65.9 dB against the area average
+  ok   the converter's still is read from the picture, not from stale mipmaps
+  timed: 20 draws, p50 0.037 ms
+  ok   the plane times its passes on desktop GL while asked
+  ok   and drops the figures when no longer asked
+  ok   turning the enhancement off frees its texture with no GL error
+
+quality: SSIM (luma, 8x8) against a Lanczos-3 reference of the same picture, and mean edge contrast
+  2560x1440 shown smaller: scale, size, filter; SSIM against Lanczos-3 and PSNR against the exact area
+  average, the plane's / bilinear's (the plane before)
+  0.750x 1920x1080 area          SSIM 0.9845 / 0.9825, PSNR 40.3 / 35.9 dB
+  0.500x 1280x720  area          SSIM 0.9840 / 0.9755, PSNR 37.2 / 70.1 dB
+  0.375x  960x540  area          SSIM 0.9816 / 0.8839, PSNR 50.3 / 23.0 dB
+  0.250x  640x360  areaMipmapped SSIM 0.9741 / 0.8231, PSNR 41.0 / 21.2 dB
+  1920x1080 shown larger, the top left 1280x720 of the window: scale, level, filter, SSIM, edge contrast
+  1.5x off    bilinear       SSIM 0.9760, edge contrast 16.48
+  1.5x low    upscaleSharpen SSIM 0.9890, edge contrast 19.76
+  1.5x medium upscaleSharpen SSIM 0.9895, edge contrast 20.40
+  1.5x high   upscaleSharpen SSIM 0.9895, edge contrast 21.17
+  1.5x Lanczos-3 reference: edge contrast 21.63
+  2.0x off    bilinear       SSIM 0.9737, edge contrast 10.40
+  2.0x low    upscaleSharpen SSIM 0.9867, edge contrast 12.69
+  2.0x medium upscaleSharpen SSIM 0.9871, edge contrast 13.03
+  2.0x high   upscaleSharpen SSIM 0.9871, edge contrast 13.43
+  2.0x Lanczos-3 reference: edge contrast 14.32
+
+GPU time of the plane's picture passes (its own GL_TIME_ELAPSED queries), 300 draws after 30, ms
+  picture     window      level   filter         pictures       p50      p95
+  1920x1080   1920x1080   off     bilinear       new          0.011    0.047  (300 timed)
+  1920x1080   1920x1080   medium  sharpen        new          0.068    0.072  (300 timed)
+  1920x1080   2560x1440   off     bilinear       new          0.058    0.066  (300 timed)
+  1920x1080   2560x1440   medium  upscaleSharpen new          0.465    0.482  (300 timed)
+  1920x1080   3840x2160   off     bilinear       new          0.177    0.191  (300 timed)
+  1920x1080   3840x2160   medium  upscaleSharpen new          1.109    1.128  (300 timed)
+  2560x1440   3840x2160   high    upscaleSharpen new          1.092    1.114  (300 timed)
+  2560x1440   1920x1080   off     area           new          0.077    0.083  (300 timed)
+  3840x2160   1920x1080   off     area           new          0.182    0.203  (300 timed)
+  3840x2160   1280x720    off     area           new          0.156    0.170  (300 timed)
+  3840x2160    960x540    off     areaMipmapped  new          0.202    0.218  (300 timed)
+  3840x2160    960x540    off     areaMipmapped  redrawn      0.185    0.199  (300 timed)
+
+PASSED: 0 check(s) failed

@@ -1,0 +1,27 @@
+The page es100check.sh wrote, opened in the Claude desktop app's built-in
+browser (Chromium's WebGL) on the machine in environment.txt, 2026-11-24:
+
+[
+ {
+  "version": "webgl",
+  "renderer": "WebGL 1.0 (OpenGL ES 2.0 Chromium) / WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)",
+  "programs": {
+   "plain": {"compiled": true, "log": "", "linked": true, "glError": 0},
+   "area": {"compiled": true, "log": "", "linked": true, "glError": 0},
+   "upscale": {"compiled": true, "log": "", "linked": true, "glError": 0},
+   "sharpen": {"compiled": true, "log": "", "linked": true, "glError": 0}
+  },
+  "vertex": {"compiled": true, "log": ""}
+ },
+ {
+  "version": "webgl2",
+  "renderer": "WebGL 2.0 (OpenGL ES 3.0 Chromium) / WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0 Chromium)",
+  "programs": {
+   "plain": {"compiled": true, "log": "", "linked": true, "glError": 0},
+   "area": {"compiled": true, "log": "", "linked": true, "glError": 0},
+   "upscale": {"compiled": true, "log": "", "linked": true, "glError": 0},
+   "sharpen": {"compiled": true, "log": "", "linked": true, "glError": 0}
+  },
+  "vertex": {"compiled": true, "log": ""}
+ }
+]

@@ -1,0 +1,10 @@
+date: 2026-11-24 16:12 UTC
+machine: Apple M6, 12 cores, 24 GiB
+macOS: 27.0 (26A425)
+OpenGL: 4.1 Metal - 91.7, Apple M6, GLSL 4.10 (a 3.2 core profile context)
+compiler: Apple clang version 21.0.0 (clang-2100.4.1.1), -std=c++14 -O3
+code: perf2/mac-viewer-enhance (69d2741) with this change
+display: none used; every draw is offscreen
+load averages before planecheck.txt: 2.31 3.01 3.00
+load averages after: 2.45 3.02 3.00
+other agents were building in parallel worktrees throughout
