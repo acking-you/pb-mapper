@@ -114,6 +114,10 @@ struct Fake {
     push_drain: Arc<AtomicBool>,
     /// When the last capture found a serial encoder waiting for input.
     waiting: Arc<Mutex<Option<Instant>>>,
+    /// The next capture that finds a serial encoder waiting has its unit
+    /// finish, and the encoder ask for input, right after its drain: the
+    /// request lands before thread C chooses when to ask again.
+    asks_late: Arc<AtomicBool>,
     repeatable: bool,
     submitted_video: bool,
 }
@@ -145,6 +149,7 @@ impl Fake {
             serial: Arc::default(),
             push_drain: Arc::default(),
             waiting: Arc::default(),
+            asks_late: Arc::default(),
             repeatable: false,
             submitted_video: true,
         }
@@ -229,6 +234,11 @@ impl Backend for Fake {
             let holding = !self.encoding.lock().is_empty();
             *self.waiting.lock() = holding.then_some(started);
             if holding {
+                if self.asks_late.swap(false, Ordering::SeqCst)
+                    && let Some(unit) = self.encoding.lock().front_mut()
+                {
+                    unit.1 = started;
+                }
                 self.submitted_video = false;
                 return Ok(drained);
             }
@@ -286,9 +296,9 @@ impl Backend for Fake {
         Some(DRAIN_POLL)
     }
     fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
-        // A pushing serial encoder waits for its input request, which comes
-        // with its unit's output, and is asked again `DRAIN_POLL` later
-        // meanwhile.
+        // As the Windows encoder: a pushing serial encoder waits for its
+        // input request, which comes with its unit's output, and is asked
+        // again `DRAIN_POLL` later meanwhile, and at once once it asked.
         if self.push_drain.load(Ordering::SeqCst)
             && let Some(waiting) = *self.waiting.lock()
         {
@@ -298,9 +308,7 @@ impl Backend for Fake {
                 .lock()
                 .front()
                 .is_none_or(|(_, ready, _)| *ready <= now);
-            if !asked {
-                return Some(waiting + DRAIN_POLL);
-            }
+            return Some(if asked { waiting } else { waiting + DRAIN_POLL });
         }
         // The first call opens the push source and learns it has no picture.
         let until = self
@@ -1668,6 +1676,35 @@ fn a_pushing_encoder_waiting_for_input_is_asked_as_its_request_wakes_thread_c() 
     *h.now.lock() = ready;
     h.step();
     assert_eq!(next_submit_after(&h, ready), ready);
+    assert_eq!(h.fake.encoding.lock().len(), 1, "the next unit went in");
+    assert_eq!(h.sent().len(), 1);
+}
+
+/// The same, with the request landing after the capture that found the
+/// encoder waiting drained it, and before thread C chose when to ask again:
+/// it is answered at once all the same, rather than at the next poll.
+#[test]
+fn an_input_request_that_lands_as_a_waiting_capture_returns_is_answered_at_once() {
+    let mut h = Harness::new(true, None);
+    let period = Duration::from_secs(1) / 60;
+    h.fake.push_drain.store(true, Ordering::SeqCst);
+    h.step();
+    h.fake.still.store(true, Ordering::SeqCst);
+    h.run(HOT_WINDOW * 2, true);
+    *h.fake.latency.lock() = period * 3;
+    h.fake.serial.store(true, Ordering::SeqCst);
+    h.fake.still.store(false, Ordering::SeqCst);
+    let first = h.next_capture();
+    h.run(period + DRAIN_POLL * 2, true);
+    assert!(
+        h.fake.waiting.lock().is_some(),
+        "a capture found the encoder waiting for input"
+    );
+    h.fake.asks_late.store(true, Ordering::SeqCst);
+    let waiting = h.next_capture();
+    assert!(waiting > first + period);
+    assert_eq!(h.fake.encoding.lock().len(), 1);
+    assert_eq!(h.next_capture(), waiting, "answered at once");
     assert_eq!(h.fake.encoding.lock().len(), 1, "the next unit went in");
     assert_eq!(h.sent().len(), 1);
 }

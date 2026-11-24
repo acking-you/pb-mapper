@@ -35,9 +35,10 @@
 //!   event comparison. Not with `--backend`.
 //!
 //! The loop waits as thread C does: until the next tick, the next poll of an
-//! armed tick or of a polled encoder holding units, or a wake from the
-//! encoder's event watcher (each output, and the input request a waiting
-//! submit waits for), and at most 100 ms.
+//! armed tick or of a polled encoder holding units (or of one with an
+//! announced output still uncollected), or a wake from the encoder's event
+//! watcher (each output, and the input request a waiting submit waits for),
+//! and at most 100 ms.
 //!
 //! It prints the largest keyframe and access unit, which `wire::MAX_PAYLOAD`
 //! must hold. Driving the encoder, it also prints a `case=encoder` line: the
@@ -47,19 +48,21 @@
 //! returned a unit; and an `encoder_events` line: whether its events were
 //! pushed or polled, the submits that found no input request (`waiting`, as
 //! `Submit::Waiting`) and, pushed, how long each output waited from its
-//! announcement to the drain that collected it (`have_output_to_collect_us`,
-//! counts per bucket, and the bucket that holds the median). Either way it
-//! prints the capture calls per second, and the polls among them: the calls
-//! that found nothing new; how often the loop woke (`loop_wakes_per_s`,
-//! thread C's wakes) and how many of those an encoder event ended; and,
-//! with thread C's own pacer anchoring each tick on the present it took
-//! (unless `--grid`), the wait from a present to the submit that took it
-//! (p50 and p95), the share of submits whose picture was dated, and the
-//! presents no submitted picture showed (`coalesced_presents`: for each
-//! dated picture, the presents it covers beyond one, as thread C's
-//! `coalesced_per_s` counts them). It also prints how long the first access
-//! unit took from the start of the paced loop, and, driving the encoder,
-//! what the duplication's first frame reported (`first_acquire_*`).
+//! announcement to the start of the drain that collected it
+//! (`have_output_to_collect_us`, counts per bucket, and the bucket that
+//! holds the median). Either way it prints the capture calls per second,
+//! and the polls among them: the calls that left the tick armed, having
+//! found nothing new or, as `waiting` counts apart, an encoder that had not
+//! asked for input yet; how often the loop woke (`loop_wakes_per_s`, thread
+//! C's wakes) and how many of those an encoder event ended; and, with
+//! thread C's own pacer anchoring each tick on the present it took (unless
+//! `--grid`), the wait from a present to the submit that took it (p50 and
+//! p95), the share of submits whose picture was dated, and the presents no
+//! submitted picture showed (`coalesced_presents`: for each dated picture,
+//! the presents it covers beyond one, as thread C's `coalesced_per_s`
+//! counts them). It also prints how long the first access unit took from
+//! the start of the paced loop, and, driving the encoder, what the
+//! duplication's first frame reported (`first_acquire_*`).
 #[cfg(windows)]
 mod probe_support;
 // The `--pace` classifier, shared with the macOS encoder's measurement test.
@@ -564,12 +567,12 @@ mod bench {
             }
         }
 
-        /// Whether the encoder's output wakes the loop, rather than being
-        /// polled.
-        fn pushes(&self) -> bool {
+        /// How soon the loop drains again while units are pending, if
+        /// nothing wakes it first: `None` while each output wakes it.
+        fn drain_poll(&self) -> Option<Duration> {
             match self {
-                Self::Encoder(encoder) => encoder.events_pushed(),
-                Self::Backend(backend) => backend.drain_poll().is_none(),
+                Self::Encoder(encoder) => encoder.drain_poll(),
+                Self::Backend(backend) => backend.drain_poll(),
             }
         }
 
@@ -601,8 +604,9 @@ mod bench {
         capture_us: u128,
         calls: u64,
         /// Capture calls (a submit, or the backend's `capture_video`), and
-        /// those of them that found nothing new and left the tick armed: the
-        /// polls a still or slowly changing desktop costs.
+        /// those of them that left the tick armed, having found nothing new
+        /// or an encoder that had not asked for input yet: the polls a still
+        /// or slowly changing desktop, or a serial encoder, costs.
         captures: u64,
         polls: u64,
         /// The loop's waits, as thread C's, and those an encoder event
@@ -882,12 +886,10 @@ mod bench {
                 if let Some(until) = coder.idle_until() {
                     next = next.max(until);
                 }
-                if coder.pending() > 0 && !coder.pushes() {
-                    let drain = if limits.backend {
-                        limits.poll
-                    } else {
-                        DRAIN_POLL
-                    };
+                if coder.pending() > 0
+                    && let Some(drain) = coder.drain_poll()
+                {
+                    let drain = if limits.backend { limits.poll } else { drain };
                     next = next.min(now + drain);
                 }
                 let woken = wake.wait(next.min(now + CONTEXT_CHECK_INTERVAL))?;

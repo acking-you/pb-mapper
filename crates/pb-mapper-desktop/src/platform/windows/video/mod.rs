@@ -165,9 +165,11 @@ pub struct Statistics {
     /// runs); else they are polled at each drain.
     pub events_pushed: bool,
     /// From each output the event watcher saw announced
-    /// (`METransformHaveOutput`) to the drain that collected it: how many
-    /// fell in each bucket of `PICKUP_BOUNDS_US`, the last holding the
-    /// rest. Nothing while the events are polled.
+    /// (`METransformHaveOutput`) to the start of the drain's call that
+    /// collected it (`ProcessOutput` and the sample it fills), so without
+    /// the collection itself: how many fell in each bucket of
+    /// `PICKUP_BOUNDS_US`, the last holding the rest. Nothing while the
+    /// events are polled.
     pub pickup: [u64; PICKUP_BUCKETS],
 }
 
@@ -308,7 +310,8 @@ impl Encoder {
     /// inside `max_width` × `max_height` without upscaling. The latest captured
     /// desktop texture remains at native resolution; no CPU readback. Given a
     /// `waker`, the encoder's events wake it where they can
-    /// (`events_pushed`); without one, `drain` polls them.
+    /// (`Statistics::events_pushed`, `drain_poll`); without one, `drain`
+    /// polls them.
     pub fn new_with_size(
         display: &Display,
         codec: VideoCodec,
@@ -494,20 +497,31 @@ impl Encoder {
     pub fn presented(&self) -> Option<Presented> {
         self.presented
     }
-    /// Whether the encoder's events wake the caller's `waker`: each output,
-    /// and the input request a `Submit::Waiting` waits for. Otherwise
-    /// `drain` reads them, and the caller polls.
-    pub fn events_pushed(&self) -> bool {
-        self.codec.pushes()
+    /// How soon the caller drains again if nothing wakes it first:
+    /// `DRAIN_POLL` while the events are polled, and while an output they
+    /// announced is still uncollected (a drain collects at most one, and
+    /// returns none after the encoder changed its output type or for an
+    /// output it discards), which no further event will wake the caller
+    /// for. `None` otherwise: each output wakes it.
+    pub fn drain_poll(&self) -> Option<Duration> {
+        (!self.codec.pushes() || self.codec.outputs() > 0).then_some(DRAIN_POLL)
     }
-    /// While the last submit waits for the encoder to ask for input and
-    /// the request will wake the caller: when to ask again anyway,
-    /// `DRAIN_POLL` after that submit. `None` once the encoder asked, after
-    /// any other outcome, and while the events are polled, whose caller
-    /// polls its armed tick.
+    /// While the last submit waited for the encoder to ask for input and
+    /// the request wakes the caller: when to ask again. `DRAIN_POLL` after
+    /// that submit until the encoder asks, and that submit's own time once
+    /// it has, so that a request that came before the caller chose its
+    /// next poll is answered at once all the same. `None` after any other
+    /// outcome, and while the events are polled, whose caller polls its
+    /// armed tick.
     pub fn idle_until(&self) -> Option<Instant> {
         let asked = self.waiting?;
-        (self.codec.pushes() && !self.codec.input_requested()).then_some(asked + DRAIN_POLL)
+        self.codec.pushes().then(|| {
+            if self.codec.input_requested() {
+                asked
+            } else {
+                asked + DRAIN_POLL
+            }
+        })
     }
 
     /// Apply a QoS rate. Only the mean bitrate reaches the encoder, and only

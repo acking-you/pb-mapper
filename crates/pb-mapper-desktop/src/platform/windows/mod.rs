@@ -164,9 +164,11 @@ impl VideoSource for video::Encoder {
     fn presented(&self) -> Option<Presented> {
         video::Encoder::presented(self)
     }
-    /// While the encoder has not asked for input and its request will wake
-    /// thread C: a retry at the poll interval meanwhile. A keyframe due
-    /// changes nothing, since the encoder takes no picture until it asks.
+    /// After a submit that found no input request, while the request wakes
+    /// thread C: a retry at the poll interval until it comes, and at once
+    /// once it has, even if it came before thread C chose its next poll. A
+    /// keyframe due changes nothing, since the encoder takes no picture
+    /// until it asks.
     fn idle_until(&self, _keyframe_due: Option<Instant>) -> Option<Instant> {
         video::Encoder::idle_until(self)
     }
@@ -177,9 +179,10 @@ impl VideoSource for video::Encoder {
         self.pending_len()
     }
     /// `None` while the encoder's events wake thread C, which then drains
-    /// at each wake and context check; every `DRAIN_POLL` otherwise.
+    /// at each wake and context check; every `DRAIN_POLL` otherwise, and
+    /// while an announced output is still uncollected.
     fn drain_poll(&self) -> Option<Duration> {
-        (!self.events_pushed()).then_some(DRAIN_POLL)
+        video::Encoder::drain_poll(self)
     }
     /// DXGI cannot wake thread C, whatever the encoder does: an armed tick
     /// is asked again.
