@@ -276,8 +276,10 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if limits != self.limits {
             self.limits = limits;
             self.keyframe = true;
+            // A retry too: a backend may keep its source for new limits, and
+            // only the same limits again tell it that the recovery below
+            // must build a fresh one.
             if self.context.is_some()
-                && !retry
                 && let Err(failure) = self
                     .backend
                     .configure_video(self.limits, self.limits.max_fps)

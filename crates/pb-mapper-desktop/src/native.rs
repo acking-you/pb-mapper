@@ -155,7 +155,8 @@ impl<P: Platform> Backend for PlatformBackend<P> {
     /// New limits that the open source can serve as it is (a frame rate
     /// change) keep it, with its pending output: thread C asks for an IDR
     /// anyway. Anything else, the same limits again (a recovery or a codec
-    /// change) included, drops it, and the next capture builds a new one.
+    /// change, which thread C sends only after it passed on any change of
+    /// limits) included, drops it, and the next capture builds a new one.
     fn configure_video(&mut self, limits: VideoLimits, _nominal_fps: u32) -> Result<()> {
         limits.validate()?;
         let retuned = limits != self.limits

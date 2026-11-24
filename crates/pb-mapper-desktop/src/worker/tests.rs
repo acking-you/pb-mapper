@@ -1752,3 +1752,37 @@ fn a_frame_rate_change_keeps_the_source_and_a_size_change_rebuilds_it() {
     assert_eq!(h.engine.limits.max_width, 32);
     assert_eq!(h.probe.opened(), 2);
 }
+
+/// A recovery builds a fresh capture source, as the backend contract asks,
+/// also when the viewers' limits changed only their frame rate while capture
+/// was unavailable, which outside an outage keeps the source.
+#[test]
+fn a_recovery_builds_a_new_source_even_after_a_frame_rate_change_meanwhile() {
+    let mut h = Synth::<false>::new(None);
+    h.run(Duration::from_millis(100));
+    assert_eq!(h.probe.opened(), 1);
+    // The display goes away and comes back with the same limits.
+    h.probe.lose(true);
+    h.run(Duration::from_millis(300));
+    assert!(h.engine.unavailable.is_some());
+    h.probe.lose(false);
+    h.run(Duration::from_millis(300));
+    assert!(h.engine.unavailable.is_none());
+    assert_eq!(h.probe.opened(), 2);
+
+    // Again, with a watcher at a lower frame rate joining meanwhile.
+    h.probe.lose(true);
+    h.run(Duration::from_millis(300));
+    assert!(h.engine.unavailable.is_some());
+    h.join(VideoLimits {
+        max_fps: 30,
+        ..LIMITS
+    });
+    h.run(Duration::from_millis(300));
+    assert_eq!(h.engine.limits.max_fps, 30);
+    h.probe.lose(false);
+    let sent = h.run(Duration::from_millis(300));
+    assert!(h.engine.unavailable.is_none());
+    assert_eq!(h.probe.opened(), 3);
+    assert!(sent.first().is_some_and(|unit| unit.keyframe));
+}

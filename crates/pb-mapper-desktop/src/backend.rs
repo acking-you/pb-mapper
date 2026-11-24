@@ -61,7 +61,9 @@ pub trait Backend: 'static {
     /// recovery. Discard all pending output, even when the limits are identical.
     /// A backend may instead keep an encoder that serves new limits as it is
     /// (only the frame rate changed), pending output included: thread C asks
-    /// for an IDR after any limits change. Input coordinates stay in physical
+    /// for an IDR after any limits change, and passes each change on as it
+    /// happens, an outage included, so the limits of the last call again
+    /// always ask for a fresh encoder. Input coordinates stay in physical
     /// desktop pixels when scaling video.
     fn configure_video(&mut self, limits: VideoLimits, nominal_fps: u32) -> Result<()> {
         let _ = nominal_fps;
