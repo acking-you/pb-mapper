@@ -139,6 +139,7 @@ class _ViewerStageState extends State<ViewerStage> {
             cursor: cursor,
             controlling: widget.input.ready,
             geometry: widget.geometry,
+            viewport: widget.viewport,
           );
   }
 
@@ -148,6 +149,7 @@ class _ViewerStageState extends State<ViewerStage> {
     if (identical(oldWidget.cursor, widget.cursor) &&
         identical(oldWidget.input, widget.input) &&
         identical(oldWidget.geometry, widget.geometry) &&
+        identical(oldWidget.viewport, widget.viewport) &&
         oldWidget.localPointer == widget.localPointer) {
       return;
     }
