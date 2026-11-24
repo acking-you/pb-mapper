@@ -900,7 +900,7 @@ fn follow_sweep(codec: VideoCodec, width: u32, height: u32, low_latency: bool) -
     let step = |pacer: &mut Pacer, pace: u32| {
         let start = Instant::now();
         pacer.run(Some(pace), start + SETTLE, |_| {});
-        let (submitted, dropped) = (pacer.frame, pacer.encoder.probe(|probe| probe.dropped));
+        let (submitted, dropped) = (pacer.frame, pacer.encoder.dropped());
         let (mut bits, mut units) = (0u64, 0usize);
         pacer.run(Some(pace), start + STEP, |unit| {
             bits += unit.bytes.len() as u64 * 8;
@@ -912,7 +912,7 @@ fn follow_sweep(codec: VideoCodec, width: u32, height: u32, low_latency: bool) -
             pace,
             submitted,
             units,
-            dropped: pacer.encoder.probe(|probe| probe.dropped) - dropped,
+            dropped: pacer.encoder.dropped() - dropped,
             error: produced / (bpf * f64::from(pace)),
             per_picture: bits as f64 / submitted.max(1) as f64 / bpf,
             per_unit: bits as f64 / units.max(1) as f64 / bpf,

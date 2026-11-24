@@ -3,6 +3,8 @@
 //! live. It reads the capture's IOSurface in place. Its output callback, on
 //! VideoToolbox's thread, turns each length-prefixed sample into Annex B,
 //! a keyframe's parameter sets in front, queues it and wakes thread C.
+//! Low-latency rate control may use QP up to 51, so that it codes a picture
+//! coarser rather than drop it; a picture it drops anyway is counted.
 //!
 //! Once the session is prepared, every call on it is made by the encoder's
 //! own submit thread, one at a time: thread C only hands it a picture, or a
@@ -78,6 +80,8 @@ struct State {
     /// The next submit must be a keyframe: one asked for was dropped or
     /// discarded.
     keyframe_due: bool,
+    /// Outputs VideoToolbox flagged `FrameDropped`, ever.
+    dropped: u64,
     /// What the output callback converts into, reused.
     sample: Vec<u8>,
     /// The picture handed over and not yet taken by the submit thread; its
@@ -116,13 +120,11 @@ struct State {
     probe: Probe,
 }
 
-/// What a measurement reads back from an encoder: what VideoToolbox
-/// dropped, each kept unit's luma error, and how long each encode call took.
+/// What a measurement reads back from an encoder: each kept unit's luma
+/// error, and how long each encode call took.
 #[cfg(test)]
 #[derive(Default)]
 pub(super) struct Probe {
-    /// Outputs VideoToolbox flagged `FrameDropped`.
-    pub dropped: u64,
     /// Each kept unit's presentation time and luma mean squared error, where
     /// the session was built to measure it.
     pub quality: VecDeque<(u64, f64)>,
@@ -248,6 +250,8 @@ pub(crate) struct Encoder {
     shared: Arc<Shared>,
     bitrate: u32,
     created: Instant,
+    /// `State::dropped` at the last `macos_encoder_dropped` line, and when.
+    dropped_traced: (u64, Instant),
     /// The last presentation time, which only grows.
     pts_us: u64,
     next_token: u64,
@@ -270,6 +274,16 @@ fn codec_type(codec: VideoCodec) -> Result<CMVideoCodecType> {
 /// control, and the constrained profile it takes.
 const LOW_LATENCY: &std::ffi::CStr = c"kVTVideoEncoderSpecification_EnableLowLatencyRateControl";
 const CONSTRAINED_HIGH: &std::ffi::CStr = c"kVTProfileLevel_H264_ConstrainedHigh_AutoLevel";
+/// Of macOS 12.0: the highest QP rate control may give a picture. Under low
+/// latency VideoToolbox's own is lower, and a picture it cannot fit at that
+/// QP is dropped: on an M6, fresh 1080p noise at 4 Mbit/s and 60 FPS lost
+/// 168 of 180 H.264 pictures with its own and 90 with 51, and H.265 135 and
+/// 90 (`video_toolbox_drops`). 51 is the top of the 8-bit H.264 and H.265
+/// range.
+const MAX_QP: &std::ffi::CStr = c"kVTCompressionPropertyKey_MaxAllowedFrameQP";
+const MAX_QP_VALUE: i64 = 51;
+/// How often thread C traces `macos_encoder_dropped` at most.
+const DROPPED_TRACE: Duration = Duration::from_secs(1);
 
 /// The encoder specification: H.265 on hardware only; H.264 on hardware
 /// where there is one; both with low-latency rate control when asked.
@@ -484,8 +498,9 @@ impl Encoder {
             quality: options.quality,
         });
         let session = create(codec, width, height, low_latency, Arc::as_ptr(&shared))?;
-        // Whether the session took the data-rate cap, for the log.
-        let mut capped = false;
+        // Whether the session took the data-rate cap and the QP bound, for
+        // the log.
+        let (mut capped, mut max_qp) = (false, false);
         let configured = (|| {
             // SAFETY: VideoToolbox's and Core Video's static keys and values.
             unsafe {
@@ -536,6 +551,11 @@ impl Encoder {
                         &data_rate_limits(bitrate),
                     )
                     .is_ok();
+                // Low latency only, which drops a picture it cannot fit;
+                // an encoder that refuses it keeps its own.
+                max_qp = low_latency
+                    && cf::symbol(MAX_QP)
+                        .is_some_and(|key| set(&session, key, &cf::number(MAX_QP_VALUE)).is_ok());
                 #[cfg(test)]
                 if options.quality {
                     let key = cf::symbol(c"kVTCompressionPropertyKey_CalculateMeanSquaredError")
@@ -595,6 +615,7 @@ impl Encoder {
             hardware,
             gop,
             data_rate_limits = capped,
+            max_qp,
         );
         // SAFETY: a static key.
         let keyframe = unsafe {
@@ -622,10 +643,12 @@ impl Encoder {
                 return Err(failure);
             }
         };
+        let created = Instant::now();
         Ok(Self {
             shared,
             bitrate,
-            created: Instant::now(),
+            created,
+            dropped_traced: (0, created),
             pts_us: 0,
             next_token: 0,
             submit: Some(submit),
@@ -739,8 +762,11 @@ impl Encoder {
     }
 
     /// The next unit, if one is out. A failure the callback or the submit
-    /// thread saw, or a unit held too long, is the codec's.
+    /// thread saw, or a unit held too long, is the codec's. Traces the
+    /// pictures VideoToolbox dropped since the last line, at most once a
+    /// second.
     pub(crate) fn drain(&mut self) -> Result<Option<EncodedFrame>> {
+        let now = Instant::now();
         let mut state = self.shared.state.lock();
         if let Some(failure) = &state.failure {
             return Err(codec_error(self.shared.codec, error(failure.clone())));
@@ -748,14 +774,28 @@ impl Encoder {
         if state
             .pending
             .front()
-            .is_some_and(|pending| pending.at.elapsed() > OUTPUT_WAIT)
+            .is_some_and(|pending| now.saturating_duration_since(pending.at) > OUTPUT_WAIT)
         {
             return Err(codec_error(
                 self.shared.codec,
                 error("hardware video encoder stalled"),
             ));
         }
-        Ok(state.ready.pop_front())
+        let unit = state.ready.pop_front();
+        let dropped = state.dropped;
+        drop(state);
+        let (traced, at) = self.dropped_traced;
+        if dropped != traced && now >= at + DROPPED_TRACE {
+            self.dropped_traced = (dropped, now);
+            tracing::debug!(
+                target: "pb_mapper_desktop::session",
+                event = "macos_encoder_dropped",
+                dropped = dropped - traced,
+                seconds = now.saturating_duration_since(at).as_secs_f64(),
+                total = dropped,
+            );
+        }
+        Ok(unit)
     }
 
     /// Keep the submit thread from taking anything, or let it.
@@ -814,6 +854,12 @@ impl Encoder {
             kVTCompressionPropertyKey_AverageBitRate
         })
         .and_then(|bitrate| bitrate.as_i64())
+    }
+
+    /// Outputs VideoToolbox dropped, ever.
+    #[cfg(test)]
+    pub(super) fn dropped(&self) -> u64 {
+        self.shared.state.lock().dropped
     }
 
     /// What a measurement reads back, taken through `read`.
@@ -1268,10 +1314,7 @@ fn receive(
     let Some(sample) = sample.filter(|_| !flags.contains(VTEncodeInfoFlags::FrameDropped)) else {
         // Dropped: what follows still decodes; a keyframe asked for is
         // asked for again.
-        #[cfg(test)]
-        {
-            state.probe.dropped += 1;
-        }
+        state.dropped += 1;
         return pending.keyframe && !std::mem::replace(&mut state.keyframe_due, true);
     };
     let keyframe = sync(sample);

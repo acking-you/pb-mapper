@@ -343,7 +343,7 @@ impl Rig {
     }
 
     fn dropped(&self) -> u64 {
-        self.encoder.probe(|probe| probe.dropped)
+        self.encoder.dropped()
     }
 }
 
