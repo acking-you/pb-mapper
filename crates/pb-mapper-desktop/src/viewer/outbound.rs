@@ -11,6 +11,15 @@
 //! 6. the latest presentation, at most every `PRESENTED_SEND_MIN_INTERVAL`;
 //! 7. the latest keyframe request, fps cap, quality, path and display mode;
 //! 8. a ping after `PING_IDLE` without any other message.
+//!
+//! For a host that listed `arrival_time`, a probe echo carries when the
+//! reader finished the probe, and a receipt when it finished its newest unit,
+//! payload included, on the session's clock;
+//! for one that listed `keyframe_seq`, a keyframe request made while
+//! predicted frames are thrown away carries the last seq the reader read.
+//! Receipts outrank keyframe requests, so by the time one is written the
+//! reader may have read on, and the host needs the seq to tell whether the
+//! IDR it sent last came after the request.
 use super::InputError;
 use crate::{
     Input, InputEvent, KeyframeReason, QualityPreset,
@@ -108,14 +117,20 @@ impl Controls {
 
 #[derive(Default)]
 struct Slots {
-    probe: Option<u64>,
-    receipt: Option<u64>,
+    /// The newest probe's nonce, and when it was read.
+    probe: Option<(u64, Instant)>,
+    /// The newest seq read, and when it was read whole.
+    receipt: Option<(u64, Instant)>,
+    /// The newest seq read, kept once its receipt is written.
+    read_seq: u64,
     /// The newest presentation the sink accepted.
     presented: Option<(u64, u64)>,
     /// The last one written, and when.
     presented_sent: Option<(u64, u64, Instant)>,
     lifecycle: Option<Lifecycle>,
-    keyframe: Option<KeyframeReason>,
+    /// The newest request, and the seq it follows while predicted frames
+    /// are thrown away.
+    keyframe: Option<(KeyframeReason, Option<u64>)>,
     fps_cap: Option<u32>,
     quality: Option<QualityPreset>,
     route: Option<Route>,
@@ -156,16 +171,32 @@ pub(crate) struct Outbound {
     inputs: parking_lot::Mutex<InputQueue>,
     /// Per session, stamped here; the embedding app owns none.
     sequence: AtomicU64,
+    /// The session's start, which arrival times count from; `None` unless
+    /// the host listed `arrival_time`.
+    arrival_epoch: Option<Instant>,
+    /// The host listed `keyframe_seq`.
+    keyframe_seq: bool,
 }
 impl Outbound {
-    pub fn new() -> Self {
+    /// `arrival_epoch`: stamp receipts and probe echoes with arrival times
+    /// since then. `keyframe_seq`: name the seq a keyframe request follows.
+    pub fn new(arrival_epoch: Option<Instant>, keyframe_seq: bool) -> Self {
         Self {
             controls: parking_lot::Mutex::default(),
             slots: parking_lot::Mutex::default(),
             notify: tokio::sync::Notify::new(),
             inputs: parking_lot::Mutex::default(),
             sequence: AtomicU64::new(1),
+            arrival_epoch,
+            keyframe_seq,
         }
+    }
+
+    /// `at` in microseconds since the session began, for a host that reads it.
+    fn stamp(&self, at: Instant) -> Option<u64> {
+        self.arrival_epoch.map(|epoch| {
+            pb_mapper_core::time::saturating_micros(at.saturating_duration_since(epoch))
+        })
     }
 
     pub fn notified(&self) -> tokio::sync::futures::Notified<'_> {
@@ -188,12 +219,19 @@ impl Outbound {
         controls.push(barrier);
         controls.obsolete_below = self.sequence.load(Ordering::Relaxed);
     }
-    pub fn probe(&self, nonce: u64) {
-        self.update(|slots| slots.probe = Some(nonce));
+    /// The probe `nonce`, read at `at`.
+    pub fn probe(&self, nonce: u64, at: Instant) {
+        self.update(|slots| slots.probe = Some((nonce, at)));
     }
-    /// Cumulative: every video record up to `seq` was read.
-    pub fn receipt(&self, seq: u64) {
-        self.update(|slots| slots.receipt = Some(slots.receipt.map_or(seq, |old| old.max(seq))));
+    /// Cumulative: every video record up to `seq` was read, `seq`'s whole
+    /// by `at`.
+    pub fn receipt(&self, seq: u64, at: Instant) {
+        self.update(|slots| {
+            if slots.receipt.is_none_or(|(old, _)| seq > old) {
+                slots.receipt = Some((seq, at));
+            }
+            slots.read_seq = slots.read_seq.max(seq);
+        });
     }
     /// Only the sink calls this, for a presentation it validated.
     pub fn presented(&self, generation: u64, frame_id: u64) {
@@ -202,9 +240,18 @@ impl Outbound {
     pub fn lifecycle(&self, lifecycle: Lifecycle) {
         self.update(|slots| slots.lifecycle = Some(lifecycle));
     }
-    /// Only the sink's keyframe limiter calls this.
-    pub fn keyframe(&self, reason: KeyframeReason) {
-        self.update(|slots| slots.keyframe = Some(reason));
+    /// Only the sink's keyframe limiter calls this. `discarding`: predicted
+    /// frames are of no use before the next IDR, so the request names the
+    /// last seq read, for a host that reads it. A request that replaces one
+    /// not yet written keeps its seq when it names none: the frames are still
+    /// of no use.
+    pub fn keyframe(&self, reason: KeyframeReason, discarding: bool) {
+        let keyframe_seq = self.keyframe_seq;
+        self.update(|slots| {
+            let after = (keyframe_seq && discarding).then_some(slots.read_seq);
+            let kept = slots.keyframe.and_then(|(_, after)| after);
+            slots.keyframe = Some((reason, after.or(kept)));
+        });
     }
     pub fn fps_cap(&self, fps: u32) {
         self.update(|slots| slots.fps_cap = Some(fps));
@@ -313,11 +360,17 @@ impl Outbound {
         }
         {
             let mut slots = self.slots.lock();
-            if let Some(nonce) = slots.probe.take() {
-                return Next::Send(ViewerMessage::ProbeEcho { nonce });
+            if let Some((nonce, at)) = slots.probe.take() {
+                return Next::Send(ViewerMessage::ProbeEcho {
+                    nonce,
+                    at_us: self.stamp(at),
+                });
             }
-            if let Some(seq) = slots.receipt.take() {
-                return Next::Send(ViewerMessage::Received { seq });
+            if let Some((seq, at)) = slots.receipt.take() {
+                return Next::Send(ViewerMessage::Received {
+                    seq,
+                    at_us: self.stamp(at),
+                });
             }
         }
         {
@@ -363,8 +416,8 @@ impl Outbound {
                 }
             }
         }
-        if let Some(reason) = slots.keyframe.take() {
-            return Next::Send(ViewerMessage::Keyframe { reason });
+        if let Some((reason, after_seq)) = slots.keyframe.take() {
+            return Next::Send(ViewerMessage::Keyframe { reason, after_seq });
         }
         if let Some(fps) = slots.fps_cap.take() {
             return Next::Send(ViewerMessage::FpsCap { fps });
@@ -439,7 +492,7 @@ mod tests {
 
     #[test]
     fn repeated_releases_are_bounded_and_revocation_precedes_a_new_grant() {
-        let outbound = Outbound::new();
+        let outbound = Outbound::new(None, false);
         let now = Instant::now();
         let fresh = || Ok((1, 1));
         outbound.submit(&[key(true)], fresh, || {}).unwrap();
@@ -467,7 +520,7 @@ mod tests {
     /// while it waited to be written.
     #[test]
     fn a_barrier_keeps_the_input_that_follows_it() {
-        let outbound = Outbound::new();
+        let outbound = Outbound::new(None, false);
         let now = Instant::now();
         let fresh = || Ok((1, 1));
         outbound.submit(&[key(true)], fresh, || {}).unwrap();
@@ -483,7 +536,7 @@ mod tests {
 
     #[test]
     fn presented_precedes_input_that_references_it() {
-        let outbound = Outbound::new();
+        let outbound = Outbound::new(None, false);
         let start = Instant::now();
         outbound.presented(1, 1);
         assert!(matches!(
@@ -526,7 +579,7 @@ mod tests {
 
     #[test]
     fn bulk_input_and_moves_never_trip_congestion() {
-        let outbound = Outbound::new();
+        let outbound = Outbound::new(None, false);
         let congested = std::cell::Cell::new(false);
         let submit =
             |inputs: &[Input]| outbound.submit(inputs, || Ok((1, 1)), || congested.set(true));
@@ -563,5 +616,94 @@ mod tests {
             ViewerMessage::Control { enabled: false }
         ));
         assert!(idle(&outbound, now));
+    }
+
+    /// Arrival times and a keyframe request's seq go only to a host that
+    /// listed them; to one that did, each receipt carries the time its newest
+    /// unit was read, and a request made while frames are thrown away the
+    /// newest seq read, even once its receipt went out.
+    #[test]
+    fn stamps_and_seqs_go_only_to_a_host_that_reads_them() {
+        let epoch = Instant::now();
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        let feed = |outbound: &Outbound| {
+            outbound.probe(7, at(5));
+            outbound.receipt(3, at(10));
+            outbound.receipt(4, at(12));
+            // A late, older receipt never moves the newest back.
+            outbound.receipt(2, at(14));
+            outbound.keyframe(KeyframeReason::Gap, true);
+        };
+        let old = Outbound::new(None, false);
+        feed(&old);
+        assert!(matches!(
+            send(&old, at(20)),
+            ViewerMessage::ProbeEcho {
+                nonce: 7,
+                at_us: None
+            }
+        ));
+        assert!(matches!(
+            send(&old, at(20)),
+            ViewerMessage::Received {
+                seq: 4,
+                at_us: None
+            }
+        ));
+        assert!(matches!(
+            send(&old, at(20)),
+            ViewerMessage::Keyframe {
+                reason: KeyframeReason::Gap,
+                after_seq: None
+            }
+        ));
+
+        let new = Outbound::new(Some(epoch), true);
+        feed(&new);
+        assert!(matches!(
+            send(&new, at(20)),
+            ViewerMessage::ProbeEcho {
+                nonce: 7,
+                at_us: Some(5_000)
+            }
+        ));
+        assert!(matches!(
+            send(&new, at(20)),
+            ViewerMessage::Received {
+                seq: 4,
+                at_us: Some(12_000)
+            }
+        ));
+        assert!(matches!(
+            send(&new, at(20)),
+            ViewerMessage::Keyframe {
+                reason: KeyframeReason::Gap,
+                after_seq: Some(4)
+            }
+        ));
+        // A user's request names no seq, unless it replaced one that did.
+        new.keyframe(KeyframeReason::User, false);
+        assert!(matches!(
+            send(&new, at(30)),
+            ViewerMessage::Keyframe {
+                reason: KeyframeReason::User,
+                after_seq: None
+            }
+        ));
+        new.receipt(5, at(40));
+        new.keyframe(KeyframeReason::Stall, true);
+        new.keyframe(KeyframeReason::User, false);
+        assert!(matches!(
+            send(&new, at(50)),
+            ViewerMessage::Received { seq: 5, .. }
+        ));
+        assert!(matches!(
+            send(&new, at(50)),
+            ViewerMessage::Keyframe {
+                reason: KeyframeReason::User,
+                after_seq: Some(5)
+            }
+        ));
+        assert!(idle(&new, at(50)));
     }
 }

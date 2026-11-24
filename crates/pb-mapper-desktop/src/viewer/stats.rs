@@ -277,6 +277,8 @@ impl ViewerStatsAcc {
             stats.encoder_dwell_ms = host.encoder_dwell_ms;
             stats.sent_bitrate = host.sent_bitrate;
             stats.ack_queue_ms = Some(host.ack_queue_ms);
+            stats.forward_queue_ms = host.forward_queue_ms;
+            stats.reverse_queue_ms = host.reverse_queue_ms;
             stats.bitrate = host.bitrate;
             stats.encoder_bitrate = host.encoder_bitrate;
             stats.adaptation = host.adaptation;

@@ -1102,6 +1102,8 @@ class DesktopStats {
     this.speedRxBps,
     this.speedTxBps,
     this.ackQueueMs,
+    this.forwardQueueMs,
+    this.reverseQueueMs,
     this.width = 0,
     this.height = 0,
     this.codec = '',
@@ -1155,6 +1157,8 @@ class DesktopStats {
     speedRxBps: _int(stats['speed_rx_bps'] ?? status['speed_rx_bps']),
     speedTxBps: _int(stats['speed_tx_bps'] ?? status['speed_tx_bps']),
     ackQueueMs: _int(stats['ack_queue_ms']),
+    forwardQueueMs: _int(stats['forward_queue_ms']),
+    reverseQueueMs: _int(stats['reverse_queue_ms']),
     width: stats['width'] as int? ?? 0,
     height: stats['height'] as int? ?? 0,
     codec: stats['codec'] as String? ?? '',
@@ -1206,6 +1210,11 @@ class DesktopStats {
   final int? encoderDwellMs;
   final int bitrateBps, encoderBitrateBps, receivedBitrateBps;
   final int? sentBitrateBps, ackQueueMs;
+
+  /// The stream's queue toward this device and on its way back to the host,
+  /// from a host that reads this viewer's arrival times; null from one that
+  /// does not. A busy upload here queues on the way back.
+  final int? forwardQueueMs, reverseQueueMs;
 
   /// Speed (D10): the session's whole transfer rate each way, in bytes a
   /// second, every message at the tunnel counted, as RustDesk's quality
@@ -1280,6 +1289,8 @@ class DesktopStats {
       other.speedRxBps == speedRxBps &&
       other.speedTxBps == speedTxBps &&
       other.ackQueueMs == ackQueueMs &&
+      other.forwardQueueMs == forwardQueueMs &&
+      other.reverseQueueMs == reverseQueueMs &&
       other.width == width &&
       other.height == height &&
       other.codec == codec &&
@@ -1322,6 +1333,8 @@ class DesktopStats {
     speedRxBps,
     speedTxBps,
     ackQueueMs,
+    forwardQueueMs,
+    reverseQueueMs,
     width,
     height,
     codec,

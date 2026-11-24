@@ -779,7 +779,7 @@ async fn h265_needs_both_ends_and_ends_with_its_encoder() {
                 if videos == 3 {
                     broken.store(true, Ordering::SeqCst);
                 }
-                let receipt = ViewerMessage::Received { seq };
+                let receipt = ViewerMessage::Received { seq, at_us: None };
                 wire::write_message(&mut viewer.stream, &receipt, None)
                     .await
                     .unwrap();

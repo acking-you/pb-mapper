@@ -5,8 +5,9 @@ use crate::{
     Display, QualityPreset, Result, VideoCodec, VideoLimits, VideoSize,
     launch::Launch,
     protocol::{
-        CAPABILITY_H265, CAPABILITY_PEER_CURSORS, HostMessage, PeerColor, PeerSlot, RejectReason,
-        StopReason, ViewerMessage, valid_capabilities,
+        CAPABILITY_ARRIVAL_TIME, CAPABILITY_H265, CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS,
+        HostMessage, PeerColor, PeerSlot, RejectReason, StopReason, ViewerMessage,
+        valid_capabilities,
     },
     qos::scaled_size,
     session::{self, Session, stop_message},
@@ -84,16 +85,24 @@ fn expected_video(display: Option<&Display>, limits: VideoLimits) -> VideoSize {
     VideoSize { width, height }
 }
 
+/// What every host speaks, whatever its backend: each is listed back to a
+/// viewer that listed it.
+const SESSION_CAPABILITIES: [&str; 3] = [
+    CAPABILITY_PEER_CURSORS,
+    CAPABILITY_ARRIVAL_TIME,
+    CAPABILITY_KEYFRAME_SEQ,
+];
+
+/// `Accepted.capabilities`: the backend's, then each of
+/// `SESSION_CAPABILITIES` the viewer listed.
 fn negotiated_capabilities(host_caps: &[String], requested: &[String]) -> Vec<String> {
     let mut capabilities = host_caps.to_vec();
-    if requested
-        .iter()
-        .any(|capability| capability == CAPABILITY_PEER_CURSORS)
-        && !capabilities
-            .iter()
-            .any(|capability| capability == CAPABILITY_PEER_CURSORS)
-    {
-        capabilities.push(CAPABILITY_PEER_CURSORS.to_owned());
+    for wanted in SESSION_CAPABILITIES {
+        if requested.iter().any(|capability| capability == wanted)
+            && !capabilities.iter().any(|capability| capability == wanted)
+        {
+            capabilities.push(wanted.to_owned());
+        }
     }
     capabilities
 }
@@ -485,5 +494,46 @@ impl Acceptor {
                 .as_ref()
                 .ct_eq(digest(&SHA256, self.token.as_bytes()).as_ref()),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BackendCaps, HostOs, ViewerConfig, protocol::MAX_CAPABILITIES};
+
+    /// The most a host lists, for a viewer that lists the most it can: a
+    /// backend that can do everything, and every capability every host
+    /// speaks. Both lists stay within `MAX_CAPABILITIES`, so neither end ever
+    /// refuses the other's as malformed.
+    #[test]
+    fn the_longest_lists_stay_within_the_bound() {
+        let mut config = ViewerConfig::new(vec![VideoCodec::H265, VideoCodec::H264]);
+        config.fps_override = true;
+        let viewer = config.capabilities();
+        assert!(valid_capabilities(&viewer), "{viewer:?}");
+        let backend = BackendCaps {
+            h265: true,
+            lock: true,
+            display_modes: true,
+            os: Some(HostOs::Android),
+            physical_keys: true,
+            cursor_shapes: true,
+            ..BackendCaps::default()
+        };
+        let host = negotiated_capabilities(&backend.values(), &viewer);
+        for wanted in SESSION_CAPABILITIES {
+            assert!(host.iter().any(|value| value == wanted), "{host:?}");
+        }
+        assert!(valid_capabilities(&host), "{host:?}");
+        assert!(viewer.len().max(host.len()) <= MAX_CAPABILITIES);
+        // A viewer that lists none of them hears of none.
+        let host = negotiated_capabilities(&backend.values(), &[]);
+        assert!(
+            SESSION_CAPABILITIES
+                .iter()
+                .all(|wanted| !host.iter().any(|value| value == wanted)),
+            "{host:?}"
+        );
     }
 }
