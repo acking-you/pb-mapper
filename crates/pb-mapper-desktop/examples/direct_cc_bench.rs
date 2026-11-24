@@ -1,8 +1,8 @@
 //! Cubic against BBR for the desktop host's direct video, open loop: two
 //! quinn endpoints with pb-mapper's direct transport, the sender's under the
 //! controller each cell names and the receiver's under Cubic, as a viewer's
-//! is, through a testkit `lossy_udp` hop that delays, loses and polices
-//! each way.
+//! is, connected by the testkit's `lossy_quic_pair` through a `lossy_udp`
+//! hop that delays, loses and polices each way.
 //!
 //! The sender stands in for the host: a capture every 1/60 s, a P-frame of
 //! the cell's video rate (8 333 bytes at 4 Mbit/s) and a 150 KB IDR every
@@ -31,13 +31,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::VecDeque;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use pb_mapper_client::sdk::{CongestionControl, direct_transport_config};
-use pb_mapper_testkit::{LossyShape, lossy_udp, lossy_udp_socket};
-use quinn::rustls;
+use pb_mapper_testkit::{LossyShape, lossy_quic_pair};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time::{Instant, MissedTickBehavior};
 
@@ -52,7 +50,6 @@ const BYTE_WINDOW: (usize, usize) = (64 * 1024, 4 * 1024 * 1024);
 const DRAIN: Duration = Duration::from_secs(10);
 /// Seq, capture time in µs since the cell began, length, IDR.
 const HEADER: usize = 8 + 8 + 4 + 1;
-const SERVER_NAME: &str = "localhost";
 
 #[derive(Clone, Copy, Debug)]
 struct Cell {
@@ -150,35 +147,6 @@ impl Ledger {
     }
 }
 
-fn tls() -> (rustls::ServerConfig, rustls::ClientConfig) {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let (rcgen::CertifiedKey { cert, .. }, key) =
-        rcgen::generate_simple_self_signed(vec![SERVER_NAME.into()]).unwrap();
-    let cert = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
-    let server = rustls::ServerConfig::builder_with_provider(provider.clone())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert.clone()], key)
-        .unwrap();
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(cert).unwrap();
-    let client = rustls::ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    (server, client)
-}
-
-fn endpoint(server: Option<quinn::ServerConfig>) -> quinn::Endpoint {
-    let socket = lossy_udp_socket(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
-    // As every direct endpoint: no QUIC-bit greasing.
-    let mut config = quinn::EndpointConfig::default();
-    config.grease_quic_bit(false);
-    quinn::Endpoint::new(config, server, socket, Arc::new(quinn::TokioRuntime)).unwrap()
-}
-
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
         return f64::NAN;
@@ -188,31 +156,20 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 }
 
 async fn run(cell: Cell, seconds: u64) -> Outcome {
-    let (server_tls, client_tls) = tls();
-    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(
-        quinn::crypto::rustls::QuicServerConfig::try_from(server_tls).unwrap(),
-    ));
-    server_config.transport_config(Arc::new(direct_transport_config(cell.congestion).unwrap()));
-    let mut client_config = quinn::ClientConfig::new(Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(client_tls).unwrap(),
-    ));
-    client_config.transport_config(Arc::new(
-        direct_transport_config(CongestionControl::Cubic).unwrap(),
-    ));
-    let host = endpoint(Some(server_config));
-    let viewer = endpoint(None);
     let shape = LossyShape::new(
         0.0,
         Duration::from_millis(cell.rtt_ms) / 2,
         (cell.policer_mbps * 1e6) as u64,
     );
-    let hop = lossy_udp(host.local_addr().unwrap(), shape.clone()).await;
-    let connecting = viewer
-        .connect_with(client_config, hop.addr(), SERVER_NAME)
-        .unwrap();
-    let (to_host, from_viewer) =
-        tokio::join!(connecting, async { host.accept().await.unwrap().await });
-    let (to_host, from_viewer) = (to_host.unwrap(), from_viewer.unwrap());
+    // The host accepts, as a direct provider does, and sends under the
+    // cell's controller; the viewer dials under Cubic.
+    let quic = lossy_quic_pair(
+        direct_transport_config(cell.congestion).unwrap(),
+        direct_transport_config(CongestionControl::Cubic).unwrap(),
+        shape.clone(),
+    )
+    .await;
+    let (to_host, from_viewer) = (&quic.dialed, &quic.accepted);
     // The viewer opens the one stream, as a direct consumer does.
     let (mut viewer_send, mut viewer_recv) = to_host.open_bi().await.unwrap();
     viewer_send.write_all(&[0]).await.unwrap();
@@ -371,15 +328,12 @@ async fn run(cell: Cell, seconds: u64) -> Outcome {
     outcome.congestion_events = path.congestion_events;
     outcome.sent_packets = path.sent_packets;
     outcome.cwnd = path.cwnd;
-    let [up, down] = hop.counts();
+    let [up, down] = quic.hop.counts();
     outcome.hop_lost = up.lost + down.lost;
     outcome.hop_policed = up.policed + down.policed;
     reader.abort();
     receipt_reader.abort();
-    from_viewer.close(0u32.into(), b"done");
-    to_host.close(0u32.into(), b"done");
-    host.close(0u32.into(), b"done");
-    viewer.close(0u32.into(), b"done");
+    quic.close();
     outcome
 }
 

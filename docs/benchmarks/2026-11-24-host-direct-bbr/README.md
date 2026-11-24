@@ -8,7 +8,9 @@ round trip in one ordered queue, drops a share at random from a fixed seed,
 and, where a policer is named, drops what a token bucket of 50 ms at its
 rate cannot pay for. Loss is each way. The sockets ask for 4 MiB buffers
 (macOS grants up to `kern.ipc.maxsockbuf`, 8 MiB here). None of it is a real
-WAN path; see the last section.
+WAN path; see the last section. At the commits these runs were built at, the
+bench and the closed-loop rig each set up their QUIC connection themselves;
+that setup later moved, unchanged, into the testkit's `lossy_quic_pair`.
 
 The question is the plan's gate for sending the host's direct QUIC under
 BBR (`quinn::congestion::BbrConfig::default()`, this quinn fork's) instead

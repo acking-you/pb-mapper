@@ -595,7 +595,8 @@ Nothing in the SDK crates knows it exists.
     (a relay, a host with a synthetic encoder and a viewer in one process,
     counting allocations per video unit), `direct_cc_bench` (Cubic against
     BBR for synthetic video under the host's credit window, over two quinn
-    endpoints with the direct transport and a testkit `lossy_udp` hop),
+    endpoints with the direct transport joined by the testkit's
+    `lossy_quic_pair`),
     `pipe_relay_bench` (the helper's
     unit path through two named pipes and a service-style relay, on Windows:
     time per unit, and the writes and reads each took), `deployed` (the selftest, native
@@ -646,7 +647,9 @@ Nothing in the SDK crates knows it exists.
     shared by the remote desktop's tests
   - `lossy.rs`: `LossyShape` / `lossy_udp` — a UDP hop that loses
     datagrams from a fixed seed, delays them in one ordered queue each way
-    and polices them to a rate, for QUIC over a lossy long path
+    and polices them to a rate, for QUIC over a lossy long path;
+    `lossy_quic_pair` builds both ends of one QUIC connection across it,
+    under the transports the caller passes
   - `poll.rs`: The one readiness loop every probe polls with
   - Tests log as the binary does: the crate includes the CLI's
     `src/bin/pb-mapper/logging.rs` by path. `TEST_ADMIN_KEY` is

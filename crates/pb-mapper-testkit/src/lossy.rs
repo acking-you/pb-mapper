@@ -1,5 +1,6 @@
 //! A UDP hop that loses, delays and polices datagrams, adjustable while
-//! traffic runs: a lossy long path for QUIC, in one process.
+//! traffic runs: a lossy long path for QUIC, in one process, and a QUIC
+//! connection across one with the transports a case names.
 //!
 //! Each direction is one ordered queue, as airhand's `lossy_quic_pair` has
 //! it: datagrams leave in the order they came, each `delay` after it came,
@@ -118,7 +119,7 @@ impl LossyUdp {
 
 /// A UDP socket bound to `addr`, nonblocking, asking for
 /// [`LOSSY_SOCKET_BUFFER`] each way: what each end of a lossy path binds.
-pub fn lossy_udp_socket(addr: SocketAddr) -> std::io::Result<UdpSocket> {
+fn lossy_udp_socket(addr: SocketAddr) -> std::io::Result<UdpSocket> {
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(addr),
         socket2::Type::DGRAM,
@@ -159,6 +160,89 @@ pub async fn lossy_udp(target: SocketAddr, shape: Arc<LossyShape>) -> LossyUdp {
         addr,
         counters,
         _tasks: tasks,
+    }
+}
+
+/// The name a [`lossy_quic_pair`]'s certificate carries.
+const LOSSY_QUIC_NAME: &str = "localhost";
+
+/// One QUIC connection on loopback whose datagrams cross a [`lossy_udp`]
+/// hop, from [`lossy_quic_pair`]. Dropping it stops the hop.
+pub struct LossyQuicPair {
+    /// The end that accepted, behind the hop.
+    pub accepted: quinn::Connection,
+    /// The end that dialed the hop.
+    pub dialed: quinn::Connection,
+    pub hop: LossyUdp,
+    endpoints: [quinn::Endpoint; 2],
+}
+
+impl LossyQuicPair {
+    /// Close both ends' endpoints, and the connection with them.
+    pub fn close(&self) {
+        for endpoint in &self.endpoints {
+            endpoint.close(0u32.into(), b"done");
+        }
+    }
+}
+
+/// Two quinn endpoints on loopback and one connection between them through
+/// a [`lossy_udp`] hop shaped by `shape`: the accepting end under the
+/// `accepting` transport, the dialing end under `dialing`. TLS 1.3 on ring
+/// with a self-signed certificate; each endpoint binds a socket asking for
+/// [`LOSSY_SOCKET_BUFFER`] and does not grease the QUIC bit, as pb-mapper's
+/// direct endpoints do not. A case that measures after the handshake starts
+/// `shape` lossless and sets its loss once this returns.
+pub async fn lossy_quic_pair(
+    accepting: quinn::TransportConfig,
+    dialing: quinn::TransportConfig,
+    shape: Arc<LossyShape>,
+) -> LossyQuicPair {
+    use quinn::rustls;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let (rcgen::CertifiedKey { cert, .. }, key) =
+        rcgen::generate_simple_self_signed(vec![LOSSY_QUIC_NAME.into()]).unwrap();
+    let cert = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
+    let server = rustls::ServerConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.clone()], key)
+        .unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert).unwrap();
+    let client = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let mut server = quinn::ServerConfig::with_crypto(Arc::new(
+        quinn::crypto::rustls::QuicServerConfig::try_from(server).unwrap(),
+    ));
+    server.transport_config(Arc::new(accepting));
+    let mut client = quinn::ClientConfig::new(Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(client).unwrap(),
+    ));
+    client.transport_config(Arc::new(dialing));
+    let endpoint = |server: Option<quinn::ServerConfig>| {
+        let socket = lossy_udp_socket(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let mut config = quinn::EndpointConfig::default();
+        config.grease_quic_bit(false);
+        quinn::Endpoint::new(config, server, socket, Arc::new(quinn::TokioRuntime)).unwrap()
+    };
+    let (accepting, dialing) = (endpoint(Some(server)), endpoint(None));
+    let hop = lossy_udp(accepting.local_addr().unwrap(), shape).await;
+    let connecting = dialing
+        .connect_with(client, hop.addr(), LOSSY_QUIC_NAME)
+        .unwrap();
+    let (dialed, accepted) = tokio::join!(connecting, async {
+        accepting.accept().await.unwrap().await
+    });
+    LossyQuicPair {
+        accepted: accepted.unwrap(),
+        dialed: dialed.unwrap(),
+        hop,
+        endpoints: [accepting, dialing],
     }
 }
 
@@ -404,5 +488,41 @@ mod tests {
         // The bucket's ten, and what it refilled while the burst came.
         assert!((10..=12).contains(&up.forwarded), "{up:?}");
         assert_eq!(up.forwarded + up.policed, 30);
+    }
+
+    /// A QUIC pair's connection crosses its hop each way, and each end
+    /// sends under the transport it was given: here the accepting end's
+    /// under BBR, the dialing end's under quinn's default.
+    #[tokio::test]
+    async fn a_quic_pair_crosses_its_hop_under_each_ends_transport() {
+        let mut accepting = quinn::TransportConfig::default();
+        accepting.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+        let pair = lossy_quic_pair(
+            accepting,
+            quinn::TransportConfig::default(),
+            LossyShape::new(0.0, Duration::from_millis(5), 0),
+        )
+        .await;
+        let (mut send, mut recv) = pair.dialed.open_bi().await.unwrap();
+        send.write_all(b"ping").await.unwrap();
+        let (mut back, mut read) = pair.accepted.accept_bi().await.unwrap();
+        let mut ping = [0u8; 4];
+        read.read_exact(&mut ping).await.unwrap();
+        back.write_all(&ping).await.unwrap();
+        let mut echoed = [0u8; 4];
+        recv.read_exact(&mut echoed).await.unwrap();
+        assert_eq!(&echoed, b"ping");
+        let [up, down] = pair.hop.counts();
+        assert!(up.forwarded > 0 && down.forwarded > 0, "{up:?} {down:?}");
+        let bbr = |connection: &quinn::Connection| {
+            connection
+                .congestion_state()
+                .into_any()
+                .downcast::<quinn::congestion::Bbr>()
+                .is_ok()
+        };
+        assert!(bbr(&pair.accepted));
+        assert!(!bbr(&pair.dialed));
+        pair.close();
     }
 }

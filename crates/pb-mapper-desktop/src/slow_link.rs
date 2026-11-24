@@ -11,7 +11,7 @@ use pb_mapper_client::sdk::{
     Client, CongestionControl, ConnectOptions, PathPolicy, direct_transport_config,
 };
 use pb_mapper_testkit::{
-    LossyShape, LossyUdp, Relay, Shape, ShapedLink, admin_credential, lossy_udp, lossy_udp_socket,
+    LossyQuicPair, LossyShape, Relay, Shape, ShapedLink, admin_credential, lossy_quic_pair,
     shaped_link_each_way,
 };
 use std::{
@@ -3009,52 +3009,6 @@ fn idr_another_viewer_asked_for_on_a_slow_link() {
     });
 }
 
-/// The name the closed loop's QUIC certificate carries.
-const QUIC_NAME: &str = "localhost";
-
-/// The host's end and the viewer's of one QUIC connection with pb-mapper's
-/// direct transport, and the viewer's config: the host's end sends under
-/// `congestion` and the viewer's under Cubic, as a direct session's do.
-fn quic_ends(
-    congestion: CongestionControl,
-) -> (quinn::Endpoint, quinn::Endpoint, quinn::ClientConfig) {
-    use quinn::rustls;
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let (rcgen::CertifiedKey { cert, .. }, key) =
-        rcgen::generate_simple_self_signed(vec![QUIC_NAME.into()]).unwrap();
-    let cert = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
-    let server = rustls::ServerConfig::builder_with_provider(provider.clone())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert.clone()], key)
-        .unwrap();
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(cert).unwrap();
-    let client = rustls::ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    let mut server = quinn::ServerConfig::with_crypto(Arc::new(
-        quinn::crypto::rustls::QuicServerConfig::try_from(server).unwrap(),
-    ));
-    server.transport_config(Arc::new(direct_transport_config(congestion).unwrap()));
-    let mut client = quinn::ClientConfig::new(Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(client).unwrap(),
-    ));
-    client.transport_config(Arc::new(
-        direct_transport_config(CongestionControl::Cubic).unwrap(),
-    ));
-    let endpoint = |server: Option<quinn::ServerConfig>| {
-        let socket = lossy_udp_socket(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
-        let mut config = quinn::EndpointConfig::default();
-        config.grease_quic_bit(false);
-        quinn::Endpoint::new(config, server, socket, Arc::new(quinn::TokioRuntime)).unwrap()
-    };
-    (endpoint(Some(server)), endpoint(None), client)
-}
-
 /// A relay the host registers on, a host of the synthetic encoder, and a
 /// viewer that reaches the host's listener as a direct session does: over
 /// one QUIC connection through a lossy hop, the host's end dialing its
@@ -3063,12 +3017,11 @@ struct QuicRig {
     host: Host,
     viewer: Viewer,
     probe: Arc<Probe>,
-    /// The host's end of the connection, whose path stats are read.
-    sending: quinn::Connection,
-    hop: LossyUdp,
+    /// The connection: its accepting end is the host's, whose path stats
+    /// are read.
+    quic: LossyQuicPair,
     /// The host's end's forwarding, aborted with the rig.
     _forward: tokio::task::JoinSet<()>,
-    _endpoints: [quinn::Endpoint; 2],
     _client: Client,
     _relay: Relay,
 }
@@ -3098,18 +3051,19 @@ impl QuicRig {
             .start(&client)
             .await
             .unwrap();
-        let (host_end, viewer_end, config) = quic_ends(congestion);
-        let hop = lossy_udp(host_end.local_addr().unwrap(), shape).await;
-        let connecting = viewer_end
-            .connect_with(config, hop.addr(), QUIC_NAME)
-            .unwrap();
-        let (to_host, sending) =
-            tokio::join!(connecting, async { host_end.accept().await.unwrap().await });
-        let (to_host, sending) = (to_host.unwrap(), sending.unwrap());
+        // pb-mapper's direct transport each way: the host's end sends
+        // under `congestion` and the viewer's under Cubic, as a direct
+        // session's do.
+        let quic = lossy_quic_pair(
+            direct_transport_config(congestion).unwrap(),
+            direct_transport_config(CongestionControl::Cubic).unwrap(),
+            shape,
+        )
+        .await;
         // The host's end dials the listener for the stream the viewer
         // opens, as a direct provider dials its local service.
         let mut forward = tokio::task::JoinSet::new();
-        let (accepting, listening) = (sending.clone(), host.listening());
+        let (accepting, listening) = (quic.accepted.clone(), host.listening());
         forward.spawn(async move {
             let Ok((send, recv)) = accepting.accept_bi().await else {
                 return;
@@ -3121,7 +3075,7 @@ impl QuicRig {
             let mut quic = tokio::io::join(recv, send);
             let _ = tokio::io::copy_bidirectional(&mut quic, &mut service).await;
         });
-        let (send, recv) = to_host.open_bi().await.unwrap();
+        let (send, recv) = quic.dialed.open_bi().await.unwrap();
         let invitation = host.invitation();
         let tls = security::client(invitation.fingerprint)
             .unwrap()
@@ -3148,10 +3102,8 @@ impl QuicRig {
             host,
             viewer,
             probe,
-            sending,
-            hop,
+            quic,
             _forward: forward,
-            _endpoints: [host_end, viewer_end],
             _client: client,
             _relay: relay,
         }
@@ -3276,7 +3228,7 @@ fn direct_quic_on_lossy_links() {
                 let timed = Timed::start(&rig.viewer, rig.probe.clone());
                 tokio::time::sleep(QUIC_SETTLE).await;
                 let started = Instant::now();
-                let before = rig.sending.stats().path;
+                let before = rig.quic.accepted.stats().path;
                 let mut asked = Vec::new();
                 let mut fps = Vec::new();
                 while started.elapsed() < QUIC_MEASURE {
@@ -3286,11 +3238,11 @@ fn direct_quic_on_lossy_links() {
                     fps.push(rig.viewer.status().stats.received_fps);
                 }
                 let ended = Instant::now();
-                let after = rig.sending.stats().path;
+                let after = rig.quic.accepted.stats().path;
                 let status = rig.viewer.status();
                 let taken = timed.taken();
                 drop(timed);
-                let [up, down] = rig.hop.counts();
+                let [up, down] = rig.quic.hop.counts();
                 rig.stop().await;
 
                 let within: Vec<Taken> = taken

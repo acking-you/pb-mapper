@@ -28,7 +28,8 @@
 //! delay and rate, in front of a [`Relay`] and connects through the hop; a
 //! [`shaped_link_each_way`] shapes each direction apart. A case about QUIC
 //! over a lossy long path sends its datagrams through a [`lossy_udp`] hop,
-//! which loses, delays and polices them.
+//! which loses, delays and polices them; [`lossy_quic_pair`] builds both
+//! ends of one connection across such a hop.
 //!
 //! A case about the SDK rather than the CLI entry points builds its own
 //! backend with [`tcp_echo`] or [`udp_echo`], and its tunnel with
@@ -75,8 +76,8 @@ mod tunnel;
 pub use control::{V2ControlSpec, register_v2_control};
 pub use echo::{Echo, tcp_echo, udp_echo};
 pub use lossy::{
-    LOSSY_SOCKET_BUFFER, LossyCounts, LossyShape, LossyUdp, POLICER_BURST, lossy_udp,
-    lossy_udp_socket,
+    LOSSY_SOCKET_BUFFER, LossyCounts, LossyQuicPair, LossyShape, LossyUdp, POLICER_BURST,
+    lossy_quic_pair, lossy_udp,
 };
 pub use relay::{Relay, loopback_direct, loopback_quic};
 pub use sdk::{admin_client, publish, subscribe};
