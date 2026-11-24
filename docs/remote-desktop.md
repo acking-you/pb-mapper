@@ -810,9 +810,11 @@ that the next write takes all it gathered, and toward the worker through
 64 KiB, so each of its writes stays under that 1 MiB. That change left the
 records, and so the helper protocol, as they were.
 `examples/pipe_relay_bench.rs` times a
-unit through two pipes and such a relay, and counts the writes and reads it
-took; its 3.7 MB unit is the one whose write allocates on 1.2.5. No Windows
-run of it is recorded yet.
+unit through two pipes and such a relay, pushed as protocol 12 sends it
+(from the worker's write until the app holds it) or, with `--mode answer`,
+answered as protocol 11 did (from the request), and counts the writes and
+reads it took; its 3.7 MB unit is the one whose write allocates on 1.2.5.
+No Windows run of it is recorded yet.
 
 Installation is serialized, replaces configuration atomically, waits for the
 service to report Running, and attempts to restore the previous configuration
@@ -888,17 +890,24 @@ request that came first, then pushes each unit its encoder finished, a
 `fresh` when its source wants the armed tick (`Backend::capture_idle_until`
 of its own backend says so), and the pointer every 16 ms (once a period at
 a faster pace, down to 8 ms) and 2 ms and 8 ms after an input moved it,
-when the pointer or its shape's number changed. On the app's side one I/O
-thread owns the pipe and the runtime that drives it: it writes each call's
-request, and reads every record in order, handing an answer to the waiting
-call, queueing a unit or a failure for thread C, which takes them with no
-pipe call and is woken for each, raising a flag for `fresh`, and keeping
-the pointer, so an answer read late never undoes a push that came after
-it. Both ends check what they read: a unit within 4 MiB, and of the
-generation thread C expects when it takes it (another's is dropped); at
-most 64 units pending, and at most six pushed and not yet taken, two more
-than thread C lets in flight; a pointer inside the display the
-worker last reported (one outside is not taken); an age within 1 s (an
+when the pointer or its shape's number differs from what the app holds,
+as its last push or an answer that carried the pointer left it: an
+input's answer reports the move it applied, so a move the system then
+stopped short is pushed where the pointer stopped. On the app's side one
+I/O thread owns the pipe and the runtime that drives it: it writes each
+call's request, and reads every record in order, handing an answer to the
+waiting call, queueing a unit or a failure for thread C, which takes them
+with no pipe call and is woken for each, raising a flag for `fresh`, and
+keeping the pointer, so an answer read late never undoes a push that came
+after it. A pushed pointer that changed what thread C would read wakes it
+too (`Backend::cursor_changed`), and thread C samples it at once rather
+than at its own next sample, so a pointer the viewer did not move (the
+host user's, an app's) waits for the worker's sampling and the pipes, not
+for thread C's sampling as well. Both ends check what they read: a unit
+within 4 MiB, and of the generation thread C expects when it takes it
+(another's is dropped); at most 64 units pending, and at most six pushed
+and not yet taken, two more than thread C lets in flight; a pointer inside
+the display the worker last reported (one outside is not taken); an age within 1 s (an
 older one is no date); and no unknown kind or field. A broken record ends
 the session, as a lost pipe does. Each pushed unit also carries when the
 worker collected it, on the system clock both processes read, from which
@@ -1484,10 +1493,13 @@ and a Windows encoder's refinement repeats: the captures that armed the
 capture thread or sent a refinement repeat, at most one a tick on an active
 desktop, and on a still desktop an arming after each 250 ms repeat besides
 a burst's repeats. Behind the helper each of them is a round trip through
-the pipes, so a desktop that keeps changing costs two a new picture there:
-the tick that finds nothing new and arms the worker's source, and the
-capture that takes the picture the worker then tells of. A change of the
-viewers' limits that changes only the frame rate keeps the capture source
+the pipes: on a desktop that keeps changing, a tick that finds nothing new
+arms the worker's source, and a capture takes the picture the worker then
+tells of; an encoder that has not asked for input yet costs one more each
+time the worker's source names its retry (2 ms later) or its input request
+comes. How many round trips a second that makes on a Windows computer is
+still to be measured (`desktop_helper_push`'s `replies_per_s`). A change
+of the viewers' limits that changes only the frame rate keeps the capture source
 where it can serve the new limits as it is (a Mac host's can while the
 encode size stays the same, and the
 synthetic test platform's; the Windows source is still built again), and
@@ -3084,8 +3096,10 @@ answer an earlier move. A look reports only a new shape, as a sample would, and
 starts the sample clock again; otherwise it reports nothing, so a viewer gets
 a position sooner than the clock only together with a new shape. Through the
 helper the shape still crosses the pipe only when the worker numbered a new
-one, which each capture call observes: every 2 ms after an input while the
-picture is still, at the frame rate while it changes.
+one, which it reads with each pointer it samples (as often as thread C
+does, and 2 ms and 8 ms after a move it applied) and pushes with the
+pointer; a pushed change wakes thread C, which samples it at once
+(`Backend::cursor_changed`) and starts its sample clock again from it.
 
 The desktop-bound thread reports at once every sample unlike its last report,
 except the controlling viewer's own move coming back: the viewer draws
@@ -3271,7 +3285,7 @@ so read at the display's rate, and a still one on the timer only.
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued, drained until the IDR or a head under 125 ms; IDR grace 500 ms; stall watchdog 700 ms |
 | fps cap | tick 250 ms; capacity from ≥ 4 busy ticks of the last 8; × 0.9 direct, × 0.8 relay; minimum 5; after 3 s, +5 per 30 fps of ceiling or a quarter of the cap, up to 95% of the capacity; probes of 10% watched 3 s (not by the queue within the IDR grace; a pause takes one back), backoff 3 s doubling to 60 s; turnaround late past 2 frame intervals (≥ 40 ms) over its 10 s floor; ≥ 1 s between changes but for a probe taken back |
 | Input | viewer queue 512 events or 256 KiB, batches of 16; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input |
-| Cursor | sampled every 16 ms, or once a period of a faster pace down to 8 ms; the shape looked at 2 ms and 8 ms after a shape-reading controller's newest move, one look pending, a sooner one an earlier move left kept; the controller's own move never reported; an injected move is the pointer until the OS shows it, at most 250 ms after the last (`SETTLE`); a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated, the pointer shows on the shared display and the OS pointer changed (a failed read again after 250 ms), an image over 1024 px a side never, 1 to 256 px a side sent, 64 slots on each end |
+| Cursor | sampled every 16 ms, or once a period of a faster pace down to 8 ms, and behind the helper also as the worker pushes a change; the shape looked at 2 ms and 8 ms after a shape-reading controller's newest move, one look pending, a sooner one an earlier move left kept; the controller's own move never reported; an injected move is the pointer until the OS shows it, at most 250 ms after the last (`SETTLE`); a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated, the pointer shows on the shared display and the OS pointer changed (a failed read again after 250 ms), an image over 1024 px a side never, 1 to 256 px a side sent, 64 slots on each end |
 | Codec | `Accepted` waits at most 3 s for the backend's display and H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3; Windows H.264 in Constrained High, then High, then Baseline, `QualityVsSpeed` 0, no scenario |
 
 ### Diagnostics

@@ -477,8 +477,9 @@ Nothing in the SDK crates knows it exists.
     (`oop/server.rs`'s `work`) waits on the wake its encoder and capture
     thread share with the exchange, and the app's `RemoteBackend` keeps one
     I/O thread that demultiplexes answers and pushes in order, so thread C
-    neither polls nor long-polls the worker. Protocol 11:
-    `Request::Adapter` and `Response.adapter`,
+    neither polls nor long-polls the worker; a pushed pointer that changed
+    wakes thread C, which samples it at once (`Backend::cursor_changed`).
+    Protocol 11: `Request::Adapter` and `Response.adapter`,
     the GPU and driver that drive the worker's display (`AdapterKey`, named
     by the platform through `oop/server.rs`'s `NamedAdapter`), asked only
     for a viewer that decodes H.265; the `H265` answer names the GPU only
@@ -603,7 +604,8 @@ Nothing in the SDK crates knows it exists.
     (a relay, a host with a synthetic encoder and a viewer in one process,
     counting allocations per video unit), `pipe_relay_bench` (the helper's
     unit path through two named pipes and a service-style relay, on Windows:
-    time per unit, and the writes and reads each took), `deployed` (the selftest, native
+    time per unit, pushed as protocol 12 sends it or answered as protocol 11
+    did, and the writes and reads each took), `deployed` (the selftest, native
     size by default), `input_acceptance/` (native input into a window of its
     own, on Windows: Unicode text, line breaks, physical keys and an input
     method's composition, and the pointer's shapes over it) and
