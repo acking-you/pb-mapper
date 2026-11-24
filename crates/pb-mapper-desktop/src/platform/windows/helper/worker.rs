@@ -99,9 +99,10 @@ fn serve_bound(
             return;
         }
     };
-    // The `Start` answer names the GPU it captures on, under which the host
-    // keeps this worker's H.265 answer for the next worker.
-    let mut state = ServeState::new(super::super::video::adapter_key);
+    // For a viewer that decodes H.265, the worker names the GPU it captures
+    // on, under which the host keeps this worker's H.265 answer for the next
+    // worker.
+    let mut state = ServeState::new(super::super::video::named_adapter);
     // Fine process timers while the host asks for video; a paused
     // host asks for none.
     let mut timer = None;

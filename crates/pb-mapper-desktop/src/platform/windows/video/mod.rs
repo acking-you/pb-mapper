@@ -14,9 +14,9 @@ mod codec;
 mod converter;
 mod probe;
 
-#[cfg(feature = "windows-helper")]
-pub(crate) use probe::adapter_key;
 pub use probe::h265_available;
+#[cfg(feature = "windows-helper")]
+pub(crate) use probe::named_adapter;
 
 use crate::{
     BackendError, Display, FailureKind, Presented, Result, VideoCodec,

@@ -15,11 +15,12 @@ use crate::{
 /// The most adapters whose H.265 answers this process keeps.
 const H265_ANSWERS_KEPT: usize = 8;
 
-/// What workers answered `Request::H265` in this process, by the GPU and
-/// driver they capture on, oldest first. A worker is a fresh process, whose
+/// What workers' probes answered `Request::H265` in this process, by the GPU
+/// and driver each probed, oldest first. A worker is a fresh process, whose
 /// probe activates an encoder cold; the host outlives it, so a later worker
-/// on the same GPU and driver is not asked again. False answers are kept
-/// too, as the in-process backend keeps its probe's. An H.265 encoder that
+/// on the same GPU and driver is not asked again. A probe's no is kept as
+/// its yes is, as the in-process backend keeps its probe's; a no the worker
+/// gave without a probe names no GPU, and is not kept. An H.265 encoder that
 /// then fails on that GPU drops its answer (`H265Answers::forget`).
 struct H265Answers(Vec<(AdapterKey, bool)>);
 impl H265Answers {
@@ -63,8 +64,8 @@ pub(crate) struct RemoteBackend<T: Transport> {
     /// From the `Start` response: the interactive session's values, which
     /// differ from this process's when it is the SYSTEM service in session 0.
     double_click: Option<crate::DoubleClickGuard>,
-    /// From the `Start` response: the GPU and driver the worker captures
-    /// on, under which its H.265 answer is kept for the process.
+    /// The GPU and driver under which this session's H.265 answer is kept
+    /// for the process, which an H.265 encoder that fails here drops.
     adapter: Option<AdapterKey>,
     /// This client changed the worker's display mode and has not asked it
     /// back since: a session's end asks only then.
@@ -174,6 +175,7 @@ impl<T: Transport> RemoteBackend<T> {
             double_click,
             caps,
             h265,
+            adapter,
             modes,
             restored,
             shape_serial,
@@ -216,47 +218,54 @@ impl<T: Transport> RemoteBackend<T> {
         }
         self.double_click = double_click.or(self.double_click);
         if let Some(caps) = caps {
-            self.adapter = caps.adapter;
             self.caps = caps.into();
         }
         Ok(Answer {
             image,
             video,
             h265,
+            adapter,
             modes,
             restored,
             shape,
         })
     }
 
-    /// Whether the worker encodes H.265: what a worker on the same GPU and
-    /// driver answered earlier in this process, else what this one answers
-    /// `Request::H265`, which is then kept. A call that fails says no, and
-    /// keeps nothing.
+    /// Whether the worker encodes H.265: what a worker on the GPU and driver
+    /// that `Request::Adapter` names answered earlier in this process, else
+    /// what this one answers `Request::H265`, which is kept under the GPU
+    /// its probe names, and only then. A call that fails says no, and keeps
+    /// nothing.
     fn h265(&mut self) -> bool {
         let started = std::time::Instant::now();
-        let kept = self
-            .adapter
-            .and_then(|adapter| H265_ANSWERS.lock().get(&adapter));
-        let h265 = match kept {
-            Some(h265) => h265,
+        let named = self
+            .call(Request::Adapter {})
+            .ok()
+            .and_then(|answer| answer.adapter);
+        let kept = named.and_then(|adapter| H265_ANSWERS.lock().get(&adapter));
+        let (h265, adapter) = match kept {
+            Some(h265) => (h265, named),
             None => {
                 let Ok(Answer {
-                    h265: Some(h265), ..
+                    h265: Some(h265),
+                    adapter: probed,
+                    ..
                 }) = self.call(Request::H265 {})
                 else {
                     return false;
                 };
-                if let Some(adapter) = self.adapter {
-                    H265_ANSWERS.lock().put(adapter, h265);
+                if let Some(probed) = probed {
+                    H265_ANSWERS.lock().put(probed, h265);
                 }
-                h265
+                (h265, probed)
             }
         };
+        self.adapter = adapter;
         tracing::info!(
             target: "pb_mapper_desktop::session",
             event = "desktop_h265_helper",
             usable = h265,
+            named = named.is_some(),
             kept = kept.is_some(),
             ms = started.elapsed().as_millis() as u64,
         );
@@ -307,6 +316,9 @@ struct Answer {
     video: Option<crate::VideoFormat>,
     /// In the `H265` response.
     h265: Option<bool>,
+    /// In the `Adapter` response, and in the `H265` response when its
+    /// answer is a probe's.
+    adapter: Option<AdapterKey>,
     /// In the `DisplayModes` response.
     modes: Option<ModeList>,
     /// In the `RestoreDisplayMode` response.
@@ -404,9 +416,10 @@ impl<T: Transport> Backend for RemoteBackend<T> {
     }
     /// What the worker said it can do when it started; it probes the GPU of
     /// the display it captures, in the interactive session, which the
-    /// background host in session 0 cannot, and is asked about H.265 only
-    /// for a viewer that decodes it, and only when no worker on the same GPU
-    /// and driver answered it in this process.
+    /// background host in session 0 cannot. Only for a viewer that decodes
+    /// H.265 is it asked to name its GPU, and then about H.265, unless a
+    /// worker's probe on the same GPU and driver answered that in this
+    /// process.
     fn describe(&mut self, probe_h265: bool) -> Result<Description> {
         let display = self.display()?;
         let h265 = probe_h265 && self.h265();
@@ -509,7 +522,7 @@ impl<T: Transport> Drop for RemoteBackend<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{oop::proto::StartCaps, platform::synthetic::Probe};
+    use crate::{oop::server::NamedAdapter, platform::synthetic::Probe};
     use tokio::io::DuplexStream;
 
     /// A `RemoteBackend` over an in-memory pipe whose worker answers each
@@ -607,7 +620,7 @@ mod tests {
     fn synthetic(
         probe: &Probe,
         journal: std::path::PathBuf,
-        adapter: fn(&crate::Display) -> Option<AdapterKey>,
+        adapter: fn(&crate::Display) -> Option<NamedAdapter>,
         mut seen: impl FnMut(&Request) + Send + 'static,
     ) -> (RemoteBackend<DuplexStream>, std::thread::JoinHandle<()>) {
         use crate::{
@@ -811,10 +824,11 @@ mod tests {
     }
 
     /// Protocol 11 over a pipe to workers serving a synthetic display, one
-    /// per session as the helper starts them: the first on a GPU is asked
-    /// about H.265; a later one on the same GPU and driver is not, and says
-    /// what the first said; a new driver, or a worker that names no GPU, is
-    /// asked again.
+    /// per session as the helper starts them. A worker names its GPU only
+    /// for a viewer that decodes H.265. The first on a GPU is asked about
+    /// H.265; a later one on the same GPU and driver is not, and says what
+    /// the first's probe said. A new driver is asked again, and so is every
+    /// worker that names no GPU, or whose answer was no probe's of it.
     #[test]
     fn a_later_worker_on_the_same_gpu_and_driver_is_not_asked_about_h265() {
         use std::sync::{
@@ -823,25 +837,48 @@ mod tests {
         };
         let probe = Probe::default();
         let journal = pb_mapper_core::test_support::TempPath::new("desktop-oop-h265-kept");
+        let named = Arc::new(AtomicUsize::new(0));
         let asked = Arc::new(AtomicUsize::new(0));
-        let session = |adapter: fn(&crate::Display) -> Option<AdapterKey>| {
-            let asked = asked.clone();
+        let session = |adapter: fn(&crate::Display) -> Option<NamedAdapter>| {
+            let (named, asked) = (named.clone(), asked.clone());
             let (mut backend, helper) =
                 synthetic(&probe, journal.to_path_buf(), adapter, move |request| {
-                    if matches!(request, Request::H265 {}) {
-                        asked.fetch_add(1, Ordering::SeqCst);
-                    }
+                    match request {
+                        Request::Adapter {} => named.fetch_add(1, Ordering::SeqCst),
+                        Request::H265 {} => asked.fetch_add(1, Ordering::SeqCst),
+                        _ => 0,
+                    };
                 });
             // The synthetic display encodes H.264 alone.
+            assert!(!backend.describe(false).unwrap().caps.h265);
             assert!(!backend.describe(true).unwrap().caps.h265);
             drop(backend);
             helper.join().unwrap();
         };
-        // An AMD GPU, first on one driver, then on the next.
-        let first_driver =
-            |_: &crate::Display| AdapterKey::new(0x1002, 0x744c, 0x5315_1849, 0xc8, 1);
-        let next_driver =
-            |_: &crate::Display| AdapterKey::new(0x1002, 0x744c, 0x5315_1849, 0xc8, 2);
+        // An AMD GPU, on one driver and then on the next, as the worker's
+        // probe of it answered; then on a third, found after a probe that
+        // had found no GPU for the display.
+        fn gpu(driver: u64) -> Option<AdapterKey> {
+            AdapterKey::new(0x1002, 0x744c, 0x5315_1849, 0xc8, driver)
+        }
+        let first_driver: fn(&crate::Display) -> Option<NamedAdapter> = |_| {
+            Some(NamedAdapter {
+                key: gpu(1)?,
+                h265: Some(false),
+            })
+        };
+        let next_driver: fn(&crate::Display) -> Option<NamedAdapter> = |_| {
+            Some(NamedAdapter {
+                key: gpu(2)?,
+                h265: Some(false),
+            })
+        };
+        let unprobed: fn(&crate::Display) -> Option<NamedAdapter> = |_| {
+            Some(NamedAdapter {
+                key: gpu(3)?,
+                h265: None,
+            })
+        };
         session(first_driver);
         assert_eq!(asked.load(Ordering::SeqCst), 1);
         session(first_driver);
@@ -850,9 +887,13 @@ mod tests {
         assert_eq!(asked.load(Ordering::SeqCst), 2, "a new driver");
         session(next_driver);
         assert_eq!(asked.load(Ordering::SeqCst), 2);
+        session(unprobed);
+        session(unprobed);
+        assert_eq!(asked.load(Ordering::SeqCst), 4, "a no without a probe");
         session(|_| None);
         session(|_| None);
-        assert_eq!(asked.load(Ordering::SeqCst), 4, "no GPU named");
+        assert_eq!(asked.load(Ordering::SeqCst), 6, "no GPU named");
+        assert_eq!(named.load(Ordering::SeqCst), 8, "once per H.265 viewer");
     }
 
     /// An answer of yes is kept as a no is, until that GPU's H.265 encoder
@@ -884,15 +925,11 @@ mod tests {
                     ..Response::default()
                 };
                 match request {
-                    Request::Start { .. } => {
-                        response.caps = Some(StartCaps {
-                            adapter,
-                            ..StartCaps::from(&BackendCaps::default())
-                        });
-                    }
+                    Request::Adapter {} => response.adapter = adapter,
                     Request::H265 {} => {
                         asked.fetch_add(1, Ordering::SeqCst);
                         response.h265 = Some(true);
+                        response.adapter = adapter;
                     }
                     Request::Video { .. } => {
                         response.error = Some("the HEVC encoder took no input".into());

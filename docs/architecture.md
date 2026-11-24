@@ -426,12 +426,15 @@ Nothing in the SDK crates knows it exists.
     windows-helper`. `HELPER_PROTOCOL` (now 11) and the `.v<n>` pipe names
     change together; an installed helper of another protocol, or of another
     build (its executable differs from the one bundled with the app), is
-    offered Update. Protocol 11: `StartCaps.adapter`, the GPU and driver the
-    worker captures on (`AdapterKey`), under which `oop/client.rs` keeps the
-    worker's H.265 answer for the host's process, so a later worker on them
-    is not asked again. Protocol 10: `Response.submitted`, `false` only in the
-    answer to a capture whose source had no new picture, so thread C keeps
-    its tick armed and polls; absent means the tick was spent. Protocol 9:
+    offered Update. Protocol 11: `Request::Adapter` and `Response.adapter`,
+    the GPU and driver that drive the worker's display (`AdapterKey`, named
+    by the platform through `oop/server.rs`'s `NamedAdapter`), asked only
+    for a viewer that decodes H.265; the `H265` answer names the GPU only
+    when it is that GPU's probe, and `oop/client.rs` keeps it under that GPU
+    for the host's process, so a later worker on it is not asked again.
+    Protocol 10: `Response.submitted`, `false` only in the answer to a
+    capture whose source had no new picture, so thread C keeps its tick
+    armed and polls; absent means the tick was spent. Protocol 9:
     `HostStatus.viewers` across the background host's status pipe
     (`HostStatus.viewer` remains the primary entry).
     Protocol 8: `Request::CursorShape`, `shape_serial` on
