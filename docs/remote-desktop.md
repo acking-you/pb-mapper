@@ -972,7 +972,10 @@ does not require Flutter or a POCOX runtime.
   for a new desktop context, a display change or an encoder recovery, never for
   a rate change. `capture_video` drains finished output and submits at most one
   capture at the rate it is given; `drain_video` and `pending_video` let the
-  worker collect an asynchronous encoder's output between ticks. Each unit's
+  worker collect an asynchronous encoder's output between ticks, and
+  `video_full()` (false by default) names a bound of the encoder's own below
+  the worker's, at which the worker skips a due tick without a capture, as
+  at its own (a Mac host's VideoToolbox at two units in flight). Each unit's
   `VideoFormat` carries `gop`, the GOP the encoder read back, so a unit relayed
   by the helper reports it as well. `describe(probe_h265)` runs right after
   the backend is built and within the 3 s before the host answers the viewer:
@@ -1326,7 +1329,8 @@ where that fits. Seven rules carry it:
    back.
 2. **Capture runs at the QoS pace, anchored on the display's presents.** It
    never pauses or resumes as flow control. A tick is skipped only while two
-   units wait for send credit or the encoder holds four. A picture the
+   units wait for send credit or the encoder holds four (two on a Mac
+   host's VideoToolbox). A picture the
    backend dates places the next tick a period after its present, up to a
    quarter period early and at most 1/64 period earlier than a period after
    the last tick, and only a picture of a single present moves it earlier:
@@ -1407,13 +1411,27 @@ A capture that finds
 the encoder without room spends its tick. A tick is skipped (and
 counted in `skipped_ticks`) only while two units in the hand-off queue wait for
 send credit, which is transport backpressure, or while the encoder (or the
-helper) holds four, never for presentation. The two bounds are separate
+helper) holds four, or a bound of the source's own below four
+(`Backend::video_full`, a Mac host's two below), never for presentation.
+The two bounds are separate
 because a unit stays in the encoder for its latency: with one shared bound of
 two, an encoder that kept each unit 40 ms delivered 40 FPS at a pace of 60, and
 one that kept it 60 ms delivered 30. Four cover a latency of nearly four
 periods, and a fast encoder never holds more than one, so it adds no latency.
 The bound is fixed rather than derived from the measured dwell, because a
-queueing encoder's dwell grows with its depth. The encoder measures each
+queueing encoder's dwell grows with its depth. A Mac host holds VideoToolbox
+to two units in flight (`VT_IN_FLIGHT`), finished units not counted, and
+thread C skips a tick that finds two as one that finds four: where
+it encodes asynchronously (a size that is not a multiple of 16, such as a
+MacBook's built-in display at its default resolution) and the pace outruns
+it, the extra two only queued. On an M6 at a pace of 120, in a test loop
+that paces as thread C does, a 3024x1964 session's units took 18 ms (H.264)
+and 17 ms (H.265) from submit to output at the median with two in flight,
+against 41 and 39 ms with four, and a 3340x2160 session's 23 and 21 ms
+against 49 and 47 ms, at the same frame rate. Where it encodes inside the call,
+one unit is in flight at a time either way
+([measurements](benchmarks/2026-11-24-macos-vt-submit/README.md)). The
+encoder measures each
 unit's dwell, from submit to output (the `encode_us` it returns with the
 unit), and thread C reports the median of the last second as
 `encoder_dwell_ms`. A static screen is resubmitted about every 250 ms as a
@@ -1475,7 +1493,37 @@ its output queue keeps the newest complete picture, with when it arrived,
 and wakes thread C when one becomes available; that arrival dates the
 picture for thread C's pacing. Thread C submits that IOSurface at the
 negotiated pace without a copy. On a still screen it can reuse the last
-picture for a requested keyframe or the 250 ms liveness repeat. The session
+picture for a requested keyframe or the 250 ms liveness repeat. Thread C
+only hands the picture over: each encoder has its own submit thread, at the
+default QoS class as thread C is, which makes every call on
+the VideoToolbox session, the encode with its `ForceKeyFrame` option and the
+bitrate with its cap, one at a time and with no lock held across a call,
+and thread C passes it a picture or a bitrate through a one-slot mailbox. A
+session whose size is a multiple of 16 (1440p, 4K) encodes inside
+`VTCompressionSessionEncodeFrame` and calls back before it returns, so before
+the submit thread the call held thread C for the whole encode: on an M6, at
+the median, 5.0–5.2 ms at 1920x1200, 7.2–7.5 ms at 2560x1440 and
+14.3–15.0 ms at 3840x2160, against 3–5 µs to hand the picture over now. A
+submit that finds the submit thread still busy (a picture in the mailbox,
+or a call under way) leaves its tick armed and any keyframe asked for, and
+counts as an empty poll in `desktop_capture_pacing`; the thread wakes thread C
+when it finishes that call, and thread C takes the newest picture then
+rather than at the next tick, so a session paced faster than the encoder
+gets the encoder's rate (3840x2160 paced at 120 gave 65 units a second with
+H.264 and 68 with H.265, within 1% of what the blocking call gave). Until
+that wake, the source names a time
+250 ms away as its next tick, so thread C waits for it rather than spin. At
+most two units are in flight in VideoToolbox (`VT_IN_FLIGHT`, the one in
+the mailbox among them; a unit out and not yet drained is not), and thread
+C asks the source before it captures and skips a tick that finds two,
+counted in `skipped_ticks` as at the gate above. A new bitrate is set by
+the submit thread before its next encode, or at once while it idles, and a
+bitrate or encode VideoToolbox refuses reaches thread C at its next drain as
+the codec's failure. Dropping the encoder lets the submit thread finish its
+call, drop a picture still in the mailbox, invalidate the session and end;
+the drop waits at most 250 ms, after which a thread still inside a call is
+left to finish on its own (`macos_encoder_left_running`), holding what its
+callbacks read. The session
 runs in real time with no frame reordering, an unbounded GOP (`gop` reports the
 read-back), IDRs as a per-frame `ForceKeyFrame` option and the bitrate set
 live. Both codecs request low-latency rate control when available and retry
@@ -1921,6 +1969,23 @@ unit after a 1 s pause; each encoder's `macos_encoder_opened` line; and a
 summary line a case. A case that fits neither model is reported, not failed.
 Run them in release mode on a quiet Mac, one at a time:
 `cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture --test-threads=1 video_toolbox_rate_model`.
+Their pacing follows a Mac host's submit gate (two units in flight, a busy
+submit thread leaving the tick armed).
+
+Two more ignored tests time the hand-over itself. `video_toolbox_submit_blocking`
+paces a session as thread C does, on eight pictures painted before the run so
+that the pacing thread does nothing else, with Balanced's starting bits per
+frame scaled by the size, while a reader thread queues an input every
+millisecond and wakes it; the pacing thread takes the queued inputs before and
+after each submit, as thread C drains its lane. At 1920x1080, 1920x1200,
+2560x1440, 3328x2160 and 3840x2160, both codecs, paces 60 and 120, it prints
+pictures submitted and units out a second, ticks spent on units in flight and
+ticks left armed for a busy submit thread, the submit call (p50, p99, max), how
+long a queued input waited (p50, p99, max) and the dwell (p50, p95).
+`video_toolbox_in_flight` runs the same cases at 3024x1964, 3340x2160 and
+1920x1080 with the gate at four units and at two. Run each as the rate-model
+tests are run, by name
+([measurements](benchmarks/2026-11-24-macos-vt-submit/README.md)).
 
 ### Viewer: newest decodable frame, fps cap and recovery
 
@@ -2028,7 +2093,20 @@ is queued even past a full lane.
 
 `input_wait`, from the reader's enqueue to the start of execution, is traced as
 p50/p99/max each second. The acceptance gate is p99 ≤ 5 ms on the ordinary
-backend and ≤ 15 ms through the helper, with moving content. If the gate
+backend and ≤ 15 ms through the helper, with moving content. On a Mac host
+the backend call stays short because VideoToolbox runs on the encoder's own
+submit thread
+([Host: capture and encoding](#host-capture-and-encoding)): while thread C
+made the call itself, an encode at a size that is a multiple of 16 held
+queued input for as long as it took. In a test loop on an M6 that paced a
+session as thread C does and queued an input every millisecond, an input's
+wait at the 99th percentile was 5.0–5.3 ms at 1920x1200, 7.3–7.7 ms at
+2560x1440 and 14.9–17.4 ms at 3840x2160 before (each case's median of
+three runs), and 40–53 µs at every size
+after, in all but two of the 60 runs (one run each of two cases waited 3.3
+and 4.4 ms while the loop was not in a call;
+[measurements](benchmarks/2026-11-24-macos-vt-submit/README.md)). A live session's
+`input_wait` on such a display is still to be measured. If the gate
 fails, the next step is a dedicated injection thread with its own desktop
 binding, a process-wide registry that maps each binding epoch to a generation
 (an older epoch fails closed), and a second helper pipe lane. It is not built;
@@ -2186,7 +2264,7 @@ shape is painted as before.
 | Timeouts | handshake 3 s; host read 3 s; viewer header 4 s; writes 3 s plus the message's time at 1 Mbit/s; `Stopped` best effort within 1 s; the host reads on until the viewer closes, within the same second |
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
-| Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder |
+| Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder (2 in flight in a Mac host's VideoToolbox) |
 | Armed tick | a tick with no new picture stays armed; ScreenCaptureKit wakes thread C; DXGI, in process or through the helper, is asked again every 2 ms for 250 ms after an injected input or a new picture (an input brings a pending poll in to 2 ms), and once a period otherwise |
 | Capture pacing | after a dated picture, the next tick a period after its present, up to ¼ period early and, for a picture of a single present, at most 1/64 period earlier than a period after the last tick (long-run rate ≤ 64/63 × pace); a picture of several presents that waited keeps the tick a period after the last; ¾ period floor after a stall; a present over a period old counts as undated, and DXGI dates no picture presented over 1 s ago |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
@@ -2239,13 +2317,29 @@ dated picture's present to the capture call that took it; `dated_share`, the
 captures whose picture was dated; and per second `captures_per_s` (captures
 that spent their tick), `presents_per_s` (the presents their pictures
 covered), `coalesced_per_s` (those beyond one per picture: presents no
-capture took) and `empty_polls_per_s` (captures that found nothing new). A
+capture took) and `empty_polls_per_s` (captures that found nothing new, and
+on a Mac host those that found the encoder's submit thread busy). A
 Mac host traces `macos_capture_timing` there too, once a second while it
 submits: ScreenCaptureKit's `complete_per_s`, `idle_per_s` and
 `replaced_per_s` (pictures a newer one replaced before thread C took them),
 and `display_to_arrival_p50_us` and `display_to_arrival_p95_us`, from
 `SCStreamFrameInfoDisplayTime` to the picture's arrival on the stream's
-queue. A Windows encoder logs its first acquire as
+queue. Its encoder's submit thread traces `macos_encoder_load` there as
+well, after the first call a second or more after its last line:
+`seconds` (the window's length), `call_p50_us` and `call_p99_us` (its encode
+calls, which thread C waited out before the thread took them), `units`
+(the encodes it made), and from thread C's ticks `gate_ticks` (ticks
+skipped for two units in flight, which `skipped_ticks` counts too),
+`armed_refusals` (submits that found the thread
+busy and left their tick armed) and `peak_in_flight`. A Mac host logs the
+first picture of each stream as `macos_capture_layout` on
+`pb_mapper_desktop::session` (debug): its width and height, the pixels it
+says it extends by on each side (`extended_left`, `extended_right`,
+`extended_top`, `extended_bottom`), each plane's rows and bytes per row
+(`luma_rows`, `luma_bytes_per_row`, `chroma_rows`,
+`chroma_bytes_per_row`) and its IOSurface's size (`surface_bytes`), which
+say whether ScreenCaptureKit pads its pictures to a multiple of 16, as
+VideoToolbox would then read them. A Windows encoder logs its first acquire as
 `windows_capture_first_acquire` on `pb_mapper_desktop::session` (debug):
 `last_present_time`, `accumulated_frames` and whether a desktop image came
 with it, which it also keeps in its statistics for `video_bench`'s
@@ -2304,7 +2398,9 @@ encoder it opens as `macos_encoder_opened` (codec, `low_latency`, width,
 height, fps, hardware, gop, and `data_rate_limits`: whether VideoToolbox took
 the cap of 1.5 × the mean over 1 s), after
 `macos_encoder_low_latency_refused` when it retried without low-latency rate
-control. The app also warns
+control, and warns `macos_encoder_left_running` (`waited_ms`) when an
+encoder's submit thread was still inside a VideoToolbox call 250 ms after
+the encoder was dropped, and was left to finish on its own. The app also warns
 `desktop_connect_failed` with the typed failure, and a native decoder's
 failure is warned as `desktop_decoder_error` on `pb_mapper_desktop::frames`
 with its text as the detail. Each line names itself in an `event` field, and

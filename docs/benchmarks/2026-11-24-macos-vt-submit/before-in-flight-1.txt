@@ -1,0 +1,33 @@
+load: 12:05  up 2 days, 10:46, 3 users, load averages: 2.90 3.78 3.80
+    Finished `release` profile [optimized] target(s) in 0.09s
+     Running unittests src/lib.rs (target/release/deps/pb_mapper_desktop-091641b62e13cc64)
+
+running 1 test
+test platform::macos::tests::video_toolbox_in_flight ... codec=H264 size=3024x1964 pace=60 depth=4 bitrate=8806652 submitted_per_s=60.0 units_per_s=60.0 skipped_per_s=0.0 call_p50_us=34 call_p99_us=81 call_max_us=162 input_wait_p50_us=27 input_wait_p99_us=46 input_wait_max_us=137 dwell_p50_ms=12.95 dwell_p95_ms=14.21
+codec=H264 size=3024x1964 pace=60 depth=2 bitrate=8806652 submitted_per_s=60.0 units_per_s=60.0 skipped_per_s=0.0 call_p50_us=35 call_p99_us=73 call_max_us=79 input_wait_p50_us=26 input_wait_p99_us=44 input_wait_max_us=166 dwell_p50_ms=12.96 dwell_p95_ms=14.21
+codec=H264 size=3024x1964 pace=120 depth=4 bitrate=17613305 submitted_per_s=88.8 units_per_s=88.8 skipped_per_s=31.2 call_p50_us=29 call_p99_us=1623 call_max_us=1747 input_wait_p50_us=27 input_wait_p99_us=529 input_wait_max_us=1724 dwell_p50_ms=40.83 dwell_p95_ms=44.94
+codec=H264 size=3024x1964 pace=120 depth=2 bitrate=17613305 submitted_per_s=89.4 units_per_s=89.4 skipped_per_s=30.6 call_p50_us=30 call_p99_us=87 call_max_us=169 input_wait_p50_us=26 input_wait_p99_us=46 input_wait_max_us=374 dwell_p50_ms=17.97 dwell_p95_ms=21.92
+codec=H265 size=3024x1964 pace=60 depth=4 bitrate=8806652 submitted_per_s=60.0 units_per_s=60.0 skipped_per_s=0.0 call_p50_us=35 call_p99_us=63 call_max_us=85 input_wait_p50_us=26 input_wait_p99_us=45 input_wait_max_us=594 dwell_p50_ms=12.73 dwell_p95_ms=13.29
+codec=H265 size=3024x1964 pace=60 depth=2 bitrate=8806652 submitted_per_s=60.0 units_per_s=60.0 skipped_per_s=0.0 call_p50_us=17 call_p99_us=65 call_max_us=88 input_wait_p50_us=15 input_wait_p99_us=42 input_wait_max_us=91 dwell_p50_ms=11.43 dwell_p95_ms=13.02
+codec=H265 size=3024x1964 pace=120 depth=4 bitrate=17613305 submitted_per_s=92.4 units_per_s=92.4 skipped_per_s=27.6 call_p50_us=28 call_p99_us=1549 call_max_us=1747 input_wait_p50_us=27 input_wait_p99_us=449 input_wait_max_us=1580 dwell_p50_ms=38.88 dwell_p95_ms=45.31
+codec=H265 size=3024x1964 pace=120 depth=2 bitrate=17613305 submitted_per_s=92.8 units_per_s=92.6 skipped_per_s=27.2 call_p50_us=30 call_p99_us=95 call_max_us=394 input_wait_p50_us=26 input_wait_p99_us=44 input_wait_max_us=161 dwell_p50_ms=17.44 dwell_p95_ms=21.36
+codec=H264 size=3340x2160 pace=60 depth=4 bitrate=10189868 submitted_per_s=60.0 units_per_s=60.0 skipped_per_s=0.0 call_p50_us=34 call_p99_us=54 call_max_us=60 input_wait_p50_us=27 input_wait_p99_us=45 input_wait_max_us=264 dwell_p50_ms=15.35 dwell_p95_ms=16.56
+codec=H264 size=3340x2160 pace=60 depth=2 bitrate=10189868 submitted_per_s=60.0 units_per_s=60.0 skipped_per_s=0.0 call_p50_us=34 call_p99_us=69 call_max_us=110 input_wait_p50_us=26 input_wait_p99_us=46 input_wait_max_us=699 dwell_p50_ms=15.20 dwell_p95_ms=16.51
+codec=H264 size=3340x2160 pace=120 depth=4 bitrate=20379737 submitted_per_s=74.6 units_per_s=74.4 skipped_per_s=45.4 call_p50_us=29 call_p99_us=1954 call_max_us=2117 input_wait_p50_us=26 input_wait_p99_us=504 input_wait_max_us=6878 dwell_p50_ms=49.39 dwell_p95_ms=53.56
+codec=H264 size=3340x2160 pace=120 depth=2 bitrate=20379737 submitted_per_s=75.2 units_per_s=75.0 skipped_per_s=44.8 call_p50_us=31 call_p99_us=78 call_max_us=127 input_wait_p50_us=26 input_wait_p99_us=45 input_wait_max_us=10631 dwell_p50_ms=22.60 dwell_p95_ms=26.38
+codec=H265 size=3340x2160 pace=60 depth=4 bitrate=10189868 submitted_per_s=60.0 units_per_s=60.0 skipped_per_s=0.0 call_p50_us=36 call_p99_us=64 call_max_us=105 input_wait_p50_us=26 input_wait_p99_us=46 input_wait_max_us=324 dwell_p50_ms=15.00 dwell_p95_ms=15.63
+codec=H265 size=3340x2160 pace=60 depth=2 bitrate=10189868 submitted_per_s=60.0 units_per_s=60.0 skipped_per_s=0.0 call_p50_us=36 call_p99_us=93 call_max_us=271 input_wait_p50_us=27 input_wait_p99_us=48 input_wait_max_us=831 dwell_p50_ms=15.00 dwell_p95_ms=15.56
+codec=H265 size=3340x2160 pace=120 depth=4 bitrate=20379737 submitted_per_s=80.0 units_per_s=80.2 skipped_per_s=40.0 call_p50_us=23 call_p99_us=1745 call_max_us=1872 input_wait_p50_us=15 input_wait_p99_us=379 input_wait_max_us=1761 dwell_p50_ms=45.54 dwell_p95_ms=53.59
+codec=H265 size=3340x2160 pace=120 depth=2 bitrate=20379737 submitted_per_s=81.2 units_per_s=81.0 skipped_per_s=38.8 call_p50_us=12 call_p99_us=78 call_max_us=122 input_wait_p50_us=15 input_wait_p99_us=44 input_wait_max_us=633 dwell_p50_ms=20.39 dwell_p95_ms=24.74
+codec=H264 size=1920x1080 pace=60 depth=4 bitrate=4000020 submitted_per_s=60.0 units_per_s=60.0 skipped_per_s=0.0 call_p50_us=37 call_p99_us=133 call_max_us=471 input_wait_p50_us=26 input_wait_p99_us=52 input_wait_max_us=666 dwell_p50_ms=5.89 dwell_p95_ms=6.45
+codec=H264 size=1920x1080 pace=60 depth=2 bitrate=4000020 submitted_per_s=60.0 units_per_s=60.0 skipped_per_s=0.0 call_p50_us=34 call_p99_us=68 call_max_us=71 input_wait_p50_us=26 input_wait_p99_us=53 input_wait_max_us=1647 dwell_p50_ms=5.81 dwell_p95_ms=6.37
+codec=H264 size=1920x1080 pace=120 depth=4 bitrate=8000040 submitted_per_s=120.0 units_per_s=120.0 skipped_per_s=0.0 call_p50_us=31 call_p99_us=53 call_max_us=81 input_wait_p50_us=27 input_wait_p99_us=46 input_wait_max_us=266 dwell_p50_ms=5.78 dwell_p95_ms=6.27
+codec=H264 size=1920x1080 pace=120 depth=2 bitrate=8000040 submitted_per_s=120.0 units_per_s=120.0 skipped_per_s=0.0 call_p50_us=30 call_p99_us=57 call_max_us=348 input_wait_p50_us=26 input_wait_p99_us=44 input_wait_max_us=597 dwell_p50_ms=5.74 dwell_p95_ms=6.29
+codec=H265 size=1920x1080 pace=60 depth=4 bitrate=4000020 submitted_per_s=60.0 units_per_s=60.0 skipped_per_s=0.0 call_p50_us=36 call_p99_us=84 call_max_us=210 input_wait_p50_us=26 input_wait_p99_us=45 input_wait_max_us=879 dwell_p50_ms=5.74 dwell_p95_ms=6.47
+codec=H265 size=1920x1080 pace=60 depth=2 bitrate=4000020 submitted_per_s=60.0 units_per_s=60.0 skipped_per_s=0.0 call_p50_us=32 call_p99_us=79 call_max_us=300 input_wait_p50_us=24 input_wait_p99_us=44 input_wait_max_us=334 dwell_p50_ms=5.63 dwell_p95_ms=6.37
+codec=H265 size=1920x1080 pace=120 depth=4 bitrate=8000040 submitted_per_s=120.0 units_per_s=120.0 skipped_per_s=0.0 call_p50_us=11 call_p99_us=18 call_max_us=33 input_wait_p50_us=14 input_wait_p99_us=23 input_wait_max_us=44 dwell_p50_ms=4.54 dwell_p95_ms=4.75
+codec=H265 size=1920x1080 pace=120 depth=2 bitrate=8000040 submitted_per_s=120.0 units_per_s=120.0 skipped_per_s=0.0 call_p50_us=14 call_p99_us=49 call_max_us=85 input_wait_p50_us=15 input_wait_p99_us=41 input_wait_max_us=174 dwell_p50_ms=4.73 dwell_p95_ms=5.97
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 144.83s
+

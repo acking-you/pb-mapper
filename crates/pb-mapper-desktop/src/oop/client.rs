@@ -310,6 +310,11 @@ impl<T: Transport> Backend for RemoteBackend<T> {
     fn pending_video(&self) -> usize {
         self.pending
     }
+    /// The helper's answer carries no bound of its encoder's own: the
+    /// Windows encoder it runs has none below `pending_video`'s.
+    fn video_full(&self) -> bool {
+        false
+    }
     /// What the last capture's answer said: a worker whose source had no new
     /// picture leaves the tick armed, and thread C polls it.
     fn submitted_video(&self) -> bool {
