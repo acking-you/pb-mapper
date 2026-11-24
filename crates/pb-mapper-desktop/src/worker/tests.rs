@@ -4,8 +4,10 @@ use crate::{
     VideoFormat, VideoRate, error,
     idr::IdrReason,
     lane::LANE_CAPACITY,
-    modes::ModeCommand,
+    modes::{Journal, ModeCommand},
+    native::PlatformBackend,
     outgoing::HostUnit,
+    platform::synthetic::{Probe, Synthetic},
     shared::{Policy, Targets},
 };
 use parking_lot::Mutex;
@@ -47,6 +49,9 @@ struct Log {
     modes_set: Vec<crate::Mode>,
     /// Desktop reads, by context checks, the cursor and the injection boundary.
     contexts: u32,
+    /// Each pause and resume the backend heard of, with the capture calls
+    /// made before it.
+    paused: Vec<(bool, usize)>,
 }
 
 #[derive(Clone)]
@@ -272,6 +277,11 @@ impl Backend for Fake {
     }
     fn release(&mut self) {
         self.log.lock().releases += 1;
+    }
+    fn video_paused(&mut self, paused: bool) {
+        let mut log = self.log.lock();
+        let captures = log.captures.len();
+        log.paused.push((paused, captures));
     }
     fn double_click_guard(&mut self) -> Option<crate::DoubleClickGuard> {
         *self.guard.lock()
@@ -1525,4 +1535,254 @@ fn an_injected_input_brings_a_still_desktops_poll_in_and_keeps_it_active() {
     assert!(still.len() >= 12, "{} captures", still.len());
     let gaps = spacing(&still);
     assert!(gaps.iter().all(|gap| *gap == period), "{gaps:?}");
+}
+
+#[test]
+fn the_backend_hears_of_a_pause_once_each_way_and_not_while_a_viewer_watches() {
+    let mut h = Harness::new(true, None);
+    let paused = |h: &Harness| h.fake.log.lock().paused.clone();
+    h.run(Duration::from_millis(50), true);
+    assert!(paused(&h).is_empty());
+    // The only viewer pauses: once, however long; resuming says so before
+    // the capture that resumes.
+    h.shared.targets.paused.store(true, Ordering::Release);
+    h.run(Duration::from_millis(200), true);
+    let captured = h.captures().len();
+    assert_eq!(paused(&h), [(true, captured)]);
+    h.shared.targets.paused.store(false, Ordering::Release);
+    h.run(Duration::from_millis(50), true);
+    assert_eq!(paused(&h), [(true, captured), (false, captured)]);
+    assert!(h.captures().len() > captured);
+
+    // One of two viewers pausing pauses nothing; the second does.
+    let watcher = h.join_watcher(60);
+    h.run(Duration::from_millis(50), true);
+    watcher.targets.paused.store(true, Ordering::Release);
+    h.run(Duration::from_millis(100), true);
+    assert_eq!(paused(&h).len(), 2);
+    h.shared.targets.paused.store(true, Ordering::Release);
+    h.run(Duration::from_millis(100), true);
+    watcher.targets.paused.store(false, Ordering::Release);
+    h.run(Duration::from_millis(100), true);
+    let heard: Vec<bool> = paused(&h).iter().map(|(paused, _)| *paused).collect();
+    assert_eq!(heard, [true, false, true, false]);
+}
+
+/// Thread C on the synthetic platform's own backend, on a clock the test
+/// sets, with B-send taking every unit. A dated display's presents land as
+/// the clock reaches them, each waking thread C, as ScreenCaptureKit's do.
+struct Synth<const PUSH: bool> {
+    shared: Arc<SessionShared>,
+    engine: Engine<PlatformBackend<Synthetic<PUSH>>, Manual>,
+    now: Arc<Mutex<Instant>>,
+    probe: Probe,
+    /// Viewers that joined, whose units B-send takes too.
+    joined: Vec<Arc<SessionShared>>,
+}
+impl<const PUSH: bool> Synth<PUSH> {
+    /// `dated`: a display presenting at this rate, its presents this far
+    /// after the first tick's, give or take whole periods.
+    fn new(dated: Option<(f64, Duration)>) -> Self {
+        let start = Instant::now();
+        let now = Arc::new(Mutex::new(start));
+        let probe = Probe::default();
+        if let Some((hz, phase)) = dated {
+            let time = now.clone();
+            let epoch = start.checked_sub(Duration::from_secs(1)).unwrap() + phase;
+            probe.date(hz, epoch, Arc::new(move || *time.lock()));
+        }
+        let backend = PlatformBackend::<Synthetic<PUSH>>::open(
+            Arc::new(probe.clone()),
+            &Probe::display(),
+            Journal::default(),
+        )
+        .unwrap();
+        let shared = session(true);
+        let engine = Engine::start(&shared, backend, config(None), Manual(now.clone())).unwrap();
+        Self {
+            shared,
+            engine,
+            now,
+            probe,
+            joined: Vec::new(),
+        }
+    }
+    fn now(&self) -> Instant {
+        *self.now.lock()
+    }
+    /// Another viewer, at `limits`.
+    fn join(&mut self, limits: VideoLimits) -> Arc<SessionShared> {
+        let room = &self.engine.room;
+        let index = self.joined.len() + 1;
+        let slot = PeerSlot::new(index).unwrap();
+        let shared = Arc::new(SessionShared::new_in_room(
+            slot,
+            room.wake.clone(),
+            room.peer_cursors.clone(),
+            room.policy.clone(),
+            room.cancel.child_token(),
+            Targets::new(limits.max_fps, 4_000_000),
+        ));
+        room.set_slot(
+            slot,
+            index as u64 + 1,
+            RoomSlotConfig {
+                shared: shared.clone(),
+                color: PeerColor::new(slot.index()).unwrap(),
+                limits,
+                cursor_shapes: false,
+                peer_cursors: false,
+            },
+        );
+        self.joined.push(shared.clone());
+        shared
+    }
+    /// Iterate at every deadline and every present for `span`; the units
+    /// B-send took.
+    fn run(&mut self, span: Duration) -> Vec<HostUnit> {
+        let end = self.now() + span;
+        let mut sent = Vec::new();
+        let mut spins = 0;
+        loop {
+            let now = self.now();
+            self.probe.land(now);
+            let deadline = match self.engine.iterate() {
+                Step::Wait(deadline) => deadline,
+                Step::Exit(exit) => panic!("thread C exited: {exit:?}"),
+            };
+            sent.extend(std::iter::from_fn(|| self.shared.outgoing.pop()));
+            for joined in &self.joined {
+                while joined.outgoing.pop().is_some() {}
+            }
+            let next = self
+                .probe
+                .next_present(now)
+                .map_or(deadline, |present| present.min(deadline));
+            if next > end {
+                *self.now.lock() = end;
+                return sent;
+            }
+            spins = if next > now { 0 } else { spins + 1 };
+            assert!(spins < 1000, "thread C spins without waiting");
+            *self.now.lock() = next.max(now);
+        }
+    }
+    /// From each present to the capture that took it, after the first
+    /// `settle` takes.
+    fn waits(&self, settle: usize) -> Vec<Duration> {
+        self.probe
+            .takes()
+            .iter()
+            .skip(settle)
+            .map(|(presented, taken)| *taken - *presented)
+            .collect()
+    }
+}
+
+/// A display presenting a little faster than the pace, or at the pace with
+/// a clock 100 ppm fast, is captured as each present lands, whatever its
+/// phase against the first tick once the timeline has crept onto it, and no
+/// present is replaced before a capture takes it. On an even grid both
+/// would wait for the tick, ever longer, until one was replaced.
+#[test]
+fn a_dated_display_at_the_pace_is_captured_as_it_presents() {
+    let period = Duration::from_secs(1) / 60;
+    for hz in [60.05, 60.0 * (1.0 + 100e-6)] {
+        for phase in [period / 10, period / 2, period * 9 / 10] {
+            let mut h = Synth::<true>::new(Some((hz, phase)));
+            let sent = h.run(Duration::from_secs(10));
+            assert!(sent.len() >= 599, "{hz} Hz: {} units", sent.len());
+            let waits = h.waits(64);
+            assert!(waits.len() >= 530, "{hz} Hz: {} takes", waits.len());
+            assert!(
+                waits.iter().all(|wait| wait.is_zero()),
+                "{hz} Hz, phase {phase:?}: {:?}",
+                waits.iter().max()
+            );
+            assert_eq!(h.probe.replaced(), 0, "{hz} Hz, phase {phase:?}");
+        }
+    }
+}
+
+/// A display at the pace whose presents land a millisecond before the grid's
+/// ticks: from the second picture on, each is captured as it lands, where
+/// the grid made each wait the millisecond.
+#[test]
+fn a_present_a_millisecond_before_the_tick_is_captured_as_it_lands() {
+    let period = Duration::from_secs(1) / 60;
+    let mut h = Synth::<true>::new(Some((60.0, period - Duration::from_millis(1))));
+    h.run(Duration::from_secs(2));
+    let takes = h.probe.takes();
+    let (presented, taken) = takes[0];
+    let first = taken - presented;
+    assert!(first.abs_diff(Duration::from_millis(1)) < Duration::from_micros(1));
+    let waits = h.waits(1);
+    assert!(waits.len() >= 115, "{} takes", waits.len());
+    assert!(waits.iter().all(|wait| wait.is_zero()), "{waits:?}");
+}
+
+/// A viewer joining or pausing that changes only the frame-rate limit keeps
+/// the capture source, with an IDR for the change; a smaller size builds
+/// another.
+#[test]
+fn a_frame_rate_change_keeps_the_source_and_a_size_change_rebuilds_it() {
+    let mut h = Synth::<false>::new(None);
+    h.run(Duration::from_millis(100));
+    assert_eq!(h.probe.opened(), 1);
+    let watcher = h.join(VideoLimits {
+        max_fps: 30,
+        ..LIMITS
+    });
+    h.run(Duration::from_millis(100));
+    assert_eq!(h.engine.limits.max_fps, 30);
+    assert_eq!(h.probe.opened(), 1);
+    // The watcher pausing gives the frame rate back.
+    watcher.targets.paused.store(true, Ordering::Release);
+    let sent = h.run(Duration::from_millis(100));
+    assert_eq!(h.engine.limits, LIMITS);
+    assert_eq!(h.probe.opened(), 1);
+    assert!(sent.iter().any(|unit| unit.keyframe));
+
+    h.join(VideoLimits {
+        max_width: 32,
+        max_height: 24,
+        ..LIMITS
+    });
+    h.run(Duration::from_millis(100));
+    assert_eq!(h.engine.limits.max_width, 32);
+    assert_eq!(h.probe.opened(), 2);
+}
+
+/// A recovery builds a fresh capture source, as the backend contract asks,
+/// also when the viewers' limits changed only their frame rate while capture
+/// was unavailable, which outside an outage keeps the source.
+#[test]
+fn a_recovery_builds_a_new_source_even_after_a_frame_rate_change_meanwhile() {
+    let mut h = Synth::<false>::new(None);
+    h.run(Duration::from_millis(100));
+    assert_eq!(h.probe.opened(), 1);
+    // The display goes away and comes back with the same limits.
+    h.probe.lose(true);
+    h.run(Duration::from_millis(300));
+    assert!(h.engine.unavailable.is_some());
+    h.probe.lose(false);
+    h.run(Duration::from_millis(300));
+    assert!(h.engine.unavailable.is_none());
+    assert_eq!(h.probe.opened(), 2);
+
+    // Again, with a watcher at a lower frame rate joining meanwhile.
+    h.probe.lose(true);
+    h.run(Duration::from_millis(300));
+    assert!(h.engine.unavailable.is_some());
+    h.join(VideoLimits {
+        max_fps: 30,
+        ..LIMITS
+    });
+    h.run(Duration::from_millis(300));
+    assert_eq!(h.engine.limits.max_fps, 30);
+    h.probe.lose(false);
+    let sent = h.run(Duration::from_millis(300));
+    assert!(h.engine.unavailable.is_none());
+    assert_eq!(h.probe.opened(), 3);
+    assert!(sent.first().is_some_and(|unit| unit.keyframe));
 }

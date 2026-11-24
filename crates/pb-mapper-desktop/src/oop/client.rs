@@ -341,6 +341,18 @@ impl<T: Transport> Backend for RemoteBackend<T> {
     fn drain_poll(&self) -> Option<std::time::Duration> {
         Some(crate::DRAIN_POLL)
     }
+    /// The worker's capture is polled as its output is.
+    fn capture_poll(&self) -> Option<std::time::Duration> {
+        self.drain_poll()
+    }
+    /// The helper's answer carries no present time (protocol 10): its
+    /// pictures pace on the grid.
+    fn submitted_picture(&self) -> Option<crate::Presented> {
+        None
+    }
+    /// Nothing to tell the worker: its DXGI capture is pulled, and runs only
+    /// when asked.
+    fn video_paused(&mut self, _paused: bool) {}
     fn input(&mut self, input: &Input) -> Result<()> {
         let context = self
             .context

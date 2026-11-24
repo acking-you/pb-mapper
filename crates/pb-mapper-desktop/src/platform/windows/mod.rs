@@ -19,8 +19,8 @@ pub(crate) mod win32;
 
 use super::{HostSupport, Parts, Platform, UnsupportedReason, VideoSource};
 use crate::{
-    DRAIN_POLL, Display, DisplaySelection, EncodedFrame, HostOs, Result, VideoCodec, VideoLimits,
-    VideoRate, Waker,
+    DRAIN_POLL, Display, DisplaySelection, EncodedFrame, HostOs, Presented, Result, VideoCodec,
+    VideoLimits, VideoRate, Waker,
 };
 use std::{
     future::Future,
@@ -143,6 +143,10 @@ impl VideoSource for video::Encoder {
     /// armed, and thread C asks again.
     fn submit(&mut self, keyframe: bool) -> Result<bool> {
         video::Encoder::submit(self, keyframe).map(video::Submit::spends_tick)
+    }
+    /// A new picture, dated by DXGI's `LastPresentTime`.
+    fn presented(&self) -> Option<Presented> {
+        video::Encoder::presented(self)
     }
     fn drain(&mut self) -> Result<Option<EncodedFrame>> {
         video::Encoder::drain(self).map(|image| image.map(Into::into))
