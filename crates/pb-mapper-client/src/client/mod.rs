@@ -260,6 +260,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
         },
     };
 
+    // One consumer, with its own pauses, for every stream the listener accepts.
     #[cfg(feature = "p2p")]
     let direct = direct.map(|policy| {
         crate::direct::Consumer::new(
@@ -270,6 +271,7 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
             keep_alive,
             diagnostics.clone(),
             policy,
+            crate::direct::PauseScope::Own,
         )
     });
     #[cfg(not(feature = "p2p"))]
@@ -401,6 +403,10 @@ pub(crate) async fn run_client_side_cli_recovering_with_path<LocalListener: List
 /// `connect_tcp`: set it up as a listener's stream would be, report it
 /// connected once it is or failed if its setup fails, and forward it. Nothing
 /// is set up again after that.
+///
+/// Its direct setup goes by the pauses `memory`, its client's, keeps for the
+/// service, and leaves there what it learns of the path for the client's next
+/// streams: see [`PauseScope::Client`](crate::direct::PauseScope::Client).
 #[expect(
     clippy::too_many_arguments,
     reason = "the SDK starts a stream with each of its settings"
@@ -416,10 +422,14 @@ pub(crate) async fn run_owned_stream(
     shutdown: CancellationToken,
     diagnostics: Diagnostics,
     direct: Option<DirectPolicy>,
+    #[cfg(feature = "p2p")] memory: Arc<parking_lot::Mutex<crate::direct::DirectMemory>>,
 ) {
     remote_addr.start();
     #[cfg(feature = "p2p")]
     let direct = direct.map(|policy| {
+        let pauses = memory
+            .lock()
+            .pauses(&key, Instant::now(), remote_addr.network_generation());
         crate::direct::Consumer::new(
             remote_addr.clone(),
             credential,
@@ -428,6 +438,7 @@ pub(crate) async fn run_owned_stream(
             keep_alive,
             diagnostics.clone(),
             policy,
+            crate::direct::PauseScope::Client(pauses),
         )
     });
     #[cfg(not(feature = "p2p"))]

@@ -1,28 +1,32 @@
 use super::{
     binding,
     conn::DirectConn,
-    consumer::{COOLDOWN_INITIAL, COOLDOWN_MAX, Consumer, Cooldown, DataPath, Prepared},
+    consumer::{Consumer, DataPath, PUNCH_BUDGET, Prepared},
     endpoint::{Arrival, InterfaceSource, Network},
     lan::{Assessment, Interface, Interfaces},
+    memory::{
+        COOLDOWN_INITIAL, COOLDOWN_MAX, Cooldown, DirectMemory, MAX_SERVICES, PauseScope,
+        SharedPauses,
+    },
     tcp,
 };
 use crate::{
     diagnostics::{
-        ByteCount, Diagnostics, InterfaceTier, LanEvidence, LanTcpMiss, LinkKind, StunOutcome,
-        TunnelEventKind,
+        ByteCount, Diagnostics, FallbackReason, InterfaceTier, LanEvidence, LanTcpMiss, LinkKind,
+        StunOutcome, TunnelEventKind,
     },
     endpoint::RelayEndpoint,
     relay::RelayTransport,
     sdk::{
-        Client, LanTransport, PortMapping, RegisterOptions, RegisterRequest, Registration,
-        Transport,
+        Client, ConnectOptions, Connection, LanTransport, PathPolicy, PortMapping, RegisterOptions,
+        RegisterRequest, Registration, Transport,
     },
     test_relay::TestRelay,
 };
 use pb_mapper_core::config::ResolvedAddrs;
 use pb_mapper_protocol::direct::*;
 use pb_mapper_server::DirectServerConfig;
-use std::{io, sync::Arc, time::Duration};
+use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -62,6 +66,46 @@ fn fallback_cooldown_doubles_to_its_cap_and_clears() {
     assert!(!cooldown.active(now));
     cooldown.back_off(now);
     assert!(!cooldown.active(now + COOLDOWN_INITIAL));
+}
+
+/// A client keeps the pauses of [`MAX_SERVICES`] services at most. Past it,
+/// those that no call holds and that hold nothing back on this network go
+/// first, however late they end, so a running pause and a running call's
+/// outlive them; with every service paused, the pause that ends soonest goes.
+#[test]
+fn direct_memory_is_bounded_and_keeps_running_pauses_longest() {
+    let now = Instant::now();
+    // Pause `service` from `at`, on network `generation`.
+    let pause = |memory: &mut DirectMemory, service: &str, generation: u64, at: Instant| {
+        let pauses = memory.pauses(service, now, generation);
+        let mut entry = pauses.lock();
+        entry.on_network(generation);
+        entry.direct.back_off(at);
+        drop(entry);
+        pauses
+    };
+    let later = now + Duration::from_secs(1);
+
+    let mut memory = DirectMemory::default();
+    pause(&mut memory, "paused", 1, now);
+    let held = memory.pauses("held", now, 1);
+    for service in 2..MAX_SERVICES {
+        pause(&mut memory, &service.to_string(), 0, later);
+    }
+    assert_eq!(memory.len(), MAX_SERVICES);
+    memory.pauses("new", now, 1);
+    assert_eq!(memory.len(), 3);
+    assert!(memory.pauses("paused", now, 1).lock().direct.active(now));
+    assert!(Arc::ptr_eq(&memory.pauses("held", now, 1), &held));
+
+    let mut memory = DirectMemory::default();
+    let soonest = pause(&mut memory, "soonest", 1, now);
+    for service in 1..MAX_SERVICES {
+        pause(&mut memory, &service.to_string(), 1, later);
+    }
+    memory.pauses("new", now, 1);
+    assert_eq!(memory.len(), MAX_SERVICES);
+    assert!(!Arc::ptr_eq(&memory.pauses("soonest", now, 1), &soonest));
 }
 
 /// A loopback relay that offers direct, with a share of a local TCP backend
@@ -134,6 +178,7 @@ impl Share {
                 lan_transport,
                 lan_tcp: false,
             },
+            PauseScope::Own,
         );
         consumer
             .network
@@ -603,6 +648,254 @@ async fn relay_recovery_preserves_direct_cooldown_until_network_changes() {
         registration.stop().await.unwrap();
         drop(echo);
         drop(relay);
+    })
+    .await
+    .unwrap();
+}
+
+/// A `connect_tcp`'s fallback pauses its client's direct only once the relay
+/// carries the connection. One that ran out of time against a relay that
+/// never answers, as in an outage, leaves the pause alone.
+#[tokio::test]
+async fn a_client_pause_waits_for_the_relay_to_carry_the_fallback() {
+    let silent = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let pauses = SharedPauses::default();
+    let diagnostics = Diagnostics::default();
+    let mut events = diagnostics.subscribe();
+    let consumer = Consumer::new(
+        RelayEndpoint::fixed(ResolvedAddrs::from(silent.local_addr().unwrap())),
+        pb_mapper_core::checksum::Credential::Admin(pb_mapper_core::checksum::gen_random_key()),
+        None,
+        false,
+        true,
+        diagnostics,
+        crate::direct_policy::DirectPolicy {
+            port_mapping: PortMapping::Off,
+            lan_first: true,
+            lan_transport: LanTransport::Quic,
+            lan_tcp: false,
+        },
+        PauseScope::Client(pauses.clone()),
+    );
+
+    let prepared = consumer
+        .prepare("silent", Instant::now() + Duration::from_millis(200))
+        .await
+        .unwrap();
+    assert!(prepared.is_none());
+    let reason = next(&mut events, |kind| match kind {
+        TunnelEventKind::DirectFallback { reason, .. } => Some(reason),
+        _ => None,
+    })
+    .await;
+    assert_eq!(reason, FallbackReason::NegotiationTimeout);
+    assert!(!pauses.lock().direct.active(Instant::now()));
+
+    consumer.relay_carried();
+    assert!(pauses.lock().direct.active(Instant::now()));
+}
+
+/// A loopback relay, offering direct if `direct`, and a TCP backend for its
+/// services that echoes the first byte of each connection.
+async fn echo_relay(label: &str, direct: bool) -> (TestRelay, SocketAddr, AbortOnDropHandle<()>) {
+    let relay = TestRelay::start(
+        label,
+        direct.then(|| DirectServerConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            advertise: "127.0.0.1:0".parse().unwrap(),
+        }),
+    )
+    .await;
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_addr = backend.local_addr().unwrap();
+    let echo = AbortOnDropHandle::new(tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = backend.accept().await.unwrap();
+            let mut byte = [0; 1];
+            stream.read_exact(&mut byte).await.unwrap();
+            stream.write_all(&byte).await.unwrap();
+        }
+    }));
+    (relay, backend_addr, echo)
+}
+
+/// Publish `backend` as `key` on `relay`, allowing direct.
+async fn publish_direct(relay: &TestRelay, key: &str, backend: SocketAddr) -> Registration {
+    let publisher = Client::from_credential(relay.addr.to_string(), relay.credential, false, None);
+    let registration = publisher
+        .register_with_options(
+            RegisterRequest {
+                key: key.into(),
+                local_addr: backend.to_string(),
+                transport: Transport::Tcp,
+                codec: true,
+                force_namespace: false,
+            },
+            RegisterOptions {
+                allow_direct: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    registration
+        .wait_ready_timeout(Duration::from_secs(5))
+        .await
+        .unwrap();
+    registration
+}
+
+/// What `connect_tcp` to `key` asks for in these tests: direct first, over
+/// QUIC, without a gateway.
+fn direct_first() -> ConnectOptions {
+    ConnectOptions {
+        path: PathPolicy::Auto,
+        port_mapping: PortMapping::Off,
+        lan_first: true,
+        lan_transport: LanTransport::Quic,
+    }
+}
+
+/// `connect_tcp` to `key` through `client`, and the time to its first
+/// echoed byte.
+async fn connect_tcp_first_byte(client: &Client, key: &str) -> (Duration, Connection) {
+    let started = Instant::now();
+    let (mut stream, connection) = client.connect_tcp(key, direct_first()).await.unwrap();
+    stream.write_all(b"x").await.unwrap();
+    let mut byte = [0; 1];
+    stream.read_exact(&mut byte).await.unwrap();
+    assert_eq!(&byte, b"x");
+    (started.elapsed(), connection)
+}
+
+/// The direct sessions, fallbacks and cooldown skips of `connection`.
+fn direct_counts(connection: &Connection) -> (u64, u64, u64) {
+    let direct = connection.diagnostics().direct.unwrap_or_default();
+    (
+        direct.direct_sessions,
+        direct.fallbacks,
+        connection.metrics().cooldown_skips,
+    )
+}
+
+/// Each `connect_tcp` sets up a consumer of its own, yet a fallback in one
+/// pauses direct for the client's next to the service: that one takes the
+/// relay at once instead of spending the punch budget again, and says why.
+/// A network change clears the pause.
+#[tokio::test]
+async fn a_fallback_pauses_direct_for_the_clients_next_connect_tcp() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (relay, backend, _echo) = echo_relay("connect-tcp-pause", true).await;
+        let registration = publish_direct(&relay, "paused", backend).await;
+
+        // A client on a network of its own, which this test changes, whose
+        // direct endpoints get no QUIC packet out: no punch succeeds.
+        let mut client =
+            Client::from_credential(relay.addr.to_string(), relay.credential, false, None);
+        Arc::get_mut(&mut client.inner).unwrap().endpoint =
+            RelayEndpoint::isolated(relay.addr.into());
+        let endpoint = client.inner.endpoint.clone();
+        client
+            .inner
+            .direct_memory
+            .lock()
+            .pauses("paused", Instant::now(), endpoint.network_generation())
+            .lock()
+            .block_quic = true;
+
+        let (fell_back, first) = connect_tcp_first_byte(&client, "paused").await;
+        assert_eq!(direct_counts(&first), (0, 1, 0));
+        assert!(first.metrics().direct_cooldown_ms.is_some());
+
+        let (skipped, second) = connect_tcp_first_byte(&client, "paused").await;
+        assert_eq!(direct_counts(&second), (0, 0, 1));
+        assert!(second.metrics().direct_cooldown_ms.is_some());
+        // The fallback spent the punch budget, the skip next to none of it.
+        // The counts above are what is exact: a busy machine slows the relay.
+        assert!(fell_back >= PUNCH_BUDGET, "{fell_back:?}");
+        assert!(skipped < PUNCH_BUDGET / 2, "{skipped:?}");
+
+        endpoint.notify_network_change();
+        let (retried, third) = connect_tcp_first_byte(&client, "paused").await;
+        assert_eq!(direct_counts(&third), (0, 1, 0));
+        assert!(retried >= PUNCH_BUDGET, "{retried:?}");
+        eprintln!(
+            "connect_tcp to the first byte: {fell_back:?} falling back, \
+             {skipped:?} inside the pause, {retried:?} after a network change"
+        );
+
+        for connection in [first, second, third] {
+            connection.stop().await.unwrap();
+        }
+        registration.stop().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// A `connect_tcp` made while its publisher is away falls back without a
+/// grant, which says nothing of the path, even when the publisher is back in
+/// time for the relay to carry that call: the client's next call goes
+/// direct instead of spending its whole session on the relay.
+#[tokio::test]
+async fn a_connect_tcp_that_finds_no_publisher_leaves_the_next_direct() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (relay, backend, _echo) = echo_relay("connect-tcp-away", true).await;
+        let client = Client::from_credential(relay.addr.to_string(), relay.credential, false, None);
+
+        let (mut stream, away) = client.connect_tcp("away", direct_first()).await.unwrap();
+        let mut events = away.subscribe_events();
+        let reason = loop {
+            if let TunnelEventKind::DirectFallback { reason, .. } =
+                events.recv().await.unwrap().unwrap().kind
+            {
+                break reason;
+            }
+        };
+        assert_eq!(reason, FallbackReason::NotOffered);
+        // Back while that call still retries its subscription.
+        let registration = publish_direct(&relay, "away", backend).await;
+        stream.write_all(b"x").await.unwrap();
+        let mut byte = [0; 1];
+        stream.read_exact(&mut byte).await.unwrap();
+        assert_eq!(&byte, b"x");
+        assert_eq!(direct_counts(&away), (0, 1, 0));
+        assert_eq!(
+            away.diagnostics().direct.unwrap_or_default().relay_sessions,
+            1
+        );
+
+        let (_, back) = connect_tcp_first_byte(&client, "away").await;
+        assert_eq!(direct_counts(&back), (1, 0, 0));
+
+        for connection in [away, back] {
+            connection.stop().await.unwrap();
+        }
+        registration.stop().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// A relay without direct is so for every call: once it has carried the
+/// first `connect_tcp`, the client's next goes to it without asking.
+#[tokio::test]
+async fn a_relay_without_direct_pauses_the_clients_next_connect_tcp() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (relay, backend, _echo) = echo_relay("connect-tcp-relay-only", false).await;
+        let registration = publish_direct(&relay, "relayed", backend).await;
+        let client = Client::from_credential(relay.addr.to_string(), relay.credential, false, None);
+
+        let (_, first) = connect_tcp_first_byte(&client, "relayed").await;
+        assert_eq!(direct_counts(&first), (0, 1, 0));
+        assert!(first.metrics().direct_cooldown_ms.is_some());
+        let (_, second) = connect_tcp_first_byte(&client, "relayed").await;
+        assert_eq!(direct_counts(&second), (0, 0, 1));
+
+        for connection in [first, second] {
+            connection.stop().await.unwrap();
+        }
+        registration.stop().await.unwrap();
     })
     .await
     .unwrap();

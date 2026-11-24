@@ -1,0 +1,15 @@
+run 1
+baseline connect_tcp to the first byte: 2.028999958s falling back, 2.022697125s for the next call (fallbacks 1, 1; cooldown skips 0)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 90 filtered out; finished in 4.08s
+run 2
+baseline connect_tcp to the first byte: 2.034567917s falling back, 2.027115667s for the next call (fallbacks 1, 1; cooldown skips 0)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 90 filtered out; finished in 4.08s
+run 3
+baseline connect_tcp to the first byte: 2.0288485s falling back, 2.02513575s for the next call (fallbacks 1, 1; cooldown skips 0)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 90 filtered out; finished in 4.07s
+run 4
+baseline connect_tcp to the first byte: 2.031195208s falling back, 2.023576416s for the next call (fallbacks 1, 1; cooldown skips 0)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 90 filtered out; finished in 4.07s
+run 5
+baseline connect_tcp to the first byte: 2.032506375s falling back, 2.0255365s for the next call (fallbacks 1, 1; cooldown skips 0)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 90 filtered out; finished in 4.07s
