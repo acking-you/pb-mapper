@@ -7,11 +7,13 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
+import 'package:pb_mapper_ui/src/ffi/desktop_video.dart' show VideoPlacement;
 import 'package:pb_mapper_ui/src/pages/remote/viewer/decoder_hint.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_keyboard.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_viewer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/minimap.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/modifier_latch.dart';
+import 'package:pb_mapper_ui/src/pages/remote/viewer/native_video_hole.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/quality_panel.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_cursor_layer.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/remote_input.dart';
@@ -467,6 +469,117 @@ void main() {
     expect(greys, [true, false, true]);
     await tester.pumpWidget(const SizedBox.shrink());
     expect(greys, [true, false, true, false]);
+
+    input.dispose();
+    machine.dispose();
+    viewport.dispose();
+    latch.dispose();
+    store.dispose();
+  });
+
+  testWidgets('a picture the runner draws on its plane leaves a hole where '
+      'the texture would be, places the plane there, greys it natively and '
+      'hides it when the stage goes', (tester) async {
+    _size(tester, const Size(1280, 800));
+    final store = DesktopStore(FakeDesktopApi());
+    final latch = ModifierLatch();
+    final viewport = RemoteViewport();
+    final prefs = ViewerPrefs(persist: false);
+    final touchMode = ValueNotifier(TouchMode.direct);
+    late final TouchGestureMachine machine;
+    final input = RemoteInput(
+      desktop: store,
+      latch: latch,
+      onLocalCancel: () => machine.cancel(Duration.zero),
+    );
+    machine = TouchGestureMachine(
+      sink: input,
+      viewport: viewport,
+      mode: () => touchMode.value,
+      interactive: () => input.ready.value,
+      haptic: (_) {},
+    );
+    final session = ValueNotifier(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.live,
+        hasPicture: true,
+      ),
+    );
+    final picture = ValueNotifier<DesktopPicture?>(
+      const DesktopPicture(
+        textureId: 7,
+        plane: true,
+        aspectRatio: 16 / 9,
+        codec: 'h264',
+      ),
+    );
+    final greys = <bool>[];
+    final placed = <(int, VideoPlacement)>[];
+    await tester.pumpWidget(
+      _app(
+        ViewerStage(
+          session: session,
+          geometry: ValueNotifier(null),
+          picture: picture,
+          jpegImage: ValueNotifier(null),
+          stats: ValueNotifier(DesktopStats.none),
+          viewport: viewport,
+          input: input,
+          machine: machine,
+          touchMode: touchMode,
+          title: 'Office',
+          greyPicture: (on) async => greys.add(on),
+          placePicture: (id, placement) async => placed.add((id, placement)),
+          actions: ViewerActions(
+            desktop: store,
+            input: input,
+            prefs: prefs,
+            viewport: viewport,
+            onDisconnect: () async {},
+            onQuality: (_) {},
+            onResolution: (_) {},
+            onMaxFps: (_) {},
+            onDisplayMode: (_) {},
+            onTypeText: () {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // The hole, in the texture's place: the picture fitted to the stage.
+    expect(find.byType(Texture), findsNothing);
+    expect(find.byType(NativeVideoHole), findsOneWidget);
+    final (id, placement) = placed.last;
+    expect(id, 7);
+    expect(placement.visible, isTrue);
+    final fitted = tester.getRect(find.byType(NativeVideoHole));
+    expect(placement.picture, fitted);
+    expect(
+      placement.clip,
+      fitted.intersect(Offset.zero & const Size(1280, 800)),
+    );
+    final hole = tester.element(find.byType(NativeVideoHole));
+
+    // Lost: the runner greys the plane; no Flutter filter is laid over
+    // what it cannot reach. The hole stays.
+    session.value = DesktopSessionView(
+      target: _target,
+      phase: DesktopPhase.reconnecting,
+      hasPicture: true,
+      reconnectAttempt: 1,
+      retryAt: DateTime.now().add(const Duration(seconds: 2)),
+    );
+    await tester.pump();
+    expect(greys, [true]);
+    expect(find.byType(BackdropFilter), findsNothing);
+    expect(tester.element(find.byType(NativeVideoHole)), same(hole));
+
+    // A stage that goes takes its grey back and hides the plane.
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(greys, [true, false]);
+    expect(placed.last, (7, VideoPlacement.hidden));
 
     input.dispose();
     machine.dispose();

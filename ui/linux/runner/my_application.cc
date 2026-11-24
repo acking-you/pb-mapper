@@ -7,6 +7,7 @@
 
 #include "desktop_pointer.h"
 #include "desktop_video.h"
+#include "desktop_video_plane.h"
 #include "flutter/generated_plugin_registrant.h"
 
 struct _MyApplication {
@@ -59,14 +60,31 @@ static void my_application_activate(GApplication* application) {
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(project, self->dart_entrypoint_arguments);
+  // Flutter runs Dart on the GTK thread, where the video plane draws too, so
+  // a long Dart frame holds the plane's next picture back.
+  // PB_MAPPER_UI_THREAD=separate gives Dart a thread of its own; channel
+  // calls still reach the runner on the GTK thread. It changes the threading
+  // of every plugin, so it stays a switch for the plane's A/B run
+  // (scripts/test/desktop-ui-acceptance.md) until a device has measured it.
+  if (g_strcmp0(g_getenv("PB_MAPPER_UI_THREAD"), "separate") == 0) {
+    fl_dart_project_set_ui_thread_policy(project, FL_UI_THREAD_POLICY_RUN_ON_SEPARATE_THREAD);
+  }
 
   FlView* view = fl_view_new(project);
   GdkRGBA background_color;
   // Background defaults to black, override it here if necessary, e.g. #00000000 for transparent.
+  // The video plane makes it transparent while it shows.
   gdk_rgba_parse(&background_color, "#000000");
   fl_view_set_background_color(view, &background_color);
   gtk_widget_show(GTK_WIDGET(view));
-  gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(view));
+  // The remote desktop's video plane under the view (desktop_video_plane.cc):
+  // hidden until a viewer that asked for it places a picture.
+  GtkWidget* overlay = gtk_overlay_new();
+  GtkWidget* plane = pb_plane_area_new(view);
+  gtk_container_add(GTK_CONTAINER(overlay), plane);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(view));
+  gtk_widget_show(overlay);
+  gtk_container_add(GTK_CONTAINER(window), overlay);
 
   // Show the window when Flutter renders.
   // Requires the view to be realized so we can start rendering.
@@ -74,7 +92,7 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_realize(GTK_WIDGET(view));
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
-  desktop_video_register(view);
+  desktop_video_register(view, plane);
   desktop_pointer_register(view);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));

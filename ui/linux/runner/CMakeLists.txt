@@ -11,6 +11,7 @@ add_executable(${BINARY_NAME}
   "my_application.cc"
   "desktop_video.cc"
   "desktop_video_gl.cc"
+  "desktop_video_plane.cc"
   "desktop_pointer.cc"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
 )
@@ -28,7 +29,8 @@ target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::GTK)
 # desktop_video.cc loads the decoder module and the FFI library at run time.
 target_link_libraries(${BINARY_NAME} PRIVATE ${CMAKE_DL_LIBS})
 # desktop_video_gl.cc converts decoded pictures in Flutter's EGL and GL ES
-# context through libepoxy, which GTK and Flutter's embedder already load.
+# context, or in the video plane's GDK context (desktop_video_plane.cc),
+# through libepoxy, which GTK and Flutter's embedder already load.
 pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
 target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::EPOXY)
 

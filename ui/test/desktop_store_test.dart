@@ -1824,4 +1824,40 @@ void main() {
       }
     },
   );
+
+  testWidgets('a picture the runner draws on its plane says so, and the plane '
+      'is placed by its texture\'s id and greyed; a texture takes neither', (
+    tester,
+  ) async {
+    const placement = VideoPlacement(
+      visible: true,
+      picture: Rect.fromLTWH(0, 40, 1920, 1080),
+      clip: Rect.fromLTWH(0, 40, 1600, 900),
+    );
+    for (final plane in [false, true]) {
+      final api = FakeDesktopApi()..codec = 'h264';
+      final textures = FakeTextures()..plane = plane;
+      final store = DesktopStore(api, textures: textures.create);
+      final viewer = store.demand(DesktopDemand.viewer);
+      await _live(tester, store, api);
+      final texture = textures.created.single;
+      expect(store.picture.value?.textureId, texture.textureId);
+      expect(store.picture.value?.plane, plane);
+
+      await store.placePicture(texture.textureId, placement);
+      // A hole another texture left places nothing.
+      await store.placePicture(texture.textureId + 1, VideoPlacement.hidden);
+      await store.greyPicture(true);
+      expect(texture.placements, plane ? [placement] : isEmpty);
+      expect(texture.greys, plane ? [true] : isEmpty);
+
+      // Gone with its texture: nothing left to place.
+      await store.disconnect();
+      await store.placePicture(texture.textureId, VideoPlacement.hidden);
+      expect(texture.placements, hasLength(plane ? 1 : 0));
+
+      viewer.dispose();
+      store.dispose();
+    }
+  });
 }
