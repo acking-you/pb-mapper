@@ -853,11 +853,24 @@ refused over such a grant (`HELPER_OUTDATED`, `HELPER_FOREIGN_APP`), since
 configuring it from here would replace its view-only, relay-only or paused
 policy, and under another service name its invitation.
 
-Protocol 10 is the current one, with the pipes
-`pb-mapper.desktop-helper.v10` and `pb-mapper.desktop-background.v10`. It
-adds `submitted` to the answer of a `Video` request that captures: `false`
-when the worker's source had no new picture to submit, so the host's thread C
-keeps its tick armed and asks again (see
+Protocol 11 is the current one, with the pipes
+`pb-mapper.desktop-helper.v11` and `pb-mapper.desktop-background.v11`. It
+adds `Request::Adapter`, which the host sends only for a viewer that decodes
+H.265, just before it would ask `Request::H265`: the worker answers with the
+GPU that drives its display and that GPU's driver (`adapter`: the adapter's
+vendor, device, subsystem and revision ids from DXGI, and the user-mode
+driver's version). The answer to `Request::H265` names the GPU in `adapter`
+too, but only when that answer is the worker's probe of it; the host keeps
+the answer under that GPU for later workers (see
+[H.265 and H.264](#h265-and-h264)). The worker sends a key only with a vendor
+and a driver version, and the host refuses an answer whose key lacks either;
+a worker that cannot name its GPU leaves `adapter` out. `Start` is
+unchanged, so a session whose viewer does not decode H.265 costs the worker
+no DXGI query for it.
+
+Protocol 10 added `submitted` to the answer of a `Video` request that
+captures: `false` when the worker's source had no new picture to submit, so
+the host's thread C keeps its tick armed and asks again (see
 [Host: capture and encoding](#host-capture-and-encoding)). It is sent only
 then; absent, the capture took the tick, or spent it on a full encoder.
 Protocol 9 added `HostStatus.viewers` to the background host's status, for
@@ -2161,6 +2174,35 @@ once kept; the session's encoder then took about 200 ms to build, against
 280 ms for a cold H.264 one, so most of the probe is start-up the encoder
 would pay anyway.
 
+Each session through the helper runs in a fresh worker, which would probe
+cold every time, while the host that asks it (the app, or the background
+host in the service) outlives its workers. So the host keeps each worker's
+probe answer, for the rest of its process, under the GPU it probed (helper
+protocol 11): the vendor, device, subsystem and revision ids of the adapter
+that drives the display, and its user-mode driver's version, which DXGI
+reports for `IDXGIDevice`. Not its LUID, which names an adapter only until
+the system restarts and says nothing of its driver. For a viewer that
+decodes H.265 the host first asks the worker to name that GPU
+(`Request::Adapter`, which enumerates the adapters and their outputs and
+reads the driver's version, without a probe); a later worker on the same GPU
+and driver is then not asked about H.265, so its viewer's `Accepted` does not
+wait for a probe, and the session's encoder is the first H.265 encoder that
+worker builds. A viewer that does not decode H.265 has the worker name
+nothing. A driver update changes the key, and the next worker probes again.
+A no is kept as a yes is, but only a probe's, as the backend in the app
+keeps its probe's: the worker names the GPU with its answer only when that
+answer is its probe of that GPU, so a no it gave because its display could
+not be described, or no adapter was found for it, holds for that session
+alone. An H.265 encoder that fails through the helper drops the answer kept
+for its GPU, as H.265 goes off for the process anyway (below). A worker that
+cannot name its GPU, or whose driver reports no version, is asked every
+time. The host keeps answers for at most 8 GPUs, dropping the oldest, and
+logs each answer it gives a session as `desktop_h265_helper` (usable; named:
+whether the worker named its GPU; kept: whether an earlier worker gave the
+answer; ms, including both requests). How much sooner a later session
+reaches `Accepted` and its first picture, and what naming the GPU adds, have
+not been measured on a Windows device yet.
+
 The H.265 encoder takes the H.264 encoder's settings: low latency, CBR, an
 infinite GOP, IDRs only on demand and the same bits per frame, which show as a
 better picture rather than a lower rate. Its output type is
@@ -3015,7 +3057,9 @@ Each session's lifecycle is logged at info on `pb_mapper_desktop::session`:
 `desktop_viewer_ended` (reason, detail, seconds, keyframes,
 `keyframes_requested`, `backlog_drops`); a host also logs each H.265 probe as
 `desktop_h265_probe` (usable, ms, detail) and warns `desktop_h265_failed`
-when an H.265 encoder fails and H.265 is turned off. A Windows host logs
+when an H.265 encoder fails and H.265 is turned off; one that shares
+through the Windows helper logs each H.265 answer it gives a session as
+`desktop_h265_helper` (usable, named, kept, ms). A Windows host logs
 each encoder it opens as `desktop_video_encoder_opened`: `encoder`,
 `codec`, the adapter's PCI `vendor` (0x10de NVIDIA, 0x8086 Intel, 0x1002
 AMD), `width`, `height`, `fps`, `gop`, and what the encoder read back:

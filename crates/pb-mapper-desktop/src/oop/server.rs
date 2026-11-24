@@ -5,9 +5,21 @@
 //! boundary.
 use super::{
     ipc,
-    proto::{DRAIN_WAIT_MAX_MS, Request, Response, ShapeHeader, TIMEOUT},
+    proto::{AdapterKey, DRAIN_WAIT_MAX_MS, Request, Response, ShapeHeader, TIMEOUT},
 };
-use crate::{Backend, CursorShape, DesktopContext, Result, error, failure_kind};
+use crate::{Backend, CursorShape, DesktopContext, Display, Result, error, failure_kind};
+
+/// The GPU that drives a display, as the platform names it to the host,
+/// which keeps a worker's H.265 answer under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NamedAdapter {
+    /// The GPU and its driver.
+    pub key: AdapterKey,
+    /// What this process's H.265 probe of that GPU answered; `None` while
+    /// it has not probed that GPU, as when it found no GPU for the display
+    /// then and answered no without a probe.
+    pub h265: Option<bool>,
+}
 
 /// What the worker keeps across requests.
 pub(crate) struct ServeState {
@@ -22,15 +34,22 @@ pub(crate) struct ServeState {
     /// The newest shape read, and how many different ones were.
     shape: Option<CursorShape>,
     shape_serial: u64,
+    /// Names the GPU that drives a display, asked only by the `Adapter` and
+    /// `H265` requests, which a viewer that decodes H.265 alone causes.
+    adapter: fn(&Display) -> Option<NamedAdapter>,
 }
 impl ServeState {
-    pub(crate) fn new() -> Self {
+    /// `adapter` names the GPU that drives a display; a platform that cannot
+    /// name one answers `None`, and the host then asks this worker, and every
+    /// later one, about H.265 again.
+    pub(crate) fn new(adapter: fn(&Display) -> Option<NamedAdapter>) -> Self {
         Self {
             sequence: 0,
             last_input: std::time::Instant::now(),
             shapes: false,
             shape: None,
             shape_serial: 0,
+            adapter,
         }
     }
 }
@@ -156,12 +175,27 @@ pub(crate) fn serve<B: Backend>(
             vec![]
         }
         Request::Attach { .. } => return Err(error("worker is already attached")),
+        Request::Adapter {} => {
+            response.adapter = (state.adapter)(&context.display).map(|named| named.key);
+            vec![]
+        }
         Request::H265 {} => {
-            response.h265 = Some(
-                backend
-                    .describe(true)
-                    .is_ok_and(|described| described.caps.h265),
-            );
+            // The GPU is named only when the answer is its probe's, which
+            // the host may keep for later workers. A display the backend
+            // could not describe, no GPU found for it, or a GPU that changed
+            // under the probe answers for this session alone.
+            let (h265, adapter) = match backend.describe(true) {
+                Ok(described) => {
+                    let h265 = described.caps.h265;
+                    let probed = (state.adapter)(&described.display)
+                        .filter(|named| named.h265 == Some(h265))
+                        .map(|named| named.key);
+                    (h265, probed)
+                }
+                Err(_) => (false, None),
+            };
+            response.h265 = Some(h265);
+            response.adapter = adapter;
             vec![]
         }
         Request::ConfigureVideo {
@@ -334,7 +368,7 @@ mod tests {
             context: expected.clone(),
             injected: 0,
         };
-        let mut state = ServeState::new();
+        let mut state = ServeState::new(|_| None);
         let mut send = |backend: &mut Bound, next| {
             let request = Request::Input {
                 expected: expected.clone(),
@@ -401,7 +435,7 @@ mod tests {
             parts,
             crate::modes::Journal::default(),
         );
-        let mut state = ServeState::new();
+        let mut state = ServeState::new(|_| None);
         let mut serve = |request| serve(&mut backend, request, &mut state).unwrap();
         let (started, _) = serve(Request::Start {
             display_id: 1,
