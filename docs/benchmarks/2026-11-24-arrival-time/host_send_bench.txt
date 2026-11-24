@@ -49,7 +49,7 @@ case=video+pointer units_per_s=60.0 inputs_per_s=249.1 allocs_per_s=3510 allocs_
 case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.4 allocs_per_s=10003 allocs_per_unit=166.78 alloc_bytes_per_unit=100523
 case=peer_cursor samples=256 p50_us=156 p95_us=313 p99_us=331
 
-## after: as committed
+## submitted (d299970), before the review fixes
 run 1
 case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1134 allocs_per_unit=18.91 alloc_bytes_per_unit=40254
 case=video+pointer units_per_s=60.0 inputs_per_s=249.9 allocs_per_s=3522 allocs_per_unit=58.73 alloc_bytes_per_unit=47125
@@ -66,3 +66,19 @@ case=video+pointer units_per_s=60.0 inputs_per_s=246.9 allocs_per_s=3491 allocs_
 case=2viewers+pointer units_per_s=60.0 inputs_per_s=498.6 allocs_per_s=9992 allocs_per_unit=166.60 alloc_bytes_per_unit=100501
 case=peer_cursor samples=256 p50_us=155 p95_us=311 p99_us=313
 
+## after: as committed, with the review fixes
+run 1
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1132 allocs_per_unit=18.87 alloc_bytes_per_unit=40256
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=3527 allocs_per_unit=58.78 alloc_bytes_per_unit=47173
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.8 allocs_per_s=10031 allocs_per_unit=167.25 alloc_bytes_per_unit=100590
+case=peer_cursor samples=256 p50_us=158 p95_us=335 p99_us=505
+run 2
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1133 allocs_per_unit=18.90 alloc_bytes_per_unit=40284
+case=video+pointer units_per_s=60.2 inputs_per_s=249.9 allocs_per_s=3523 allocs_per_unit=58.54 alloc_bytes_per_unit=46975
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.9 allocs_per_s=10028 allocs_per_unit=167.18 alloc_bytes_per_unit=100587
+case=peer_cursor samples=256 p50_us=157 p95_us=322 p99_us=332
+run 3
+case=video units_per_s=60.0 inputs_per_s=0.0 allocs_per_s=1130 allocs_per_unit=18.85 alloc_bytes_per_unit=40254
+case=video+pointer units_per_s=60.0 inputs_per_s=250.0 allocs_per_s=3525 allocs_per_unit=58.76 alloc_bytes_per_unit=47160
+case=2viewers+pointer units_per_s=60.0 inputs_per_s=499.5 allocs_per_s=10028 allocs_per_unit=167.18 alloc_bytes_per_unit=100572
+case=peer_cursor samples=256 p50_us=157 p95_us=333 p99_us=503
