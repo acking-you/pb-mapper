@@ -194,8 +194,9 @@ pub(crate) fn serve<B: Backend>(
             }
             let frame = if submit {
                 let frame = backend.capture_video(&expected, codec, keyframe, rate)?;
-                // Said only when it found nothing new: the host's tick stays
-                // armed then, and it asks again.
+                // Said only when it found nothing new, or an encoder that had
+                // not asked for input: the host's tick stays armed then, and
+                // it asks again.
                 response.submitted = (!backend.submitted_video()).then_some(false);
                 frame
             } else {

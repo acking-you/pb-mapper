@@ -9,6 +9,9 @@
 //! A new picture is dated by when the display presented it (DXGI's
 //! `LastPresentTime`, a performance counter reading), which thread C anchors
 //! its pacing on and its sample time follows.
+//!
+//! Given a waker, the encoder's events wake its caller: each output, and the
+//! input request a `Submit::Waiting` waits for (`codec.rs`).
 
 mod codec;
 mod converter;
@@ -17,10 +20,11 @@ mod probe;
 pub use probe::h265_available;
 
 use crate::{
-    BackendError, Display, FailureKind, Presented, Result, VideoCodec,
+    BackendError, DRAIN_POLL, Display, FailureKind, Presented, Result, VideoCodec, Waker,
     codec::pipeline::{FIRST_SUBMIT_WAIT, LIVENESS_INTERVAL, OUTPUT_WAIT, codec_error, late},
     error,
     qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN, scaled_size},
+    scheduler::{Waiter, Wake},
 };
 use codec::{Codec, EncoderSettings, attributes, media_type, sample_bytes};
 use converter::Converter;
@@ -63,6 +67,10 @@ const _: () = assert!(
 const MAX_SIZE: (u32, u32) = (7680, 4320);
 /// The oldest present that still dates a picture.
 const PRESENT_MAX_AGE: Duration = Duration::from_secs(1);
+/// `Statistics::pickup`'s buckets: the upper bounds, in microseconds, of all
+/// but the last, which holds the rest.
+pub const PICKUP_BOUNDS_US: [u32; 7] = [100, 250, 500, 1_000, 2_000, 4_000, 8_000];
+pub const PICKUP_BUCKETS: usize = PICKUP_BOUNDS_US.len() + 1;
 
 pub struct Encoded {
     pub codec: VideoCodec,
@@ -104,22 +112,29 @@ impl From<Encoded> for crate::EncodedFrame {
 pub enum Submit {
     /// A sample went to the encoder.
     Submitted,
-    /// No room: the encoder holds `MAX_IN_FLIGHT`, asked for no input, or
-    /// has no free sample. Backpressure, which spends the tick; a requested
-    /// keyframe stays requested.
+    /// No room: the encoder holds `MAX_IN_FLIGHT`, or has no free sample.
+    /// Backpressure, which spends the tick; a requested keyframe stays
+    /// requested.
     Full,
+    /// Room, but the encoder has not asked for input yet: some MFTs ask
+    /// only once they have output the unit before. Nothing was captured,
+    /// the caller's tick stays armed, and it asks again at its poll or as
+    /// the encoder's request wakes it (`Encoder::idle_until`); a requested
+    /// keyframe stays requested.
+    Waiting,
     /// Room, and nothing worth sending: no new present, no keyframe due and
     /// a submit within `LIVENESS_INTERVAL`, or no image captured yet. The
     /// caller's tick stays armed, and it asks again.
     Unchanged,
 }
 impl Submit {
-    /// Whether the caller's tick is spent: by everything but `Unchanged`,
-    /// whose tick waits for the next present.
+    /// Whether the caller's tick is spent: by a sample and by backpressure,
+    /// while a tick that waits for the encoder's input request or for the
+    /// next present stays armed.
     pub fn spends_tick(self) -> bool {
         match self {
             Self::Submitted | Self::Full => true,
-            Self::Unchanged => false,
+            Self::Waiting | Self::Unchanged => false,
         }
     }
 }
@@ -144,6 +159,52 @@ pub struct Statistics {
     pub coalesced_presents: u64,
     /// This encoder's first acquire, once there was one.
     pub first_acquire: Option<FirstAcquire>,
+    /// Submits that found room but no input request (`Submit::Waiting`).
+    pub waiting: u64,
+    /// Whether the encoder's events wake the caller (its event watcher
+    /// runs); else they are polled at each drain.
+    pub events_pushed: bool,
+    /// From each output the event watcher saw announced
+    /// (`METransformHaveOutput`) to the start of the drain's call that
+    /// collected it (`ProcessOutput` and the sample it fills), so without
+    /// the collection itself: how many fell in each bucket of
+    /// `PICKUP_BOUNDS_US`, the last holding the rest. Nothing while the
+    /// events are polled.
+    pub pickup: [u64; PICKUP_BUCKETS],
+}
+
+/// The bucket of `Statistics::pickup` a wait of `wait` falls in.
+fn pickup_bucket(wait: Duration) -> usize {
+    let us = wait.as_micros();
+    PICKUP_BOUNDS_US
+        .iter()
+        .position(|&bound| us <= u128::from(bound))
+        .unwrap_or(PICKUP_BOUNDS_US.len())
+}
+
+/// A wake for a caller that drives an [`Encoder`] itself, as `video_bench`
+/// does: built with its `waker`, the encoder's event watcher wakes `wait`.
+pub struct EncoderWake {
+    waker: Waker,
+    waiter: Waiter,
+}
+impl EncoderWake {
+    pub fn new() -> Result<Self> {
+        let wake = Wake::new();
+        let waiter = Waiter::new(&wake)?;
+        Ok(Self {
+            waker: Waker(wake),
+            waiter,
+        })
+    }
+    pub fn waker(&self) -> &Waker {
+        &self.waker
+    }
+    /// Wait until `deadline` or a wake; true when a wake, sent before or
+    /// during the wait, ended it.
+    pub fn wait(&self, deadline: Instant) -> Result<bool> {
+        self.waiter.wait(deadline)
+    }
 }
 
 /// What a duplication's first frame reported: whether a still desktop's
@@ -226,6 +287,9 @@ pub struct Encoder {
     bitrate: u32,
     created: Instant,
     last_submit: Option<Instant>,
+    /// When the last submit found no input request (`Submit::Waiting`);
+    /// `None` after any other outcome.
+    waiting: Option<Instant>,
     last_present: i64,
     force_keyframe: bool,
     wait_independent_output: bool,
@@ -244,7 +308,10 @@ enum OutputSize {
 impl Encoder {
     /// Scale on the D3D11 video processor before hardware encoding, to fit
     /// inside `max_width` × `max_height` without upscaling. The latest captured
-    /// desktop texture remains at native resolution; no CPU readback.
+    /// desktop texture remains at native resolution; no CPU readback. Given a
+    /// `waker`, the encoder's events wake it where they can
+    /// (`Statistics::events_pushed`, `drain_poll`); without one, `drain`
+    /// polls them.
     pub fn new_with_size(
         display: &Display,
         codec: VideoCodec,
@@ -252,6 +319,7 @@ impl Encoder {
         bitrate: u32,
         max_width: u32,
         max_height: u32,
+        waker: Option<&Waker>,
     ) -> Result<Self> {
         Self::build(
             display,
@@ -259,6 +327,7 @@ impl Encoder {
             fps,
             bitrate,
             OutputSize::Fit(max_width, max_height),
+            waker,
         )
     }
 
@@ -272,6 +341,7 @@ impl Encoder {
         bitrate: u32,
         width: u32,
         height: u32,
+        waker: Option<&Waker>,
     ) -> Result<Self> {
         Self::build(
             display,
@@ -279,6 +349,7 @@ impl Encoder {
             fps,
             bitrate,
             OutputSize::Exact(width, height),
+            waker,
         )
     }
 
@@ -288,6 +359,7 @@ impl Encoder {
         fps: u32,
         bitrate: u32,
         size: OutputSize,
+        waker: Option<&Waker>,
     ) -> Result<Self> {
         if kind == VideoCodec::Jpeg {
             return Err(error("the hardware encoder encodes H.264 or H.265"));
@@ -343,8 +415,8 @@ impl Encoder {
             fps,
             bitrate,
         };
-        let codec =
-            Codec::new(device, &manager, settings).map_err(|failure| codec_error(kind, failure))?;
+        let codec = Codec::new(device, &manager, settings, waker)
+            .map_err(|failure| codec_error(kind, failure))?;
         let converter = Converter::new(
             device,
             capture.device_context(),
@@ -378,6 +450,7 @@ impl Encoder {
         let now = Instant::now();
         let stats = Statistics {
             gop: codec.gop,
+            events_pushed: codec.pushes(),
             ..Statistics::default()
         };
         Ok(Self {
@@ -400,6 +473,7 @@ impl Encoder {
             bitrate,
             created: now,
             last_submit: None,
+            waiting: None,
             last_present: 0,
             force_keyframe: true,
             wait_independent_output: true,
@@ -422,6 +496,32 @@ impl Encoder {
     /// sent a repeat, an undated picture or nothing.
     pub fn presented(&self) -> Option<Presented> {
         self.presented
+    }
+    /// How soon the caller drains again if nothing wakes it first:
+    /// `DRAIN_POLL` while the events are polled, and while an output they
+    /// announced is still uncollected (a drain collects at most one, and
+    /// returns none after the encoder changed its output type or for an
+    /// output it discards), which no further event will wake the caller
+    /// for. `None` otherwise: each output wakes it.
+    pub fn drain_poll(&self) -> Option<Duration> {
+        (!self.codec.pushes() || self.codec.outputs() > 0).then_some(DRAIN_POLL)
+    }
+    /// While the last submit waited for the encoder to ask for input and
+    /// the request wakes the caller: when to ask again. `DRAIN_POLL` after
+    /// that submit until the encoder asks, and that submit's own time once
+    /// it has, so that a request that came before the caller chose its
+    /// next poll is answered at once all the same. `None` after any other
+    /// outcome, and while the events are polled, whose caller polls its
+    /// armed tick.
+    pub fn idle_until(&self) -> Option<Instant> {
+        let asked = self.waiting?;
+        self.codec.pushes().then(|| {
+            if self.codec.input_requested() {
+                asked
+            } else {
+                asked + DRAIN_POLL
+            }
+        })
     }
 
     /// Apply a QoS rate. Only the mean bitrate reaches the encoder, and only
@@ -464,7 +564,7 @@ impl Encoder {
         if self.stats.submitted == 0 && self.created.elapsed() > FIRST_SUBMIT_WAIT {
             return Err(unsubmitted(
                 kind,
-                self.codec.need_input > 0,
+                self.codec.input_requested(),
                 self.latest.is_some(),
             ));
         }
@@ -472,17 +572,36 @@ impl Encoder {
             .pending
             .front()
             .is_some_and(|(_, at, _)| at.elapsed() > OUTPUT_WAIT)
+            || self.idle_without_request()
         {
             return Err(codec_error(kind, error("hardware video encoder stalled")));
         }
         Ok(ready)
     }
 
+    /// An encoder that holds nothing asks for its next input at once. One
+    /// that has not, `OUTPUT_WAIT` after it last took or gave a unit, never
+    /// will: a `Submit::Waiting` that keeps the tick armed would ask it
+    /// forever.
+    fn idle_without_request(&self) -> bool {
+        self.pending.is_empty()
+            && !self.codec.input_requested()
+            && self
+                .last_submit
+                .max(self.last_output)
+                .is_some_and(|at| at.elapsed() > OUTPUT_WAIT)
+    }
+
     fn collect(&mut self) -> Result<Option<Encoded>> {
         self.codec.events()?;
         let mut ready = None;
-        if self.codec.have_output > 0 {
+        if self.codec.outputs() > 0 {
             let sample = self.codec.output()?;
+            if let Some(pickup) = self.codec.take_pickup()
+                && let Some(bucket) = self.stats.pickup.get_mut(pickup_bucket(pickup))
+            {
+                *bucket += 1;
+            }
             if let Some(sample) = sample {
                 let (pts_us, at, duplicate) = self
                     .pending
@@ -526,7 +645,8 @@ impl Encoder {
                 }
                 // Some hardware MFTs issue NeedInput only when ProcessOutput
                 // releases their previous output. Refill in this same call
-                // when that notification is already available.
+                // when that notification is already available; a watcher
+                // wakes the caller for it otherwise.
                 self.codec.events()?;
             }
         }
@@ -541,17 +661,25 @@ impl Encoder {
 
     /// Capture the newest desktop image and submit at most one sample; the
     /// caller paces, and this never waits. Call `drain` first, which collects
-    /// the encoder's input requests. Submits nothing while the encoder has no
-    /// room (`Full`: `MAX_IN_FLIGHT`, no input request, no free sample), or
-    /// when nothing is worth sending (`Unchanged`: no new image, no keyframe
-    /// due, and a submit within `LIVENESS_INTERVAL`; or no image yet). A
-    /// requested keyframe stays requested until a sample carries it.
+    /// the encoder's output and, when they are polled, its input requests.
+    /// Submits nothing while the encoder has no room (`Full`: `MAX_IN_FLIGHT`,
+    /// no free sample), before it asks for input (`Waiting`: nothing is
+    /// captured), or when nothing is worth sending (`Unchanged`: no new
+    /// image, no keyframe due, and a submit within `LIVENESS_INTERVAL`; or no
+    /// image yet). A requested keyframe stays requested until a sample
+    /// carries it.
     pub fn submit(&mut self, force_keyframe: bool) -> Result<Submit> {
         self.check_thread()?;
         self.presented = None;
+        self.waiting = None;
         self.force_keyframe |= force_keyframe;
-        if self.pending.len() >= MAX_IN_FLIGHT || self.codec.need_input == 0 {
+        if self.pending.len() >= MAX_IN_FLIGHT {
             return Ok(Submit::Full);
+        }
+        if !self.codec.wants_input() {
+            self.waiting = Some(Instant::now());
+            self.stats.waiting += 1;
+            return Ok(Submit::Waiting);
         }
         self.latest_pending |= self.acquire()?;
         // Static desktops still send a fresh, verified liveness frame. These
@@ -604,7 +732,7 @@ impl Encoder {
                 .ProcessInput(self.codec.input_id, &sample, 0)
                 .map_err(|failure| codec_error(kind, error(failure)))?;
         }
-        self.codec.need_input -= 1;
+        self.codec.input_taken();
         self.force_keyframe = false;
         self.last_submit = Some(now);
         self.last_pts_us = Some(pts_us);
@@ -853,12 +981,27 @@ mod tests {
     }
 
     #[test]
-    fn only_an_unchanged_desktop_leaves_the_tick_armed() {
+    fn only_a_sample_or_a_full_encoder_spends_the_tick() {
         assert!(Submit::Submitted.spends_tick());
         // A full encoder is backpressure: thread C skips to the next tick.
         assert!(Submit::Full.spends_tick());
+        // An encoder that has not asked for input yet frees up within its
+        // encode: thread C asks again as it asks, rather than a tick later.
+        assert!(!Submit::Waiting.spends_tick());
         // Nothing new: thread C asks again, so the next present goes out as
         // it appears rather than a tick later.
         assert!(!Submit::Unchanged.spends_tick());
+    }
+
+    #[test]
+    fn a_pickup_falls_in_the_first_bucket_that_holds_it() {
+        let us = Duration::from_micros;
+        assert_eq!(pickup_bucket(Duration::ZERO), 0);
+        assert_eq!(pickup_bucket(us(100)), 0);
+        assert_eq!(pickup_bucket(us(101)), 1);
+        assert_eq!(pickup_bucket(us(2_000)), 4);
+        assert_eq!(pickup_bucket(us(8_000)), 6);
+        assert_eq!(pickup_bucket(us(8_001)), PICKUP_BUCKETS - 1);
+        assert_eq!(pickup_bucket(Duration::from_secs(5)), PICKUP_BUCKETS - 1);
     }
 }
