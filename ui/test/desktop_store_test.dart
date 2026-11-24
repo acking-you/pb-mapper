@@ -1,10 +1,11 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_video.dart';
+import 'package:pb_mapper_ui/src/ffi/display_refresh.dart';
 import 'package:pb_mapper_ui/src/state/app_store.dart';
 import 'package:pb_mapper_ui/src/state/desktop_store.dart';
 
@@ -866,6 +867,144 @@ void main() {
       ),
     );
   });
+
+  testWidgets(
+    'a Windows viewer asks for exact display rates, not whole hertz: it '
+    'connects at the fastest display, tells the session its window display '
+    'once connected, and again whenever the runner says the window moved, '
+    'Flutter reports another rate or the app comes back; a runner silent '
+    'for 200 ms leaves Flutter\'s rate',
+    (tester) async {
+      const channel = MethodChannel('pb_mapper/desktop_video');
+      final messenger = tester.binding.defaultBinaryMessenger;
+      var reads = 0;
+      Future<Object?> Function() answer = () async => 59.94;
+      messenger.setMockMethodCallHandler(channel, (call) {
+        expect(call.method, 'refresh_hz');
+        reads++;
+        return answer();
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      addTearDown(tester.view.reset);
+      addTearDown(tester.view.display.reset);
+      Future<void> runnerSaysChanged() async {
+        await messenger.handlePlatformMessage(
+          channel.name,
+          channel.codec.encodeMethodCall(const MethodCall('display_changed')),
+          (_) {},
+        );
+        await tester.pump();
+      }
+
+      final api = FakeDesktopApi()
+        ..decodersValue = const DesktopDecoders(displayMaxHz: 119.88);
+      final store = DesktopStore(
+        api,
+        displayRefresh: const DisplayRefresh(follows: true, exact: true),
+      );
+      final viewer = store.demand(DesktopDemand.viewer);
+      List<Object?> told() => [
+        for (final args in api.argsOf('display_refresh')) args['hz'],
+      ];
+
+      await _live(tester, store, api);
+      expect(api.argsOf('connect').single['refresh_hz'], 119.88);
+      expect(told(), [59.94]);
+
+      // Moved to the faster monitor, then back to the same rate: once.
+      answer = () async => 119.88;
+      await runnerSaysChanged();
+      expect(told(), [59.94, 119.88]);
+      await runnerSaysChanged();
+      expect(told(), [59.94, 119.88]);
+
+      // A resize leaves Flutter's rate: nothing is read.
+      final before = reads;
+      tester.view.physicalSize = const Size(1000, 700);
+      await tester.pump();
+      expect(reads, before);
+
+      // A display Flutter reports at a new whole hertz: the runner's exact
+      // rate goes.
+      answer = () async => 59.94;
+      tester.view.display.refreshRate = 59;
+      await tester.pump();
+      expect(told(), [59.94, 119.88, 59.94]);
+
+      // Back in front after the mode changed meanwhile.
+      answer = () async => 119.88;
+      _lifecycle(tester, [
+        AppLifecycleState.inactive,
+        AppLifecycleState.resumed,
+      ]);
+      await tester.pump();
+      expect(told(), [59.94, 119.88, 59.94, 119.88]);
+
+      // A runner that does not answer: Flutter's rate after 200 ms.
+      final never = Completer<Object?>();
+      answer = () => never.future;
+      tester.view.display.refreshRate = 60;
+      await tester.pump(const Duration(milliseconds: 199));
+      expect(told(), hasLength(4));
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(told(), [59.94, 119.88, 59.94, 119.88, 60.0]);
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
+
+  testWidgets(
+    "a Mac or Linux viewer follows Flutter's rate for its window display; "
+    'Android and iOS connect at it and never send one',
+    (tester) async {
+      addTearDown(tester.view.display.reset);
+      tester.view.display.refreshRate = 60;
+      final api = FakeDesktopApi()
+        ..decodersValue = const DesktopDecoders(displayMaxHz: 120);
+      final store = DesktopStore(
+        api,
+        displayRefresh: const DisplayRefresh(follows: true, exact: false),
+      );
+      final viewer = store.demand(DesktopDemand.viewer);
+      List<Object?> told() => [
+        for (final args in api.argsOf('display_refresh')) args['hz'],
+      ];
+      await _live(tester, store, api);
+      expect(api.argsOf('connect').single['refresh_hz'], 120);
+      expect(told(), [60.0]);
+      tester.view.display.refreshRate = 120;
+      await tester.pump();
+      expect(told(), [60.0, 120.0]);
+
+      // A reconnect starts over: the connect's rate, then the window's.
+      tester.view.display.refreshRate = 60;
+      await tester.pump();
+      api.viewerStatusValue = stoppedStatus('transport');
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(seconds: 1));
+      expect(api.argsOf('connect'), hasLength(2));
+      expect(api.argsOf('connect').last['refresh_hz'], 120);
+      expect(told(), [60.0, 120.0, 60.0, 60.0]);
+      viewer.dispose();
+      store.dispose();
+
+      final phoneApi = FakeDesktopApi()
+        ..decodersValue = const DesktopDecoders(displayMaxHz: 120);
+      final phone = DesktopStore(
+        phoneApi,
+        displayRefresh: const DisplayRefresh(follows: false, exact: false),
+      );
+      final phoneViewer = phone.demand(DesktopDemand.viewer);
+      await _live(tester, phone, phoneApi);
+      expect(phoneApi.argsOf('connect').single['refresh_hz'], 60);
+      tester.view.display.refreshRate = 120;
+      await tester.pump();
+      expect(phoneApi.argsOf('display_refresh'), isEmpty);
+      phoneViewer.dispose();
+      phone.dispose();
+    },
+  );
 
   testWidgets(
     'resolution, frame rate and codec connect again at once, keeping the '

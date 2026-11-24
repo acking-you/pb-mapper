@@ -6,10 +6,15 @@
 #include <memory>
 
 // Decoder resources are allocated only when a remote video texture is opened.
+// `window` is the top-level window, whose messages HandleMessage sees;
+// `view` is Flutter's view in it, whose display's refresh `refresh_hz`
+// answers.
 class DesktopVideo {
  public:
-  DesktopVideo(flutter::FlutterEngine* engine, HWND window);
+  DesktopVideo(flutter::FlutterEngine* engine, HWND window, HWND view);
   ~DesktopVideo();
+  // True for a message only this handles; a window move or display change it
+  // watches goes on to the window.
   bool HandleMessage(UINT message);
 
  private:
