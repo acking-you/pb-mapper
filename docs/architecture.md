@@ -316,7 +316,8 @@ Nothing in the SDK crates knows it exists.
   - `worker.rs` (`worker/`: capture, per-viewer input lanes and control grants,
     the
     pointer reports, the drag-start hold, display modes, the one-second
-    statistics window), `pacer.rs`, `scheduler.rs`, `lane.rs`: Thread C, the
+    statistics window and the pace cap at the encoder's throughput),
+    `pacer.rs`, `scheduler.rs`, `lane.rs`: Thread C, the
     one desktop-bound thread (one capture and encode fanned out across active
     viewers as `FrameBytes::Owned` for one or zero-copy `FrameBytes::Shared`
     for several, plus input), its pacing, its one wait, and the input lanes
