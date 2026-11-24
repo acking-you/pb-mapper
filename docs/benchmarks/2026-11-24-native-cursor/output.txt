@@ -1,84 +1,258 @@
+== run 1: load average before and after
+ 8:52  up 2 days,  7:33, 3 users, load averages: 3.47 4.05 5.16
+ 8:53  up 2 days,  7:34, 3 users, load averages: 2.47 3.70 4.96
 == run 1: stdout and stderr
 [IMPORTANT:flutter/shell/platform/embedder/embedder_surface_metal_impeller.mm(53)] Using the Impeller rendering backend (MetalSDF).
 flutter: {
-  "rebuild": {
-    "p50": 3.53,
-    "p90": 6.508,
-    "p99": 7.219,
-    "max": 7.252
+  "lifecycle": [
+    {
+      "at_ms": 0.0,
+      "state": "unknown"
+    }
+  ],
+  "began_ms": {
+    "painted": 511.442,
+    "rebuild": 9804.021,
+    "rebuild_in_frame": 19122.378,
+    "native_calls": 29407.4,
+    "end": 55509.24
   },
-  "system": {
-    "p50": 0.208,
-    "p90": 0.32,
-    "p99": 0.399,
-    "max": 0.457
-  },
-  "bitmap_set": {
-    "p50": 0.542,
-    "p90": 0.854,
-    "p99": 1.326,
-    "max": 1.57
-  },
-  "bitmap_create": {
-    "p50": 0.667,
-    "p90": 1.366,
-    "p99": 89.203,
-    "max": 114.13
+  "summary_ms": {
+    "painted": {
+      "n": 200,
+      "min": 0.716,
+      "p50": 4.3,
+      "p90": 7.25,
+      "p99": 7.805,
+      "max": 7.826
+    },
+    "painted_to_build": {
+      "n": 200,
+      "min": 0.196,
+      "p50": 3.686,
+      "p90": 6.62,
+      "p99": 7.094,
+      "max": 7.216
+    },
+    "painted_build_to_raster": {
+      "n": 200,
+      "min": 0.145,
+      "p50": 0.595,
+      "p90": 0.804,
+      "p99": 1.061,
+      "max": 1.188
+    },
+    "rebuild": {
+      "n": 200,
+      "min": 0.097,
+      "p50": 3.526,
+      "p90": 6.436,
+      "p99": 7.217,
+      "max": 7.257
+    },
+    "rebuild_in_frame": {
+      "n": 200,
+      "min": 6.711,
+      "p50": 7.008,
+      "p90": 7.119,
+      "p99": 7.223,
+      "max": 7.44
+    },
+    "system": {
+      "n": 200,
+      "min": 0.119,
+      "p50": 0.233,
+      "p90": 0.315,
+      "p99": 0.595,
+      "max": 2.074
+    },
+    "bitmap_set": {
+      "n": 200,
+      "min": 0.362,
+      "p50": 0.689,
+      "p90": 0.879,
+      "p99": 1.096,
+      "max": 1.801
+    },
+    "bitmap_create": {
+      "n": 200,
+      "min": 0.607,
+      "p50": 1.388,
+      "p90": 1.711,
+      "p99": 3.738,
+      "max": 4.256
+    }
   }
 }
+== run 2: load average before and after
+ 8:53  up 2 days,  7:34, 3 users, load averages: 2.47 3.70 4.96
+ 8:54  up 2 days,  7:35, 3 users, load averages: 9.66 5.64 5.60
 == run 2: stdout and stderr
 [IMPORTANT:flutter/shell/platform/embedder/embedder_surface_metal_impeller.mm(53)] Using the Impeller rendering backend (MetalSDF).
 flutter: {
-  "rebuild": {
-    "p50": 3.478,
-    "p90": 6.401,
-    "p99": 7.274,
-    "max": 7.324
+  "lifecycle": [
+    {
+      "at_ms": 0.0,
+      "state": "unknown"
+    }
+  ],
+  "began_ms": {
+    "painted": 510.357,
+    "rebuild": 9715.606,
+    "rebuild_in_frame": 19086.564,
+    "native_calls": 29558.933,
+    "end": 55914.641
   },
-  "system": {
-    "p50": 0.216,
-    "p90": 0.273,
-    "p99": 0.317,
-    "max": 0.322
-  },
-  "bitmap_set": {
-    "p50": 0.545,
-    "p90": 0.735,
-    "p99": 1.037,
-    "max": 1.745
-  },
-  "bitmap_create": {
-    "p50": 0.658,
-    "p90": 0.926,
-    "p99": 3.015,
-    "max": 14.422
+  "summary_ms": {
+    "painted": {
+      "n": 200,
+      "min": 0.221,
+      "p50": 4.071,
+      "p90": 7.038,
+      "p99": 7.788,
+      "max": 7.938
+    },
+    "painted_to_build": {
+      "n": 200,
+      "min": 0.051,
+      "p50": 3.698,
+      "p90": 6.595,
+      "p99": 7.221,
+      "max": 7.257
+    },
+    "painted_build_to_raster": {
+      "n": 200,
+      "min": 0.123,
+      "p50": 0.455,
+      "p90": 0.728,
+      "p99": 1.034,
+      "max": 1.081
+    },
+    "rebuild": {
+      "n": 200,
+      "min": 0.179,
+      "p50": 3.503,
+      "p90": 6.574,
+      "p99": 7.231,
+      "max": 7.406
+    },
+    "rebuild_in_frame": {
+      "n": 200,
+      "min": 6.051,
+      "p50": 7.039,
+      "p90": 7.178,
+      "p99": 14.174,
+      "max": 34.844
+    },
+    "system": {
+      "n": 200,
+      "min": 0.086,
+      "p50": 0.204,
+      "p90": 0.279,
+      "p99": 0.747,
+      "max": 0.839
+    },
+    "bitmap_set": {
+      "n": 200,
+      "min": 0.289,
+      "p50": 0.583,
+      "p90": 0.795,
+      "p99": 4.06,
+      "max": 46.994
+    },
+    "bitmap_create": {
+      "n": 200,
+      "min": 0.494,
+      "p50": 1.263,
+      "p90": 1.557,
+      "p99": 3.828,
+      "max": 3.837
+    }
   }
 }
+== run 3: load average before and after
+ 8:54  up 2 days,  7:35, 3 users, load averages: 9.66 5.64 5.60
+ 8:55  up 2 days,  7:36, 3 users, load averages: 5.75 5.21 5.44
 == run 3: stdout and stderr
 [IMPORTANT:flutter/shell/platform/embedder/embedder_surface_metal_impeller.mm(53)] Using the Impeller rendering backend (MetalSDF).
 flutter: {
-  "rebuild": {
-    "p50": 3.602,
-    "p90": 6.611,
-    "p99": 7.407,
-    "max": 7.633
+  "lifecycle": [
+    {
+      "at_ms": 0.0,
+      "state": "unknown"
+    }
+  ],
+  "began_ms": {
+    "painted": 509.437,
+    "rebuild": 9808.331,
+    "rebuild_in_frame": 19085.927,
+    "native_calls": 29384.703,
+    "end": 60396.582
   },
-  "system": {
-    "p50": 0.083,
-    "p90": 0.101,
-    "p99": 0.114,
-    "max": 0.116
-  },
-  "bitmap_set": {
-    "p50": 0.492,
-    "p90": 0.671,
-    "p99": 0.842,
-    "max": 1.048
-  },
-  "bitmap_create": {
-    "p50": 1.169,
-    "p90": 1.542,
-    "p99": 2.177,
-    "max": 2.423
+  "summary_ms": {
+    "painted": {
+      "n": 200,
+      "min": 0.309,
+      "p50": 4.165,
+      "p90": 6.901,
+      "p99": 7.673,
+      "max": 8.165
+    },
+    "painted_to_build": {
+      "n": 200,
+      "min": 0.086,
+      "p50": 3.676,
+      "p90": 6.471,
+      "p99": 7.23,
+      "max": 7.426
+    },
+    "painted_build_to_raster": {
+      "n": 200,
+      "min": 0.189,
+      "p50": 0.295,
+      "p90": 0.723,
+      "p99": 0.903,
+      "max": 0.908
+    },
+    "rebuild": {
+      "n": 200,
+      "min": 0.241,
+      "p50": 3.389,
+      "p90": 6.272,
+      "p99": 7.565,
+      "max": 7.57
+    },
+    "rebuild_in_frame": {
+      "n": 200,
+      "min": 6.603,
+      "p50": 7.034,
+      "p90": 7.138,
+      "p99": 14.144,
+      "max": 14.164
+    },
+    "system": {
+      "n": 200,
+      "min": 0.116,
+      "p50": 0.225,
+      "p90": 0.37,
+      "p99": 41.603,
+      "max": 53.199
+    },
+    "bitmap_set": {
+      "n": 200,
+      "min": 0.29,
+      "p50": 0.6,
+      "p90": 1.141,
+      "p99": 33.335,
+      "max": 54.932
+    },
+    "bitmap_create": {
+      "n": 200,
+      "min": 0.526,
+      "p50": 1.263,
+      "p90": 4.958,
+      "p99": 129.333,
+      "max": 152.769
+    }
   }
 }

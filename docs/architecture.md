@@ -669,8 +669,9 @@ The design and its rules are in `docs/ui-design.md`.
     `pb_mapper/desktop_pointer` channel (`lib/src/ffi/desktop_pointer.dart`;
     `windows/runner/desktop_pointer.cpp`, `darwin/DesktopPointer.swift` in
     the macOS runner only, `linux/runner/desktop_pointer.cc`).
-    `tool/pointer_latency.dart` times both paths in a release build. The
-    gestures and key rules are in `docs/remote-desktop.md`
+    `tool/pointer_latency.dart` times both paths against the rebuild they
+    replace, and the painted pointer the bitmap path replaces, in a release
+    build. The gestures and key rules are in `docs/remote-desktop.md`
 
 - **`lib/src/shell/`**: Navigation and window chrome
   - `app_scope.dart`: `AppPage` (six places; the phone bar has five, Logs
