@@ -2683,11 +2683,15 @@ sample then counts from an earlier one, or is skipped), each
 read as `decoders` reads it), `dmabuf` (pictures arrive as dma-bufs) and
 `videoconvert` (the pipeline converts). Without timings `frame_ready` reads
 no clock. `G_MESSAGES_DEBUG=pb-mapper-video` shows the module's log,
-including the caps each decoder gives, so whether dma-bufs were negotiated,
-and the GPU that draws (`Presenting GPU`) and the render nodes it chose among;
+including the caps each decoder gives, so whether dma-bufs were negotiated;
+at each probe the GPU that draws (`Presenting GPU`) and every render node
+with its driver; and, for each probe and decoder start, a codec's decoders
+in the order they are tried, each with where it decodes;
 `GST_DEBUG=3` shows GStreamer's. A viewer needs GStreamer's base and
 bad plugins and a decoder: gst-libav (or openh264 for H.264) in software,
-the VA-API driver, or NVIDIA's driver; the user guide lists the packages.
+the VA-API driver (before GStreamer 1.24 with gstreamer-vaapi, since the va
+plugin's decoders have no rank there), or NVIDIA's driver; the user guide
+lists the packages.
 The release bundles no GStreamer library: `scripts/build/check-linux-bundle.sh`
 fails a bundle without the module, with a GStreamer or ORC library inside, or
 whose FFI or module does not load.
@@ -2700,13 +2704,19 @@ runner asks Flutter's EGL display which GPU it renders on
 places each hardware decoder from its factory's name and sysfs only, so
 placing them loads no plugin and opens no device, which would wake a GPU
 that sleeps:
-- A va factory for every GPU but the first carries its render node in its
-  name (`varenderD129h264dec`). The plain one (`vah264dec`) is on the first
-  render node, by name, that the va plugin opens (one this process may open,
-  with Intel's or Mesa's driver; NVIDIA's only under `GST_VA_ALL_DRIVERS`)
-  and that has no factory of its own; when more than one could be, its GPU
-  is unknown, though it is another GPU's when the one that draws cannot be
-  among them.
+- A codec's va factory on every GPU but one carries its render node in its
+  name (`varenderD129h264dec`). The plain one (`vah264dec`) is on a GPU the va
+  plugin may open (one this process may open, with any VA driver before
+  GStreamer 1.24, and from 1.24 with Intel's or Mesa's, NVIDIA's only under
+  `GST_VA_ALL_DRIVERS`) that has no factory of its own for the codec. Which
+  GPU has the plain name changed with GStreamer's version: 1.20 gives it to
+  the first GPU, by device file, that decodes the codec, and 1.24 and later
+  to the first the plugin opens, by device file, so there it is also before
+  every GPU with a named factory; 1.22 gives it to the first the plugin
+  opened in udev's order, which follows the PCI devices instead, so there,
+  as for a version the module does not know, nothing narrows it further.
+  When more than one GPU could have it, its GPU is unknown, though it is
+  another GPU's when the one that draws cannot be among them.
 - NVDEC (nvcodec) runs on NVIDIA's driver alone: with one GPU on it, it is
   that one, and it is never a GPU another driver runs. Which of several
   NVIDIA GPUs a factory is on takes CUDA's numbering, and asking CUDA would
@@ -2720,12 +2730,23 @@ before NVDEC, so that the NVIDIA GPU can stay asleep and every picture stays
 on the GPU that shows it, where its dma-bufs can be imported (not yet tried
 on such a laptop); NVDEC stays the fallback before software. An app
 offloaded to the NVIDIA GPU takes NVDEC first, and on two VA GPUs the one
-that draws takes its own factory. With no GPU known (an EGL without these
+that draws takes its own factory. Before GStreamer 1.24 (Ubuntu 22.04's
+1.20, Debian 12's 1.22) the va plugin registers its decoders with no rank,
+so they are no candidates, and VA-API on the GPU that draws is
+gstreamer-vaapi's (`gstreamer1.0-vaapi`), whose GPU is unknown but which
+still goes before NVDEC on another GPU; without that package such a laptop
+still decodes with NVDEC, as before. With no GPU known (an EGL without these
 extensions, a software renderer such as llvmpipe) the order is hardware,
-then rank, as before. A decoder's name, which the probe logs and
+then rank, as before. The module itself opens no device, but GStreamer
+does when it loads a plugin: the va plugin opens every render node it finds
+when its first decoder is built, and a registry scan (the first run, or
+after a plugin changes) loads each plugin it scans; whether that wakes a
+sleeping GPU for a moment has not been measured. A decoder's name, which
 the session reports to the quality panel, says where it runs:
-`vah264dec (VA-API H.264 Decoder) on renderD128`, or
-`nvh264dec on renderD129, another GPU`.
+`vah264dec on renderD128`, or
+`nvh264dec (NVDEC H.264 Decoder) on renderD129, another GPU`. It leaves out
+the factory's long name when the whole would pass 63 bytes, as with a va
+decoder, whose long name names its driver's device.
 
 ## Measurements and remaining acceptance
 
@@ -3200,8 +3221,8 @@ CPU per decoded picture.
 On llvmpipe the GL work runs on the CPU too, so CI's figures are no
 measure of a GPU. Before the clips, `desktop_video_device_test` checks the
 order the module tries decoders in for made-up GPUs (a hybrid laptop either
-way round, two VA GPUs, two NVIDIA ones, none known) and reads GPUs from a
-sysfs tree of its own.
+way round, two VA GPUs, three under each GStreamer version's naming, two
+NVIDIA ones, none known) and reads GPUs from a sysfs tree of its own.
 
 For Android, rebuild the FFI for the intended ABI before Flutter: ARM64 for a
 matching phone, or x86_64 for the development VM. For example,

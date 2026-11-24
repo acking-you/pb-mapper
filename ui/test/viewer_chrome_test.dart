@@ -445,7 +445,7 @@ void main() {
   testWidgets('the quality panel names the decoder the viewer reported, '
       'with the GPU it runs on, under the codec', (tester) async {
     _size(tester, const Size(1280, 800));
-    const name = 'nvh264dec on renderD129, another GPU';
+    const name = 'nvh264dec (NVDEC H.264 Decoder) on renderD129, another GPU';
     final session = ValueNotifier(
       const DesktopSessionView(
         target: _target,
