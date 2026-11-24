@@ -28,22 +28,41 @@
 //!   worst case for an access unit's size. It is encoded with the desktop.
 //! - `--bitrate`, `--max-width`, `--max-height`, `--output <raw Annex B>`,
 //!   `--pause-ms` (encoder recovery probe), `--poll-us` (backend polling).
+//! - `--poll-events`: build the encoder without its event watcher, so that
+//!   its events are polled and it is drained every `DRAIN_POLL` while it
+//!   holds units, as thread C drained every encoder before the watcher and
+//!   still drains one that cannot be shut down: the baseline arm of an
+//!   event comparison. Not with `--backend`.
+//!
+//! The loop waits as thread C does: until the next tick, the next poll of an
+//! armed tick or of a polled encoder holding units (or of one with an
+//! announced output still uncollected), or a wake from the encoder's event
+//! watcher (each output, and the input request a waiting submit waits for),
+//! and at most 100 ms.
 //!
 //! It prints the largest keyframe and access unit, which `wire::MAX_PAYLOAD`
 //! must hold. Driving the encoder, it also prints a `case=encoder` line: the
 //! heap allocations and bytes the encoder's own calls ask for, and the time
 //! and the cycles its thread ran in them, per access unit; and the median and
 //! mean of each of a submit that converted a capture and of a drain that
-//! returned a unit. Either way it prints the capture calls per second, and
-//! the polls among them: the calls that found nothing new; and, with thread
-//! C's own pacer anchoring each tick on the present it took (unless
+//! returned a unit; and an `encoder_events` line: whether its events were
+//! pushed or polled, the submits that found no input request (`waiting`, as
+//! `Submit::Waiting`) and, pushed, how long each output waited from its
+//! announcement to the start of the drain that collected it
+//! (`have_output_to_collect_us`, counts per bucket, and the bucket that
+//! holds the median). Either way it prints the capture calls per second,
+//! and the polls among them: the calls that left the tick armed, having
+//! found nothing new or, as `waiting` counts apart, an encoder that had not
+//! asked for input yet; how often the loop woke (`loop_wakes_per_s`, thread
+//! C's wakes) and how many of those an encoder event ended; and, with
+//! thread C's own pacer anchoring each tick on the present it took (unless
 //! `--grid`), the wait from a present to the submit that took it (p50 and
 //! p95), the share of submits whose picture was dated, and the presents no
 //! submitted picture showed (`coalesced_presents`: for each dated picture,
 //! the presents it covers beyond one, as thread C's `coalesced_per_s`
-//! counts them). It also prints how long the first access unit took from the
-//! start of the paced loop, and, driving the encoder, what the duplication's
-//! first frame reported (`first_acquire_*`).
+//! counts them). It also prints how long the first access unit took from
+//! the start of the paced loop, and, driving the encoder, what the
+//! duplication's first frame reported (`first_acquire_*`).
 #[cfg(windows)]
 mod probe_support;
 // The `--pace` classifier, shared with the macOS encoder's measurement test.
@@ -126,7 +145,9 @@ mod bench {
     use pb_mapper_desktop::{
         Backend, DRAIN_POLL, Display, DisplaySelection, NativeBackend, VideoCodec, VideoLimits,
         VideoRate, displays, native_backend,
-        windows::video::{Encoded, Encoder, Statistics, Submit, h265_available},
+        windows::video::{
+            Encoded, Encoder, EncoderWake, PICKUP_BOUNDS_US, Statistics, Submit, h265_available,
+        },
     };
     use std::{
         fs::File,
@@ -156,6 +177,8 @@ mod bench {
     /// nothing new is asked again every `DRAIN_POLL` for this long, and once
     /// a period after it.
     const HOT_WINDOW: Duration = Duration::from_millis(250);
+    /// Thread C's `CONTEXT_CHECK_INTERVAL`: it wakes at least this often.
+    const CONTEXT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
     pub fn run() -> Result {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -210,16 +233,19 @@ mod bench {
                 );
             }
         }
+        // What the encoder's event watcher wakes, and the loop waits on.
+        let wake = EncoderWake::new()?;
+        let waker = (!limits.poll_events).then_some(wake.waker());
         let building = Instant::now();
         let encoder = if limits.backend {
             None
         } else if exact {
             Some(Encoder::new_exact(
-                &display, codec, fps, bitrate, max_width, max_height,
+                &display, codec, fps, bitrate, max_width, max_height, waker,
             )?)
         } else {
             Some(Encoder::new_with_size(
-                &display, codec, fps, bitrate, max_width, max_height,
+                &display, codec, fps, bitrate, max_width, max_height, waker,
             )?)
         };
         let build_ms = building.elapsed().as_secs_f64() * 1000.0;
@@ -227,6 +253,7 @@ mod bench {
             Some(encoder) => Coder::Encoder(encoder),
             None => {
                 let mut backend = native_backend(&DisplaySelection::Id(display.id))?;
+                backend.bind(wake.waker().clone());
                 backend.configure_video(
                     VideoLimits {
                         max_width,
@@ -252,9 +279,14 @@ mod bench {
             ..Tally::default()
         };
         let start = Instant::now();
-        paced(
-            &rates, &limits, &steps, &mut coder, &mut sinks, &mut tally, start,
-        )?;
+        let run = Run {
+            rates: &rates,
+            limits: &limits,
+            steps: &steps,
+            wake: &wake,
+            start,
+        };
+        paced(&run, &mut coder, &mut sinks, &mut tally)?;
         if let Some(file) = &mut sinks.dump {
             file.flush()?;
             println!("dumped_units={}", tally.written);
@@ -308,6 +340,37 @@ mod bench {
 
     fn mean(samples: &[f64]) -> f64 {
         samples.iter().sum::<f64>() / samples.len().max(1) as f64
+    }
+
+    /// The pickup histogram as `le100:n,le250:n,…,gt8000:n`.
+    fn pickup_buckets(counts: &[u64]) -> String {
+        let last = PICKUP_BOUNDS_US.last().copied().unwrap_or(0);
+        counts
+            .iter()
+            .enumerate()
+            .map(|(bucket, count)| match PICKUP_BOUNDS_US.get(bucket) {
+                Some(bound) => format!("le{bound}:{count}"),
+                None => format!("gt{last}:{count}"),
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// The bucket that holds the median pickup, as its bound (`le…`), or
+    /// `none` without one.
+    fn pickup_median(counts: &[u64]) -> String {
+        let total: u64 = counts.iter().sum();
+        let mut seen = 0;
+        for (bucket, count) in counts.iter().enumerate() {
+            seen += count;
+            if total > 0 && seen * 2 >= total {
+                return match PICKUP_BOUNDS_US.get(bucket) {
+                    Some(bound) => format!("le{bound}"),
+                    None => format!("gt{}", PICKUP_BOUNDS_US.last().copied().unwrap_or(0)),
+                };
+            }
+        }
+        "none".into()
     }
 
     fn flag(args: &[String], name: &str) -> bool {
@@ -383,6 +446,8 @@ mod bench {
         backend: bool,
         /// Pace on the even grid, never anchored on a present.
         grid: bool,
+        /// Build the encoder without its event watcher: poll its events.
+        poll_events: bool,
         max_width: u32,
         max_height: u32,
         bitrate: u32,
@@ -396,6 +461,10 @@ mod bench {
         fn parse(args: &[String], rates: &Rates, display: &Display) -> Result<(Self, Sinks)> {
             let backend = flag(args, "--backend");
             let grid = flag(args, "--grid");
+            let poll_events = flag(args, "--poll-events");
+            if poll_events && backend {
+                return Err("--poll-events builds the encoder; a backend's events wake it".into());
+            }
             let max_width = option(args, "--max-width")
                 .map(str::parse)
                 .transpose()?
@@ -441,6 +510,7 @@ mod bench {
             let limits = Self {
                 backend,
                 grid,
+                poll_events,
                 max_width,
                 max_height,
                 bitrate,
@@ -488,6 +558,32 @@ mod bench {
                 Self::Backend(_) => false,
             }
         }
+
+        /// Units submitted and not yet collected.
+        fn pending(&self) -> usize {
+            match self {
+                Self::Encoder(encoder) => encoder.pending_len(),
+                Self::Backend(backend) => backend.pending_video(),
+            }
+        }
+
+        /// How soon the loop drains again while units are pending, if
+        /// nothing wakes it first: `None` while each output wakes it.
+        fn drain_poll(&self) -> Option<Duration> {
+            match self {
+                Self::Encoder(encoder) => encoder.drain_poll(),
+                Self::Backend(backend) => backend.drain_poll(),
+            }
+        }
+
+        /// When an armed tick that waits on the encoder's input request is
+        /// asked again, if the request does not wake the loop first.
+        fn idle_until(&self) -> Option<Instant> {
+            match self {
+                Self::Encoder(encoder) => encoder.idle_until(),
+                Self::Backend(backend) => backend.capture_idle_until(None),
+            }
+        }
     }
 
     /// What the run counted, access unit by access unit.
@@ -508,10 +604,15 @@ mod bench {
         capture_us: u128,
         calls: u64,
         /// Capture calls (a submit, or the backend's `capture_video`), and
-        /// those of them that found nothing new and left the tick armed: the
-        /// polls a still or slowly changing desktop costs.
+        /// those of them that left the tick armed, having found nothing new
+        /// or an encoder that had not asked for input yet: the polls a still
+        /// or slowly changing desktop, or a serial encoder, costs.
         captures: u64,
         polls: u64,
+        /// The loop's waits, as thread C's, and those an encoder event
+        /// ended.
+        wakes: u64,
+        woken: u64,
         /// Submits that spent their tick, and from each dated picture's
         /// present to the submit that took it, in milliseconds.
         submits: u64,
@@ -606,21 +707,32 @@ mod bench {
         }
     }
 
+    /// What the paced loop runs with.
+    struct Run<'a> {
+        rates: &'a Rates,
+        limits: &'a Limits,
+        steps: &'a [u32],
+        /// What the encoder's event watcher wakes.
+        wake: &'a EncoderWake,
+        start: Instant,
+    }
+
     /// Each step runs the run's seconds at its pace, as the host's capture
     /// worker paces: a submission on each tick, every ready unit drained in
     /// between, until `--frames` units are out. A tick whose capture found
     /// nothing new stays armed, as thread C keeps it: it is asked again every
-    /// `DRAIN_POLL` within `HOT_WINDOW` of the last new picture, and once a
-    /// period otherwise.
-    fn paced(
-        rates: &Rates,
-        limits: &Limits,
-        steps: &[u32],
-        coder: &mut Coder,
-        sinks: &mut Sinks,
-        tally: &mut Tally,
-        start: Instant,
-    ) -> Result {
+    /// `DRAIN_POLL` within `HOT_WINDOW` of the last new picture or while the
+    /// encoder holds units, and once a period otherwise. A tick whose submit
+    /// waits for the encoder's input request is asked again as the request
+    /// wakes the loop, or at the encoder's `idle_until`.
+    fn paced(run: &Run<'_>, coder: &mut Coder, sinks: &mut Sinks, tally: &mut Tally) -> Result {
+        let Run {
+            rates,
+            limits,
+            steps,
+            wake,
+            start,
+        } = *run;
         let mut current_bitrate = limits.bitrate;
         let mut pacer = Pacer::new(rates.fps, start);
         for (step, &pace) in steps.iter().enumerate() {
@@ -652,7 +764,9 @@ mod bench {
                     pace_fps: pace,
                 };
                 let now = Instant::now();
-                let tick = pacer.due(now) && poll_due.is_none_or(|due| now >= due);
+                let tick = pacer.due(now)
+                    && poll_due.is_none_or(|due| now >= due)
+                    && coder.idle_until().is_none_or(|until| now >= until);
                 let force =
                     tick && tally.forced == 0 && start.elapsed() > Duration::from_millis(1500);
                 if force {
@@ -752,25 +866,35 @@ mod bench {
                     } else {
                         tally.polls += 1;
                         let done = Instant::now();
-                        poll_due = Some(if done < hot_until {
-                            done + DRAIN_POLL
-                        } else {
-                            done + DRAIN_POLL.max(pacer.period())
+                        // A submit that waits for the encoder's input request
+                        // names its own retry, and the request wakes the loop.
+                        poll_due = coder.idle_until().is_none().then(|| {
+                            if done < hot_until || coder.pending() > 0 {
+                                done + DRAIN_POLL
+                            } else {
+                                done + DRAIN_POLL.max(pacer.period())
+                            }
                         });
                     }
                 }
-                let idle = if limits.backend {
-                    limits.poll
-                } else {
-                    Duration::from_millis(1)
-                };
+                // Wait as thread C waits: for the next tick or armed poll, a
+                // polled encoder's next drain while it holds units, at most a
+                // context check, or the encoder's wake.
+                let now = Instant::now();
                 let earliest = pacer.earliest();
-                std::thread::sleep(
-                    poll_due
-                        .map_or(earliest, |due| due.max(earliest))
-                        .saturating_duration_since(Instant::now())
-                        .min(idle),
-                );
+                let mut next = poll_due.map_or(earliest, |due| due.max(earliest));
+                if let Some(until) = coder.idle_until() {
+                    next = next.max(until);
+                }
+                if coder.pending() > 0
+                    && let Some(drain) = coder.drain_poll()
+                {
+                    let drain = if limits.backend { limits.poll } else { drain };
+                    next = next.min(now + drain);
+                }
+                let woken = wake.wait(next.min(now + CONTEXT_CHECK_INTERVAL))?;
+                tally.wakes += 1;
+                tally.woken += u64::from(woken);
             }
         }
         Ok(())
@@ -812,6 +936,18 @@ mod bench {
                 median(&tally.drain_kcycles),
                 mean(&tally.drain_kcycles),
             );
+            println!(
+                "encoder_events={} waiting={} waiting_per_s={:.1} have_output_to_collect_us={} have_output_to_collect_p50_us={}",
+                if stats.events_pushed {
+                    "pushed"
+                } else {
+                    "polled"
+                },
+                stats.waiting,
+                stats.waiting as f64 / elapsed,
+                pickup_buckets(&stats.pickup),
+                pickup_median(&stats.pickup),
+            );
         }
         if limits.backend {
             println!(
@@ -840,11 +976,14 @@ mod bench {
             );
         }
         println!(
-            "capture_calls={} capture_calls_per_s={:.1} polls={} polls_per_s={:.1}",
+            "capture_calls={} capture_calls_per_s={:.1} polls={} polls_per_s={:.1} loop_wakes={} loop_wakes_per_s={:.1} woken_per_s={:.1}",
             tally.captures,
             tally.captures as f64 / elapsed,
             tally.polls,
             tally.polls as f64 / elapsed,
+            tally.wakes,
+            tally.wakes as f64 / elapsed,
+            tally.woken as f64 / elapsed,
         );
         println!(
             "pacing={} dated_submits={} of {} present_to_submit_p50_ms={:.3} present_to_submit_p95_ms={:.3} coalesced_presents={} coalesced_presents_per_s={:.2}",
