@@ -41,9 +41,10 @@ use crate::{
     error,
     modes::{DisplayModeError, Mode, ModeList, ModeTarget},
     protocol::{
-        CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE, CAPABILITY_PEER_CURSORS,
-        CAPABILITY_PHYSICAL_KEYS, CURSOR_SLOTS, DesktopKind, MAX_PEER_CURSORS, MAX_VIEWERS,
-        NoticeCode, Route, SessionState, ShapeSlot, StateRecord, VideoSize,
+        CAPABILITY_ARRIVAL_TIME, CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE,
+        CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS, CAPABILITY_PHYSICAL_KEYS, CURSOR_SLOTS,
+        DesktopKind, MAX_PEER_CURSORS, MAX_VIEWERS, NoticeCode, Route, SessionState, ShapeSlot,
+        StateRecord, VideoSize,
     },
     security, valid_service,
 };
@@ -412,6 +413,17 @@ impl Viewer {
             .capabilities
             .iter()
             .any(|capability| capability == CAPABILITY_PEER_CURSORS);
+        // This viewer always lists both: each is spoken if the host listed it.
+        let listed = |wanted: &str| {
+            accepted
+                .capabilities
+                .iter()
+                .any(|capability| capability == wanted)
+        };
+        let outbound = Outbound::new(
+            listed(CAPABILITY_ARRIVAL_TIME).then_some(now),
+            listed(CAPABILITY_KEYFRAME_SEQ),
+        );
         let shared = Arc::new(ViewerShared {
             state: Mutex::new(ViewerStateSlot {
                 codec: accepted.codec,
@@ -432,7 +444,7 @@ impl Viewer {
             cursor: Mutex::new(CursorSlot::default()),
             peer_cursors: Mutex::new(PeerCursorsSlot::default()),
             shapes: Mutex::new(ShapeTable::default()),
-            outbound: Outbound::new(),
+            outbound,
         });
         let sink = VideoSink::for_session(
             Arc::downgrade(&shared),

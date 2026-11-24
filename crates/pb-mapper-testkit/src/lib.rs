@@ -25,7 +25,8 @@
 //! ```
 //!
 //! A case that needs a slower network puts a [`shaped_link`] hop, with its
-//! delay and rate, in front of a [`Relay`] and connects through the hop.
+//! delay and rate, in front of a [`Relay`] and connects through the hop; a
+//! [`shaped_link_each_way`] shapes each direction apart.
 //!
 //! A case about the SDK rather than the CLI entry points builds its own
 //! backend with [`tcp_echo`] or [`udp_echo`], and its tunnel with
@@ -72,7 +73,7 @@ pub use control::{V2ControlSpec, register_v2_control};
 pub use echo::{Echo, tcp_echo, udp_echo};
 pub use relay::{Relay, loopback_direct, loopback_quic};
 pub use sdk::{admin_client, publish, subscribe};
-pub use shaped::{Shape, ShapedLink, shaped_link};
+pub use shaped::{Shape, ShapedLink, shaped_link, shaped_link_each_way};
 pub use traffic::{
     connected_udp_socket, gen_random_msg, probe_udp_socket, raw_tcp_probe, run_framed_tcp_echo,
     run_raw_tcp_echo, run_udp_datagram_echo, tagged_echo, wait_until_udp_socket_forwards,

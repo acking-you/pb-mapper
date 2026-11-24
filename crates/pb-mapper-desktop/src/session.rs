@@ -14,15 +14,15 @@ mod tests;
 use self::sender::Sender;
 use crate::{
     HostPath, QualityPreset, VideoCodec, VideoLimits, VideoSize,
-    credit::{CreditLedger, ReceiptAhead},
+    credit::{CreditLedger, KeyframeAhead, ReceiptAhead},
     idr::IdrReason,
     lane::LaneCommand,
     modes::{Mode, ModeCommand},
     protocol::{
-        CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE,
-        CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265,
-        CAPABILITY_PEER_CURSORS, PeerSlot, RateModel, Route, StateReason, StateRecord, StopReason,
-        ViewerMessage,
+        CAPABILITY_ARRIVAL_TIME, CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE,
+        CAPABILITY_DISPLAY_MODE, CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE,
+        CAPABILITY_H265, CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS, PeerSlot, RateModel,
+        Route, StateReason, StateRecord, StopReason, ViewerMessage,
     },
     qos::{Qos, TargetValues},
     scheduler::Wake,
@@ -74,6 +74,7 @@ pub(crate) fn stop_message(reason: StopReason) -> &'static str {
 enum Violation {
     AuthenticatedTwice,
     Receipt(ReceiptAhead),
+    Keyframe(KeyframeAhead),
     /// An fps cap outside 1..=120.
     FpsCap(u32),
     /// A display mode request from a viewer this host offered none.
@@ -86,6 +87,7 @@ impl fmt::Display for Violation {
         match self {
             Self::AuthenticatedTwice => f.write_str("authenticated twice"),
             Self::Receipt(ahead) => ahead.fmt(f),
+            Self::Keyframe(ahead) => ahead.fmt(f),
             Self::FpsCap(fps) => write!(f, "fps cap {fps} out of bounds"),
             Self::DisplayModeNotOffered => {
                 f.write_str("a display mode request without the capability")
@@ -124,6 +126,12 @@ pub(crate) struct Session {
     pub cursor_shape: bool,
     /// Both ends listed `peer_cursors`: the viewer reads other peers' pointers.
     pub peer_cursors: bool,
+    /// Both ends listed `arrival_time`: the viewer stamps receipts and probe
+    /// echoes, and reads the one-way queues in `Stats`.
+    arrival_time: bool,
+    /// Both ends listed `keyframe_seq`: a keyframe request may name the last
+    /// seq the viewer read.
+    keyframe_seq: bool,
     /// When the session was accepted, for display only.
     pub started_unix_ms: u64,
     /// 0 unknown, 1 direct, 2 relay (`ViewerMessage::Path`).
@@ -195,7 +203,8 @@ impl Session {
         let now = Instant::now();
         let listed = |wanted: &str| capabilities.iter().any(|capability| capability == wanted);
         let both = |wanted: &str| listed(wanted) && offered.iter().any(|value| value == wanted);
-        let qos = Qos::new(
+        let arrival_time = both(CAPABILITY_ARRIVAL_TIME);
+        let mut qos = Qos::new(
             limits,
             codec,
             quality,
@@ -203,6 +212,9 @@ impl Session {
             rate_model,
             now,
         );
+        if arrival_time {
+            qos.use_one_way();
+        }
         let targets = qos.targets(now);
         Arc::new(Self {
             shared: Arc::new(SessionShared::new_in_room(
@@ -221,9 +233,11 @@ impl Session {
             display_mode: both(CAPABILITY_DISPLAY_MODE),
             cursor_shape: both(CAPABILITY_CURSOR_SHAPE),
             peer_cursors: both(CAPABILITY_PEER_CURSORS),
+            arrival_time,
+            keyframe_seq: both(CAPABILITY_KEYFRAME_SEQ),
             started_unix_ms: pb_mapper_core::time::unix_millis(),
             route: AtomicU8::new(0),
-            credit: Mutex::new(CreditLedger::new(now)),
+            credit: Mutex::new(CreditLedger::new(now, arrival_time)),
             qos: Mutex::new(qos),
             credit_changed: Notify::new(),
             control_denied: AtomicBool::new(false),
@@ -341,21 +355,37 @@ impl Session {
         let shared = &self.shared;
         match message {
             ViewerMessage::Authenticate { .. } => return Err(Violation::AuthenticatedTwice),
-            ViewerMessage::Received { seq } => {
+            ViewerMessage::Received { seq, at_us } => {
+                // A stamp from a viewer that was not asked for one is ignored.
+                let at_us = at_us.filter(|_| self.arrival_time);
                 let receipt = self
                     .credit
                     .lock()
-                    .on_receipt(seq, now)
+                    .on_receipt(seq, now, at_us)
                     .map_err(Violation::Receipt)?;
                 self.update_qos(now, |qos| qos.on_receipt(receipt, now));
                 self.credit_changed.notify_one();
             }
-            ViewerMessage::ProbeEcho { nonce } => {
-                // The receipts' own queue, which a cut needs as its witness
-                // unless the probes' delay persists.
-                let base = self.qos.lock().base_rtt();
-                let ack_queue = base.map(|base| self.credit.lock().ack_queue(base, now));
-                self.update_qos(now, |qos| qos.on_probe_echo(nonce, now, ack_queue));
+            ViewerMessage::ProbeEcho { nonce, at_us } => {
+                let (base, sent, floor_gap) = {
+                    let qos = self.qos.lock();
+                    (qos.base_rtt(), qos.probe_sent_at(nonce), qos.floor_gap())
+                };
+                // The probe's own queue toward the viewer, and the receipts',
+                // which a cut needs as its witness unless the probes' delay
+                // persists.
+                let (forward, ack_queue) = {
+                    let mut credit = self.credit.lock();
+                    credit.set_floor_gap(floor_gap);
+                    let forward = at_us
+                        .filter(|_| self.arrival_time)
+                        .zip(sent)
+                        .and_then(|(at_us, sent)| credit.probe_queue(at_us, sent, now));
+                    (forward, base.map(|base| credit.ack_queue(base, now)))
+                };
+                self.update_qos(now, |qos| {
+                    qos.on_probe_echo(nonce, now, forward, ack_queue);
+                });
             }
             ViewerMessage::Presented {
                 generation,
@@ -366,7 +396,22 @@ impl Session {
                     shared.wake.notify();
                 }
             }
-            ViewerMessage::Keyframe { reason } => {
+            ViewerMessage::Keyframe { reason, after_seq } => {
+                // A viewer that drops predicted frames until the IDR names
+                // the last seq it read: B-send stops sending them, unless an
+                // IDR already followed that seq. Every JPEG picture stands
+                // alone.
+                if let Some(after_seq) = after_seq.filter(|_| self.keyframe_seq)
+                    && self.codec != VideoCodec::Jpeg
+                    && self
+                        .credit
+                        .lock()
+                        .skip_to_keyframe(after_seq, now)
+                        .map_err(Violation::Keyframe)?
+                {
+                    // A head that waits for credit is dropped now.
+                    self.credit_changed.notify_one();
+                }
                 shared.idr.lock().request(IdrReason::Viewer(reason));
                 shared.wake.notify();
             }
@@ -395,6 +440,7 @@ impl Session {
             ViewerMessage::Resume {} => {
                 let paused = self.paused();
                 self.update_qos(now, |qos| qos.resume(now));
+                self.credit.lock().reset_one_way();
                 shared.idr.lock().force(IdrReason::Resume);
                 shared.wake.notify();
                 self.credit_changed.notify_one();
@@ -411,6 +457,7 @@ impl Session {
                     self.changes.bump();
                 }
                 self.qos.lock().reset_baseline();
+                self.credit.lock().reset_one_way();
             }
             ViewerMessage::Control { enabled } => {
                 if enabled && !shared.policy.allowed() {

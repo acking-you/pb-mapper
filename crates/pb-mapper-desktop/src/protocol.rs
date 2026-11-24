@@ -42,7 +42,14 @@ pub(crate) const CAPABILITY_CURSOR_SHAPE: &str = "cursor_shape";
 /// Both ways: this end speaks peer cursors. Only when both listed it does
 /// the host write `PeerCursor`.
 pub(crate) const CAPABILITY_PEER_CURSORS: &str = "peer_cursors";
-const MAX_CAPABILITIES: usize = 16;
+/// Both ways: this end speaks arrival times. Only when both listed it does
+/// the viewer write `Received::at_us` and `ProbeEcho::at_us`, and the host
+/// write `StatsRecord::forward_queue_ms` and `reverse_queue_ms`.
+pub(crate) const CAPABILITY_ARRIVAL_TIME: &str = "arrival_time";
+/// Both ways: this end speaks keyframe sequences. Only when both listed it
+/// does the viewer write `Keyframe::after_seq`.
+pub(crate) const CAPABILITY_KEYFRAME_SEQ: &str = "keyframe_seq";
+pub(crate) const MAX_CAPABILITIES: usize = 16;
 
 /// Viewers a host serves at once.
 pub(crate) const MAX_VIEWERS: usize = 4;
@@ -171,54 +178,54 @@ pub(crate) enum ViewerMessage {
     /// input.
     Received {
         seq: u64,
+        /// When the viewer finished reading `seq`'s `Video`, its payload
+        /// included, in microseconds since its session began. Only to a host
+        /// that listed `arrival_time`, and an observation, never authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_us: Option<u64>,
     },
     /// Echo of `HostMessage::Probe`, written by the viewer's network task.
     ProbeEcho {
         nonce: u64,
+        /// When the viewer finished reading the probe, on the clock of
+        /// `Received::at_us`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at_us: Option<u64>,
     },
     /// The newest frame actually presented and validated by the viewer's
     /// `VideoSink`. Input authorisation only.
-    Presented {
-        generation: u64,
-        frame_id: u64,
-    },
+    Presented { generation: u64, frame_id: u64 },
     Keyframe {
         reason: KeyframeReason,
+        /// The last `Video` seq the viewer had read when it asked, sent only
+        /// while predicted frames are of no use to it before the next IDR:
+        /// the host then stops sending them until it admits an IDR, unless it
+        /// admitted one after this seq. Only to a host that listed
+        /// `keyframe_seq`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_seq: Option<u64>,
     },
     /// 1..=120: a runtime limit, separate from `limits`.
-    FpsCap {
-        fps: u32,
-    },
+    FpsCap { fps: u32 },
     /// Live: never a reconnect, never an encoder rebuild.
-    Quality {
-        preset: QualityPreset,
-    },
+    Quality { preset: QualityPreset },
     /// The viewer is hidden: the host ends control and stops capture.
     Pause {},
     /// The host forces an IDR and restarts its QoS startup.
     Resume {},
     /// Sent on change: resets the host's RTT baseline.
-    Path {
-        route: Route,
-    },
+    Path { route: Route },
     /// Ordered input lane.
-    Control {
-        enabled: bool,
-    },
+    Control { enabled: bool },
     /// Ordered input lane.
     Release {},
     /// Ordered input lane; includes `Input::Lock`.
-    Input {
-        event: InputEvent,
-    },
+    Input { event: InputEvent },
     /// Only after `PING_IDLE` without any other message.
     Ping {},
     /// Ordered input lane: change the host display's mode to one it listed
     /// in `StateRecord::modes`. Only to a host that listed `display_mode`.
-    DisplayMode {
-        width: u32,
-        height: u32,
-    },
+    DisplayMode { width: u32, height: u32 },
     /// Ordered input lane: back to the display's original mode. Only to a
     /// host that listed `display_mode`.
     RestoreDisplayMode {},
@@ -335,6 +342,15 @@ pub(crate) struct StatsRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_delay_ms: Option<u32>,
     pub ack_queue_ms: u32,
+    /// The receipts' queue toward the viewer, from its arrival times: the
+    /// median over the ack queue's receipts. Only to a viewer that listed
+    /// `arrival_time`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward_queue_ms: Option<u32>,
+    /// The receipts' queue on their way back: the median of the newest three.
+    /// Only to a viewer that listed `arrival_time`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse_queue_ms: Option<u32>,
     /// The median time a unit stayed in the encoder, from submit to output,
     /// over the last second. Only to a viewer that listed `encoder_dwell`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -580,14 +596,33 @@ mod tests {
                 quality: QualityPreset::Balanced,
                 capabilities: vec![],
             },
-            ViewerMessage::Received { seq: 3 },
-            ViewerMessage::ProbeEcho { nonce: 1 },
+            ViewerMessage::Received {
+                seq: 3,
+                at_us: None,
+            },
+            ViewerMessage::Received {
+                seq: 4,
+                at_us: Some(1_250_000),
+            },
+            ViewerMessage::ProbeEcho {
+                nonce: 1,
+                at_us: None,
+            },
+            ViewerMessage::ProbeEcho {
+                nonce: 2,
+                at_us: Some(u64::MAX),
+            },
             ViewerMessage::Presented {
                 generation: 2,
                 frame_id: 7,
             },
             ViewerMessage::Keyframe {
                 reason: KeyframeReason::DecoderError,
+                after_seq: None,
+            },
+            ViewerMessage::Keyframe {
+                reason: KeyframeReason::Gap,
+                after_seq: Some(41),
             },
             ViewerMessage::FpsCap { fps: 30 },
             ViewerMessage::Quality {
@@ -726,6 +761,8 @@ mod tests {
                 base_rtt_ms: None,
                 queue_delay_ms: Some(2),
                 ack_queue_ms: 0,
+                forward_queue_ms: Some(1),
+                reverse_queue_ms: Some(300),
                 encoder_dwell_ms: Some(3),
                 dropped_frames: 0,
                 skipped_ticks: 1,
@@ -779,9 +816,38 @@ mod tests {
         let mut nested = serde_json::to_value(&viewer[0]).unwrap();
         nested["limits"]["bitrate"] = json!(1);
         assert!(serde_json::from_value::<ViewerMessage>(nested).is_err());
-        let mut nested = serde_json::to_value(&viewer[12]).unwrap();
+        let mut nested = serde_json::to_value(&viewer[15]).unwrap();
+        assert_eq!(nested["op"], "input");
         nested["event"]["input"]["unexpected"] = json!(true);
         assert!(serde_json::from_value::<ViewerMessage>(nested).is_err());
+        // An arrival time and a keyframe's seq are left out when absent, as
+        // a host that never listed them reads these messages, and absent
+        // means none.
+        for (message, golden) in [
+            (&viewer[1], json!({"op": "received", "seq": 3})),
+            (
+                &viewer[2],
+                json!({"op": "received", "seq": 4, "at_us": 1_250_000}),
+            ),
+            (&viewer[3], json!({"op": "probe_echo", "nonce": 1})),
+            (
+                &viewer[6],
+                json!({"op": "keyframe", "reason": "decoder_error"}),
+            ),
+            (
+                &viewer[7],
+                json!({"op": "keyframe", "reason": "gap", "after_seq": 41}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(message).unwrap(), golden);
+        }
+        assert!(matches!(
+            serde_json::from_value(json!({"op": "received", "seq": 3})).unwrap(),
+            ViewerMessage::Received {
+                seq: 3,
+                at_us: None
+            }
+        ));
         assert!(
             serde_json::from_value::<ViewerMessage>(json!({"op": "probe", "nonce": 1})).is_err()
         );
@@ -846,6 +912,8 @@ mod tests {
             base_rtt_ms: Some(35),
             queue_delay_ms: Some(2),
             ack_queue_ms: 1,
+            forward_queue_ms: Some(1),
+            reverse_queue_ms: Some(300),
             encoder_dwell_ms: Some(3),
             dropped_frames: 4,
             skipped_ticks: 5,
@@ -868,6 +936,8 @@ mod tests {
             base_rtt_ms: None,
             queue_delay_ms: None,
             ack_queue_ms: 6,
+            forward_queue_ms: None,
+            reverse_queue_ms: None,
             encoder_dwell_ms: None,
             dropped_frames: 7,
             skipped_ticks: 8,
@@ -881,7 +951,7 @@ mod tests {
         for (message, golden) in [
             (
                 full,
-                r#"{"t":"stats","capture_fps":59.5,"pace_fps":60,"target_fps":50,"fps_cap":45,"bitrate":4000000,"encoder_bitrate":3800000,"sent_bitrate":3900000,"rtt_ms":40,"base_rtt_ms":35,"queue_delay_ms":2,"ack_queue_ms":1,"encoder_dwell_ms":3,"dropped_frames":4,"skipped_ticks":5,"keyframes":6,"frames":60,"bytes":500000,"adaptation":"lowering_fps","rate_model":"timestamp","gop":4294967295}"#,
+                r#"{"t":"stats","capture_fps":59.5,"pace_fps":60,"target_fps":50,"fps_cap":45,"bitrate":4000000,"encoder_bitrate":3800000,"sent_bitrate":3900000,"rtt_ms":40,"base_rtt_ms":35,"queue_delay_ms":2,"ack_queue_ms":1,"forward_queue_ms":1,"reverse_queue_ms":300,"encoder_dwell_ms":3,"dropped_frames":4,"skipped_ticks":5,"keyframes":6,"frames":60,"bytes":500000,"adaptation":"lowering_fps","rate_model":"timestamp","gop":4294967295}"#,
             ),
             (
                 sparse,

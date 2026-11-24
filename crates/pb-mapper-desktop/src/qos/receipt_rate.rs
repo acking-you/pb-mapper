@@ -19,6 +19,12 @@
 //!   IDR, except during a stall: the burst of receipts that crowd in after a
 //!   receipt gap of at least three frame intervals.
 //!
+//! With arrival times (`arrival_time`) each receipt is timed on the viewer's
+//! clock, when it read its newest unit, and its delay above the base RTT is
+//! that unit's queue toward the viewer: the way back, and whatever bunches
+//! receipts on it, are in neither. A receipt whose stamp was no sample is
+//! left out. This is what a receipt-driven rate control reads.
+//!
 //! The history is a ring reserved once, so a receipt allocates nothing.
 
 use crate::{credit::Receipt, video::MAX_FPS};
@@ -71,7 +77,10 @@ const _: () = assert!(COMPRESSED_DIVISOR >= 1, "a frame interval is divided by i
 /// One receipt, as the estimator keeps it.
 #[derive(Clone, Copy, Debug)]
 struct Sample {
-    at: Instant,
+    /// On the clock receipts are timed by: since the estimator began on the
+    /// host's, or the viewer's arrival time.
+    at: Duration,
+    /// From the host's write to the receipt, or the queue toward the viewer.
     delay: Duration,
     bytes: u64,
     behind_idr: bool,
@@ -101,19 +110,35 @@ pub(crate) struct ReceiptRateView {
 pub(crate) struct ReceiptRate {
     /// The newest receipts within `HISTORY` of the newest, oldest first.
     samples: VecDeque<Sample>,
-    /// When the last receipt came, kept when the history is trimmed.
-    last_at: Option<Instant>,
+    /// When the last receipt came, on the samples' clock, kept when the
+    /// history is trimmed.
+    last_at: Option<Duration>,
+    /// When the newest sample came, on the host's clock.
+    newest: Option<Instant>,
     flow: Flow,
     would_cut: bool,
+    /// The host's clock starts at the first receipt.
+    epoch: Option<Instant>,
+    /// Receipts are timed by the viewer's arrival times.
+    one_way: bool,
 }
 impl ReceiptRate {
     pub fn new() -> Self {
         Self {
             samples: VecDeque::with_capacity(RING),
             last_at: None,
+            newest: None,
             flow: Flow::Steady,
             would_cut: false,
+            epoch: None,
+            one_way: false,
         }
+    }
+
+    /// From now on, time receipts by the viewer's arrival times.
+    pub fn use_one_way(&mut self) {
+        self.clear();
+        self.one_way = true;
     }
 
     /// Forget the receipts: they were measured on another path, or before a
@@ -121,14 +146,39 @@ impl ReceiptRate {
     pub fn clear(&mut self) {
         self.samples.clear();
         self.last_at = None;
+        self.newest = None;
         self.flow = Flow::Steady;
     }
 
-    /// One receipt at `at`, while the host paces at `pace` fps.
-    pub fn on_receipt(&mut self, receipt: Receipt, at: Instant, base: Option<Duration>, pace: u32) {
+    /// With arrival times, delays are queues already: no base to take off.
+    fn base(&self, base: Option<Duration>) -> Option<Duration> {
+        if self.one_way {
+            Some(Duration::ZERO)
+        } else {
+            base
+        }
+    }
+
+    /// One receipt at `received`, while the host paces at `pace` fps.
+    pub fn on_receipt(
+        &mut self,
+        receipt: Receipt,
+        received: Instant,
+        base: Option<Duration>,
+        pace: u32,
+    ) {
+        let (at, delay) = match (self.one_way, receipt.arrival) {
+            (true, Some(arrival)) => (arrival.at, arrival.forward_queue),
+            (true, None) => return,
+            (false, _) => (
+                received.saturating_duration_since(*self.epoch.get_or_insert(received)),
+                receipt.delay,
+            ),
+        };
+        let base = self.base(base);
         let frame = frame_interval(pace);
         if let Some(last) = self.last_at {
-            let gap = at.saturating_duration_since(last);
+            let gap = at.saturating_sub(last);
             self.flow = if gap >= frame * STALL_FRAMES {
                 Flow::Gap
             } else if gap < frame / COMPRESSED_DIVISOR && self.flow != Flow::Steady {
@@ -138,18 +188,19 @@ impl ReceiptRate {
             };
         }
         self.last_at = Some(at);
+        self.newest = Some(received);
         // Popping first keeps the ring within the capacity reserved for it.
         while self.samples.len() >= RING
             || self
                 .samples
                 .front()
-                .is_some_and(|oldest| at.saturating_duration_since(oldest.at) > HISTORY)
+                .is_some_and(|oldest| at.saturating_sub(oldest.at) > HISTORY)
         {
             self.samples.pop_front();
         }
         self.samples.push_back(Sample {
             at,
-            delay: receipt.delay,
+            delay,
             bytes: receipt.bytes,
             behind_idr: receipt.behind_idr,
         });
@@ -170,16 +221,17 @@ impl ReceiptRate {
         pace: u32,
     ) -> ReceiptRateView {
         let would_cut = std::mem::take(&mut self.would_cut);
-        let fresh = self
-            .samples
-            .back()
-            .is_some_and(|newest| now.saturating_duration_since(newest.at) <= HISTORY);
+        let fresh = !self.samples.is_empty()
+            && self
+                .newest
+                .is_some_and(|newest| now.saturating_duration_since(newest) <= HISTORY);
         if !fresh {
             return ReceiptRateView {
                 would_cut,
                 ..ReceiptRateView::default()
             };
         }
+        let base = self.base(base);
         let frame = frame_interval(pace);
         ReceiptRateView {
             standing: base.and_then(|base| self.standing(base, frame)),
@@ -221,8 +273,7 @@ impl ReceiptRate {
             .rev()
             .enumerate()
             .find(|(index, sample)| {
-                index + 1 >= STANDING_RECEIPTS
-                    && newest.saturating_duration_since(sample.at) >= span
+                index + 1 >= STANDING_RECEIPTS && newest.saturating_sub(sample.at) >= span
             })
             .map(|(index, _)| index + 1)
     }
@@ -252,12 +303,12 @@ impl ReceiptRate {
             let (bytes, end) = group.map_or((later.bytes, later), |(bytes, end)| {
                 (bytes.saturating_add(later.bytes), end)
             });
-            if later.at.saturating_duration_since(earlier.at) < compressed {
+            if later.at.saturating_sub(earlier.at) < compressed {
                 group = Some((bytes, end));
                 continue;
             }
             group = None;
-            let gap = end.at.saturating_duration_since(earlier.at);
+            let gap = end.at.saturating_sub(earlier.at);
             if end.delay.saturating_sub(base) < gap {
                 continue;
             }
@@ -278,7 +329,7 @@ impl ReceiptRate {
     /// Bits per second over the history, from its first receipt to its last.
     fn used_bps(&self) -> Option<u64> {
         let first = self.samples.front()?.at;
-        let span = self.samples.back()?.at.saturating_duration_since(first);
+        let span = self.samples.back()?.at.saturating_sub(first);
         if span < USED_SPAN_MIN {
             return None;
         }
@@ -365,6 +416,7 @@ mod tests {
                 delay: BASE + Duration::from_millis(queue_ms),
                 bytes,
                 behind_idr,
+                arrival: None,
             };
             self.rate.on_receipt(receipt, self.now, Some(BASE), PACE);
         }
@@ -448,6 +500,7 @@ mod tests {
                 delay: ms(400),
                 bytes: 4250,
                 behind_idr: false,
+                arrival: None,
             };
             blind.on_receipt(receipt, t0 + ms(n * 17), None, PACE);
         }
