@@ -1,6 +1,10 @@
 """Expected rewrites, built from the bit positions sps_dump.py finds: the
 bits up to the VUI flag or the restriction flag, then the restriction with
-max_num_reorder_frames 0 and max_dec_frame_buffering the reference frames."""
+max_num_reorder_frames 0 and max_dec_frame_buffering the reference frames.
+A restriction added where there was none takes its other fields as
+VideoToolbox writes its own: motion_vectors_over_pic_boundaries 1, both
+size denominators 0 (no bound stated; an absent restriction infers 2 and
+1) and both log2_max_mv_length 15 (what an absent one infers)."""
 import os
 import sys
 

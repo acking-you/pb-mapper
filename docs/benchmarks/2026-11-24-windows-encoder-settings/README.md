@@ -39,16 +39,20 @@ tests need SPS that real encoders wrote and SPS in the shapes they did not.
   positions it finds: the bits up to the VUI flag or the restriction flag,
   then a restriction with `max_num_reorder_frames` 0 and
   `max_dec_frame_buffering` the reference frames (and, where there was
-  none, a VUI with no other field and the restriction's other fields at
-  their inferred values, the motion-vector lengths 15 as VideoToolbox writes
-  them): [`expected.txt`](expected.txt). An SPS that already states 0 comes
-  out as it went in, which `restrict_reorder` sends unchanged.
+  none, a VUI with no other field and the restriction's other fields as
+  VideoToolbox writes its own: `motion_vectors_over_pic_boundaries` 1, the
+  motion-vector lengths 15, which an absent restriction infers too, and
+  both size denominators 0, which states no bound where an absent
+  restriction infers 2 and 1): [`expected.txt`](expected.txt). An SPS that
+  already states 0 comes out as it went in, which `restrict_reorder` sends
+  unchanged.
 
-The tests (`cargo test -p pb-mapper-desktop --lib codec::`) take these
-bytes as they are: every sample and every rewrite reads whole and writes
-back byte for byte; the fields read match `sps_dump.py`'s; each rewrite
-equals `expected.txt`'s; and on a Mac Core Media builds a format
-description from each of the seven rewrites with its PPS
+The tests take these bytes as they are. `cargo test -p pb-mapper-desktop
+--lib codec::`: every sample and every rewrite reads whole and writes back
+byte for byte; the fields read match `sps_dump.py`'s; and each rewrite
+equals `expected.txt`'s. On a Mac, `core_media_takes_every_sps_rewrite`
+(`platform/macos/tests.rs`) has Core Media build a format description
+from each of the seven rewrites with its PPS
 (`CMVideoFormatDescriptionCreateFromH264ParameterSets`) at the original's
 dimensions. The 4:4:4 sample is left out of that last check, since its PPS
 is VideoToolbox's 4:2:0 one. The PPS the scaling sample is paired with is
@@ -89,13 +93,20 @@ drives a display), in release mode, and each result goes in
   encode ms and dwell p50/p95; and `--pace 60,30,15,5` on the moving
   pattern with each profile, which must stay `nominal` within ±25%.
   `ffprobe` must show profile High and `has_b_frames=0`, and
-  `ffmpeg -bsf:v trace_headers` the SPS VUI, before and after the rewrite
-  (`--output` holds what the host sends). `encoder_opened` gives the
-  profile, CABAC, B-frame count and `sps_reorder` the encoder took.
+  `ffmpeg -bsf:v trace_headers` the SPS VUI, before and after the rewrite:
+  after in `--output`, which holds what the host sends, and before in
+  `encoder_opened`'s `encoder_sps`, the encoder's own SPS in hex, written
+  out behind a start code. `encoder_opened` gives the profile, CABAC,
+  B-frame count and `sps_reorder` the encoder took; those SPS are each
+  vendor's samples for `codec/sps.rs`'s tests.
 - **Decoders.** The `--output` dumps decoded by a Windows viewer's Media
   Foundation decoder, VideoToolbox on a Mac, Android's MediaCodec and
   gst-libav, and a live session's `picture_latency_ms` and decoder timings
   on each viewer, Baseline against High.
+- **Fallback.** On any GPU whose encoder refuses High, fails in it or
+  reorders in it: `desktop_h264_high_failed` says what failed, the next
+  encoder opens in Baseline, and the session keeps its picture, in the app
+  and through the helper.
 - **Quality against speed and scenario.** `--qvs 0`, `33`, `50`, `66` and
   `100`, each with and without `--scenario display-remoting`, for `--codec
   h264` and `--codec h265`, at the display's 1080p and at `--exact
@@ -106,8 +117,16 @@ drives a display), in release mode, and each result goes in
   session's largest size and pace (4.2 ms at 4K60), and the rate model
   stays `nominal`.
 - **GPU priority.** A GPU-saturating 3D load beside `video_bench 30 60
-  --animate`, and beside a live session, with and without `--gpu-priority`,
-  hardware-accelerated GPU scheduling on and off, in the app and through the
-  helper: dwell p50/p95, present-to-output, unique FPS and the load's own
-  frame rate. It goes on by default only if it lowers dwell p95 or
-  present-to-output without lowering the load's frame rate by more than 5%.
+  --animate`, with and without `--gpu-priority`, from an elevated prompt
+  and an unelevated one, hardware-accelerated GPU scheduling on and off,
+  with `RUST_LOG=pb_mapper_desktop::session=info` for
+  `desktop_gpu_priority`, which says whether the privilege was enabled,
+  the device took the priority and the class was raised: dwell p50/p95,
+  present-to-output, unique FPS and the load's own frame rate. A live
+  session, in the app and through the helper, takes the session's
+  `EncoderOptions::default()` (`NativeBackend`, `platform/windows/mod.rs`),
+  so those arms need a build with `gpu_priority` set there; through the
+  helper the capture worker's restricted token holds no privileges, so
+  that arm tests the scheduling class alone. It goes on by default only if
+  it lowers dwell p95 or present-to-output without lowering the load's
+  frame rate by more than 5%.

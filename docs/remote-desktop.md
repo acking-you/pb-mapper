@@ -1492,14 +1492,20 @@ only where a device sweep earns it
 ([Encoder rate model per GPU](#encoder-rate-model-per-gpu)). An encoder
 built with `EncoderOptions::gpu_priority` (`video_bench --gpu-priority`;
 off in a session until a device run under a GPU-bound load shows a gain)
-raises its capture device's GPU thread priority to 7, which needs the
-privilege to raise a base priority that the helper's SYSTEM worker has and
-the app usually lacks, and holds the process's GPU scheduling class at
-`HIGH`, never `REALTIME`, which can starve the compositor: the first such
-encoder of the process reads the class and raises it, the last one puts
-it back unless something else changed it meanwhile
-(`platform/windows/gpu_priority.rs`). Each call may fail harmlessly, and
-the outcome is logged once per process as `desktop_gpu_priority`.
+raises its capture device's GPU thread priority to 7 and holds the
+process's GPU scheduling class at `HIGH`, never `REALTIME`, which can
+starve the compositor: the first such encoder of the process reads the
+class and raises it, the last one puts it back unless something else
+changed it meanwhile (`platform/windows/gpu_priority.rs`). A positive
+device priority needs the privilege to raise a base priority
+(`SeIncreaseBasePriorityPrivilege`) enabled, which the guard does for its
+calls where the process's token holds it, as an elevated process's does,
+and undoes after them. An unelevated app's token does not hold it, and
+neither does the helper's capture worker's, which `helper/child.rs`
+restricts to no privileges: there both calls go without it. Whether that
+worker should keep this one privilege is a separate decision, for after
+the device run. Each call may fail harmlessly, and what each did is logged
+once per process as `desktop_gpu_priority`.
 
 macOS hosting uses
 ScreenCaptureKit, which scales the
@@ -1668,11 +1674,20 @@ Baseline, with CABAC taken back. High allows B-frames, so H.265's rule
 applies: an encoder that implements `CODECAPI_AVEncMPVDefaultBPictureCount`
 must take 0 and read 0 back, or it is built in Baseline, and one that does
 not relies on the required low-latency mode and the check of every output.
-A High encoder whose output is reordered fails, as before, and turns High
-off for the rest of its process (`desktop_h264_high_failed`), so the
-capture's retry, which builds the encoder again at once, builds it in
-Baseline; behind the helper that is the helper worker's process.
-`video_bench --h264-profile base` asks for Baseline. Nothing about this
+Every H.264 encoder took Baseline before, and none may lose H.264 to High,
+which has no software fallback: a High failure turns High off for the rest
+of the process (`H264_HIGH_FAILED`, `desktop_h264_high_failed`). An
+encoder that takes its High types and then will not start streaming, or
+reads a B-frame count above 0 back once it has them, is activated again at
+once, a new instance, in Baseline. One that fails before its first output
+(an input or output it refuses, or a stall), or whose output is reordered,
+fails that capture, as before, and the capture's retry, which builds the
+encoder again at once, builds it in Baseline. The latch lasts as long as
+the process that owns the encoder: the app, for a computer shared from the
+app; behind the desktop service, each connection's capture worker, so
+there every connection to a GPU whose encoder reorders or fails in High
+pays that one failed capture. `video_bench --h264-profile base` asks for
+Baseline. Nothing about this
 reaches the wire or the helper pipe: every viewer already decodes a Mac
 host's High stream. How much sharper a High picture is at the same bitrate,
 on which GPU, has not been measured yet
@@ -1684,7 +1699,12 @@ them. A Windows host's H.264 SPS goes out rewritten when its VUI has no such
 restriction, or one that allows reordering: `max_num_reorder_frames` 0 and
 `max_dec_frame_buffering` its reference frames, with a VUI holding only that
 restriction where it had none, and everything else, the constraint flags
-included, as the encoder wrote it (`codec/sps.rs`, through
+included, as the encoder wrote it. A restriction added where there was none
+states the rest as VideoToolbox writes its own: motion vectors may cross
+picture boundaries at the length an absent restriction allows
+(`log2_max_mv_length_*` 15), and
+both size denominators are 0, which states no bound where an absent
+restriction would infer 2 and 1 (`codec/sps.rs`, through
 `annexb::ParameterSets`). It is read once each time the encoder writes a
 different SPS, in its media type or in band, never for a unit that repeats
 it; a unit that carries it gets the rewrite in its place, and a keyframe
@@ -1698,7 +1718,7 @@ byte, SPS that VideoToolbox wrote on this project's Mac and SPS built with
 timing, an HRD, scaling matrices, picture order type 1 and field coding;
 compare each rewrite with one built by an independent reader and writer;
 and, on a Mac, have Core Media build a format description from each, at the
-original's dimensions
+original's dimensions (`platform/macos/tests.rs`)
 ([record](benchmarks/2026-11-24-windows-encoder-settings/README.md)).
 
 Every access unit is Annex B. An H.265 unit is a keyframe when it holds an
@@ -1937,8 +1957,12 @@ time and dwell, and the `--pace 60,30,15,5` sweep still `nominal` within
 ±25%; `--qvs 0,33,50,66,100`, with and without `--scenario
 display-remoting`, for H.264 and H.265 at 1080p and 4K; and `video_bench
 30 60 --animate` beside a GPU-saturating 3D load with and without
-`--gpu-priority`, hardware-accelerated GPU scheduling on and off, in the
-app and through the helper. A quality-against-speed value or the scenario
+`--gpu-priority`, elevated and not, hardware-accelerated GPU scheduling on
+and off. A live session, in the app or through the helper, takes
+`EncoderOptions::default()` from `NativeBackend` (`platform/windows/mod.rs`),
+so its arms need a build with `gpu_priority` set there; through the helper
+the capture worker holds no privileges, so that arm tests the scheduling
+class alone. A quality-against-speed value or the scenario
 becomes a vendor's default at a size only where it raises PSNR at equal
 bitrate by 0.3 dB or more (or cuts bytes at equal QP by 5% or more) while
 the median encode rises by 1 ms or less at 4K60, dwell stays within a
@@ -2354,14 +2378,19 @@ property), `cabac`, `profile` (the output type's: 257 Constrained High, 100
 High, 66 Baseline, H.265's 1 Main), the SPS's `sps_profile`, and
 `sps_reorder`, what the SPS said of reordering and what is sent: `0`,
 `unstated_rewritten_to_0`, `<n>_rewritten_to_0`, `unread`, or `unknown`
-before its media type carried an SPS (`video_bench`'s `encoder_opened`
-line takes the first in-band one); and `gpu_priority`. The H.265 probe's
-encoder logs none. It warns `desktop_h264_high_failed` when a High H.264
-encoder reordered its output and H.264 is Baseline for the rest of the
-process, and logs `desktop_gpu_priority` (whether the device took the
-priority, the error it refused it with, the scheduling class before, and
-whether it was raised) once per process, when an encoder first asks for
-it. These come from the process that owns the encoder: behind the helper
+before its media type carried an SPS; `sps`, that SPS in hex as the
+encoder wrote it, empty before one; and `gpu_priority`. An encoder whose
+media type carried no SPS logs `desktop_video_encoder_sps` (`encoder`,
+`sps_profile`, `sps_reorder`, `sps`) once, at the first it writes in band.
+The H.265 probe's encoder logs neither. It warns
+`desktop_h264_high_failed` (`encoder`, `detail`: what failed) when an
+H.264 encoder built in a High profile failed in it and H.264 is Baseline
+for the rest of the process, and logs `desktop_gpu_priority` (whether the
+privilege to raise a base priority was enabled and, if not, the error;
+whether the device took the priority and, if not, the error; the
+scheduling class before, and whether it was raised) once per process, when
+an encoder first asks for it. These come from the process that owns the
+encoder: behind the helper
 that is its capture worker, which logs nothing, so `service-host.log` does
 not have them. A Windows host warns
 `desktop_moves_placed` (win32: the error of a `SendInput` that refused a
@@ -3332,7 +3361,16 @@ does, on the encoder's events, and prints how often it woke
 (`loop_wakes_per_s`) with the encoder's `waiting` submits and the wait of
 each output from its announcement to its collection
 (`have_output_to_collect_us`); `--poll-events` builds the encoder without
-its watcher and drains it every 2 ms, the comparison's baseline.
+its watcher and drains it every 2 ms, the comparison's baseline. `--text`
+covers the display with a still page of ClearType text; `--h264-profile
+base|high`, `--qvs`, `--scenario display-remoting` and `--gpu-priority`
+build the encoder with those `EncoderOptions`; `--dump-source` writes the
+NV12 picture each submit gave the encoder, the reference for ffmpeg's PSNR
+and SSIM. It prints the encoder's read-back as an `encoder_opened` line,
+with the encoder's own SPS in hex (`encoder_sps`), and each unit's dwell
+and the time from its present to its output at p50 and p95. With
+`RUST_LOG` set (`pb_mapper_desktop::session=info`) the host's own events,
+such as `desktop_gpu_priority`, go to stderr.
 
 References: [issue #50](https://github.com/acking-you/pb-mapper/issues/50),
 [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput),

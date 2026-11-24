@@ -389,7 +389,8 @@ Nothing in the SDK crates knows it exists.
     whose hardware HEVC encoder passes a probe kept per adapter, and one
     encoder failure turns it off for the process; H.264 in a High profile
     with CABAC, Baseline where the encoder refuses High or may reorder in
-    it, and for the process once a High encoder reordered), `gpu_priority`
+    it, and for the process once a High encoder failed or reordered in
+    it), `gpu_priority`
     (the capture device's GPU thread priority and the process's GPU
     scheduling class, raised while an encoder that asks for it lives),
     `input` (enigo, and
