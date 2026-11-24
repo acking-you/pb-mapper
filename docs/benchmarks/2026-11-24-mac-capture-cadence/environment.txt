@@ -1,0 +1,6 @@
+ProductName:		macOS
+ProductVersion:		27.0
+BuildVersion:		26A425
+Apple M6
+25769803776
+Tue Nov 24 09:12:16 UTC 2026
