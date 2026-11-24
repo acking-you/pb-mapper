@@ -131,12 +131,13 @@ pub trait Backend: 'static {
         self.drain_poll()
     }
     /// Whether the last `capture_video` handed a tick to the capture source,
-    /// or spent it on a full encoder. A source with no new picture to encode
-    /// can leave the tick armed, even when `capture_video` collected the
-    /// previous tick's output. Thread C asks a push source again when it
-    /// wakes thread C or at its `capture_idle_until`, and a pull source,
-    /// which names no time, after `capture_poll()` for 250 ms after an input
-    /// thread C injected or a new picture, and a period later otherwise:
+    /// or spent it on a full encoder. A source with no new picture to encode,
+    /// or whose encoder has not asked for input yet, can leave the tick
+    /// armed, even when `capture_video` collected the previous tick's output.
+    /// Thread C asks a push source again when it wakes thread C or at its
+    /// `capture_idle_until`, and a pull source, which names no time, after
+    /// `capture_poll()` for 250 ms after an input thread C injected or a new
+    /// picture and while units are pending, and a period later otherwise:
     /// never at once, which would spin thread C.
     fn submitted_video(&self) -> bool {
         true

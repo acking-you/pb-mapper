@@ -140,13 +140,17 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     /// While the desktop is active (`hot_until`), it is asked again at its
     /// capture poll interval, so the next present goes out within that
     /// interval of appearing; while it is still, a period later, so it costs
-    /// no more capture calls than the grid.
+    /// no more capture calls than the grid. While the encoder still holds
+    /// units, it may be what kept the tick (a Windows MFT that asks for
+    /// input only once it has output its last unit): that frees up within
+    /// an encode, so it is asked again at the poll interval, still or not,
+    /// rather than a tick later.
     fn capture_poll_after(&self, at: Instant) -> Option<Instant> {
         if self.backend.capture_idle_until(None).is_some() {
             return None;
         }
         let poll = self.backend.capture_poll()?;
-        Some(if at < self.hot_until {
+        Some(if at < self.hot_until || self.backend.pending_video() > 0 {
             at + poll
         } else {
             at + poll.max(self.pacer.period())
