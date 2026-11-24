@@ -116,6 +116,13 @@ pub trait Backend: 'static {
     fn pending_video(&self) -> usize {
         0
     }
+    /// The encoder holds as many units as it takes, a bound of its own below
+    /// thread C's (`pending_video`): thread C skips a due tick, and counts it,
+    /// as for its own bound. Asked only for a tick that would otherwise
+    /// capture. Default: no bound of its own.
+    fn video_full(&self) -> bool {
+        false
+    }
     /// `Some(interval)`: thread C polls `drain_video` this often while units
     /// are pending. `None`: a push encoder that wakes thread C itself.
     fn drain_poll(&self) -> Option<Duration> {
@@ -296,6 +303,9 @@ impl<B: Backend + ?Sized> Backend for Box<B> {
     }
     fn pending_video(&self) -> usize {
         (**self).pending_video()
+    }
+    fn video_full(&self) -> bool {
+        (**self).video_full()
     }
     fn drain_poll(&self) -> Option<Duration> {
         (**self).drain_poll()

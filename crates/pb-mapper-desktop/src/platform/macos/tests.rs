@@ -6,16 +6,18 @@
 
 use super::{
     desktop,
-    encoder::Encoder,
+    encoder::{Admit, Encoder},
     layout,
     modes::MacModes,
     power,
     reuse::{REUSE, Reuse},
+    video::VT_IN_FLIGHT,
 };
 use crate::{
     Key, VideoCodec, Waker,
     codec::{
         annexb::{AccessUnit, ParameterSets},
+        pipeline::LATE_OUTPUT,
         rate_fit::Fit,
     },
     platform::DisplayModes,
@@ -24,9 +26,10 @@ use crate::{
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,
-    CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetWidth,
-    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
-    kCVPixelBufferIOSurfacePropertiesKey, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane,
+    CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+    CVPixelBufferUnlockBaseAddress, kCVPixelBufferIOSurfacePropertiesKey,
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
 };
 use std::{
     cell::Cell,
@@ -123,6 +126,298 @@ fn keyframes_come_only_when_asked_and_carry_their_parameter_sets() {
         }
     }
     assert_eq!(encoder.pending(), 0);
+}
+
+/// Wait on `waiter` until `done` holds, failing after `within`.
+fn wait_for(waiter: &Waiter, within: Duration, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + within;
+    while !done() {
+        assert!(Instant::now() < deadline, "not within {within:?}");
+        // Not every change wakes: look again shortly.
+        waiter
+            .wait(deadline.min(Instant::now() + Duration::from_millis(5)))
+            .unwrap();
+    }
+}
+
+/// A picture handed over waits in the mailbox until the submit thread
+/// takes it, and counts as in flight from then: a gate of one unit is full,
+/// which thread C skips and a submit spends (`Full`), checked before the
+/// thread's business. Under a higher gate a submit finds the thread busy,
+/// leaves its tick armed (`Busy`) and waits; a second picture is refused
+/// rather than queued. A unit out and not yet drained is no longer in
+/// flight.
+#[test]
+fn a_busy_submit_thread_leaves_the_tick_armed() {
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    let mut encoder = Encoder::new(
+        VideoCodec::H264,
+        640,
+        360,
+        30,
+        2_000_000,
+        &Waker(wake.clone()),
+    )
+    .expect("VideoToolbox makes an H.264 session on every Mac, in software if need be");
+    let picture = picture(640, 360);
+    encoder.hold(true);
+    encoder.encode(&picture, true, false).unwrap();
+    assert!(encoder.full(1));
+    assert_eq!(encoder.admit(1), Admit::Full);
+    assert!(!encoder.waiting());
+    const _: () = assert!(VT_IN_FLIGHT > 1, "a Mac host's gate admits a second unit");
+    assert!(!encoder.full(VT_IN_FLIGHT));
+    assert_eq!(encoder.admit(VT_IN_FLIGHT), Admit::Busy);
+    assert!(encoder.waiting());
+    assert!(encoder.encode(&picture, false, false).is_err());
+    assert_eq!(encoder.pending(), 1);
+    encoder.hold(false);
+    // The wake that ends the wait is the next test's.
+    wait_for(&waiter, Duration::from_secs(3), || !encoder.waiting());
+    // Out, the unit is no longer in flight; a discarded one leaves a
+    // keyframe due instead (see the test above).
+    wait_for(&waiter, Duration::from_secs(3), || {
+        encoder.admit(1) == Admit::Free
+    });
+    if encoder.pending() == 1 {
+        assert_eq!(encoder.admit(1), Admit::Free);
+        assert!(
+            encoder
+                .drain()
+                .unwrap()
+                .is_some_and(|unit| unit.format.keyframe)
+        );
+    } else {
+        assert!(encoder.keyframe_due());
+    }
+    assert_eq!(encoder.pending(), 0);
+    assert_eq!(encoder.admit(1), Admit::Free);
+}
+
+/// A submit that found the submit thread busy is woken by that thread once
+/// its call ends, and by nothing before. Here the call sets a bitrate,
+/// which has no output whose callback could wake thread C instead, and the
+/// thread stays in it, VideoToolbox done, until the test lets it go.
+#[test]
+fn the_submit_thread_wakes_thread_c_once_the_call_it_refused_ends() {
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    let mut encoder = Encoder::new(
+        VideoCodec::H264,
+        640,
+        360,
+        30,
+        2_000_000,
+        &Waker(wake.clone()),
+    )
+    .expect("VideoToolbox makes an H.264 session on every Mac, in software if need be");
+    encoder.park(true);
+    encoder.set_bitrate(3_000_000);
+    wait_for(&waiter, Duration::from_secs(3), || encoder.parked());
+    assert!(encoder.in_call());
+    assert!(!encoder.full(VT_IN_FLIGHT));
+    assert_eq!(encoder.admit(VT_IN_FLIGHT), Admit::Busy);
+    assert!(encoder.waiting());
+    let _ = waiter.wait(Instant::now());
+    assert!(
+        !waiter
+            .wait(Instant::now() + Duration::from_millis(50))
+            .unwrap(),
+        "a wake while the call lasts"
+    );
+    encoder.park(false);
+    assert!(
+        waiter
+            .wait(Instant::now() + Duration::from_secs(3))
+            .unwrap(),
+        "no wake once the call ended"
+    );
+    assert!(!encoder.waiting());
+    assert_eq!(encoder.admit(VT_IN_FLIGHT), Admit::Free);
+    wait_for(&waiter, Duration::from_secs(3), || encoder.idle());
+    assert_eq!(encoder.average_bitrate(), Some(3_000_000));
+}
+
+/// An encoder dropped with a picture in its mailbox, or while its submit
+/// thread is inside an encode, returns within `LATE_OUTPUT` (the mailbox's
+/// picture let go of), and nothing it handed VideoToolbox calls back after:
+/// the thread ended, so nothing holds what the callback reads, and nothing
+/// wakes thread C.
+#[test]
+fn an_encoder_dropped_mid_encode_neither_hangs_nor_calls_back() {
+    for held in [true, false] {
+        let wake = Wake::new();
+        let waiter = Waiter::new(&wake).unwrap();
+        // A multiple of 16: VideoToolbox encodes inside the call.
+        let mut encoder = Encoder::new(
+            VideoCodec::H264,
+            1920,
+            1088,
+            60,
+            8_000_000,
+            &Waker(wake.clone()),
+        )
+        .expect("VideoToolbox makes an H.264 session on every Mac, in software if need be");
+        let (warm, picture) = (surface(1920, 1088), surface(1920, 1088));
+        paint(&warm, 0);
+        paint(&picture, 1);
+        // Warm: a cold software encoder, on a runner without a hardware
+        // one, may take longer than `LATE_OUTPUT` over its first picture.
+        // VideoToolbox may hold on to that picture until the session goes.
+        encoder.encode(&warm, true, false).unwrap();
+        // Out, or discarded as late.
+        wait_for(&waiter, Duration::from_secs(10), || {
+            encoder.drain().unwrap().is_some() || (encoder.idle() && encoder.pending() == 0)
+        });
+        while encoder.drain().unwrap().is_some() {}
+        let alone = picture.retain_count();
+        encoder.hold(held);
+        encoder.encode(&picture, false, false).unwrap();
+        if held {
+            assert!(picture.retain_count() > alone);
+        } else {
+            let started = Instant::now();
+            while !encoder.in_call() && started.elapsed() < Duration::from_secs(1) {
+                std::thread::yield_now();
+            }
+            if !encoder.in_call() {
+                // Past the harness's capture, so that the log says so.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "{}: the encode ended before the drop",
+                    module_path!()
+                );
+            }
+        }
+        let alive = encoder.alive();
+        let dropping = Instant::now();
+        drop(encoder);
+        let took = dropping.elapsed();
+        assert!(
+            took < LATE_OUTPUT + Duration::from_millis(50),
+            "held={held}: the drop took {took:?}"
+        );
+        assert!(!alive(), "held={held}: the submit thread is still running");
+        if held {
+            // The mailbox let go of it; one VideoToolbox read is its own.
+            assert_eq!(picture.retain_count(), alone);
+        }
+        let _ = waiter.wait(Instant::now());
+        assert!(
+            !waiter
+                .wait(Instant::now() + Duration::from_millis(100))
+                .unwrap(),
+            "held={held}: a wake after the drop"
+        );
+    }
+}
+
+/// An encode VideoToolbox refuses on the submit thread reaches thread C:
+/// the thread forgets the unit and wakes it, and `drain` returns the
+/// codec's failure, `EncoderFailed` for H.265 as when the call was thread
+/// C's. A spent session encodes nothing more.
+#[test]
+fn an_encode_refused_on_the_submit_thread_surfaces_from_drain() {
+    use crate::{FailureKind, failure_kind};
+    for codec in [VideoCodec::H264, VideoCodec::H265] {
+        if !super::encoder::encodes(codec) {
+            // Past the harness's capture, so that the log says so.
+            let _ = writeln!(
+                std::io::stderr(),
+                "{}: this Mac does not encode {codec:?}",
+                module_path!()
+            );
+            continue;
+        }
+        let wake = Wake::new();
+        let waiter = Waiter::new(&wake).unwrap();
+        let mut encoder =
+            Encoder::new(codec, 640, 360, 30, 2_000_000, &Waker(wake.clone())).unwrap();
+        let picture = picture(640, 360);
+        encoder.tear_down();
+        encoder.encode(&picture, true, false).unwrap();
+        assert!(
+            waiter
+                .wait(Instant::now() + Duration::from_secs(3))
+                .unwrap(),
+            "{codec:?}: no wake for the failure"
+        );
+        wait_for(&waiter, Duration::from_secs(3), || encoder.idle());
+        let Err(failure) = encoder.drain() else {
+            panic!("{codec:?}: the failure did not reach drain");
+        };
+        let failed = Some(FailureKind::EncoderFailed { codec });
+        assert_eq!(
+            failure_kind(&failure) == failed,
+            codec == VideoCodec::H265,
+            "{codec:?}: {failure}"
+        );
+        // The failure alone: the unit is forgotten.
+        assert_eq!(encoder.pending(), 1, "{codec:?}");
+        encoder.encode(&picture, false, false).unwrap();
+        wait_for(&waiter, Duration::from_secs(3), || encoder.idle());
+        assert_eq!(encoder.pending(), 1, "{codec:?}");
+        assert!(encoder.drain().is_err());
+    }
+}
+
+/// A new bitrate never waits for VideoToolbox: thread C hands it to the
+/// submit thread, which sets it once its call returns, the latest of those
+/// asked for meanwhile. At 4K, a multiple of 16, the call is the encode
+/// itself, and each set returns within 1 ms while it lasts. The caller
+/// makes no call on the session: a bitrate set while the submit thread
+/// takes nothing reaches the session only once it takes it.
+#[test]
+fn a_bitrate_set_during_an_encode_returns_at_once_and_reaches_the_session() {
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    let mut encoder = Encoder::new(
+        VideoCodec::H264,
+        3840,
+        2160,
+        60,
+        10_000_000,
+        &Waker(wake.clone()),
+    )
+    .expect("VideoToolbox makes an H.264 session on every Mac, in software if need be");
+    let picture = surface(3840, 2160);
+    paint(&picture, 0);
+    encoder.encode(&picture, true, false).unwrap();
+    let started = Instant::now();
+    while !encoder.in_call() && started.elapsed() < Duration::from_secs(1) {
+        std::thread::yield_now();
+    }
+    let inside = encoder.in_call();
+    let mut took = Vec::new();
+    for bitrate in [12_000_000, 14_000_000, 16_000_000] {
+        let setting = Instant::now();
+        encoder.set_bitrate(bitrate);
+        took.push(setting.elapsed());
+    }
+    let still = encoder.in_call();
+    // Each one, the first above all, which the encode was under way for.
+    assert!(
+        took.iter().all(|took| *took < Duration::from_millis(1)),
+        "{took:?}"
+    );
+    if !(inside && still) {
+        // Past the harness's capture, so that the log says so.
+        let _ = writeln!(
+            std::io::stderr(),
+            "{}: the encode was not in progress throughout ({inside}, {still})",
+            module_path!()
+        );
+    }
+    wait_for(&waiter, Duration::from_secs(10), || encoder.idle());
+    assert_eq!(encoder.average_bitrate(), Some(16_000_000));
+    while encoder.drain().unwrap().is_some() {}
+    encoder.hold(true);
+    encoder.set_bitrate(20_000_000);
+    assert_eq!(encoder.average_bitrate(), Some(16_000_000));
+    encoder.hold(false);
+    wait_for(&waiter, Duration::from_secs(3), || encoder.idle());
+    assert_eq!(encoder.average_bitrate(), Some(20_000_000));
 }
 
 /// Thread C's waits end on time where the kernel coalesces the process's
@@ -496,19 +791,26 @@ fn rate_model_sweep(codec: VideoCodec, width: u32, height: u32, low_latency: boo
 }
 
 /// Thread C's pacing of one encoder over a ring of pictures, as
-/// `video_bench` paces Media Foundation.
+/// `video_bench` paces Media Foundation, behind a Mac host's gate: a tick
+/// that finds `VT_IN_FLIGHT` units in flight skipped, as thread C skips it
+/// (`MacVideo::full`), and one that finds the submit thread busy armed.
 struct Pacer {
     encoder: Encoder,
     waiter: Waiter,
     ring: [CFRetained<CVPixelBuffer>; RING],
     /// Pictures submitted.
     frame: u64,
-    /// Ticks with a full encoder, which submitted nothing.
+    /// Ticks spent on units in flight, which submitted nothing.
     skipped: u64,
 }
+const _: () = assert!(
+    VT_IN_FLIGHT < RING,
+    "a picture is painted again only once its unit is out"
+);
 impl Pacer {
     /// Until `until`: a picture each tick at `pace`, none while `None`; each
-    /// unit out goes to `unit`.
+    /// unit out goes to `unit`. A tick that finds the submit thread busy
+    /// stays armed until that thread wakes this one.
     fn run(
         &mut self,
         pace: Option<u32>,
@@ -528,20 +830,30 @@ impl Pacer {
                 self.waiter.wait(until).unwrap();
                 continue;
             };
-            if now >= next_tick {
-                let period = Duration::from_secs(1) / pace;
-                next_tick = (next_tick + period).max(now + period * 3 / 4);
-                if self.encoder.pending() < RING {
-                    let picture = &self.ring[self.frame as usize % RING];
-                    paint(picture, self.frame);
-                    let keyframe = self.frame == 0 || self.encoder.keyframe_due();
-                    self.encoder.encode(picture, keyframe, false).unwrap();
-                    self.frame += 1;
-                } else {
-                    self.skipped += 1;
+            let period = Duration::from_secs(1) / pace;
+            if now >= next_tick && !self.encoder.waiting() {
+                match self.encoder.admit(VT_IN_FLIGHT) {
+                    Admit::Full => {
+                        self.skipped += 1;
+                        next_tick = (next_tick + period).max(now + period * 3 / 4);
+                    }
+                    Admit::Busy => {}
+                    Admit::Free => {
+                        let picture = &self.ring[self.frame as usize % RING];
+                        paint(picture, self.frame);
+                        let keyframe = self.frame == 0 || self.encoder.keyframe_due();
+                        self.encoder.encode(picture, keyframe, false).unwrap();
+                        self.frame += 1;
+                        next_tick = (next_tick + period).max(now + period * 3 / 4);
+                    }
                 }
             }
-            self.waiter.wait(next_tick.min(until)).unwrap();
+            let wait = if self.encoder.waiting() {
+                now + LATE_OUTPUT
+            } else {
+                next_tick
+            };
+            self.waiter.wait(wait.min(until)).unwrap();
         }
     }
 }
@@ -628,6 +940,258 @@ fn text_and_ramp(row: &mut [u8], y: usize, frame: u64) {
     for (x, pixel) in ramp.iter_mut().enumerate() {
         *pixel = (16 + (half + x + y) / 8 % 224) as u8;
     }
+}
+
+/// What a VideoToolbox submit costs thread C on this Mac, and what an input
+/// queued meanwhile waits. A session whose size is a multiple of 16 encodes
+/// inside `VTCompressionSessionEncodeFrame`, which the encoder's submit
+/// thread makes, so that thread C only hands the picture over. Each case
+/// paces an encoder as thread C paces it, on `PAINTED` pictures painted
+/// before the run, so the pacing thread does nothing else: each tick taken
+/// at its start, two never closer than three quarters of a period (`Pacer`),
+/// a Mac host's gate (`Encoder::admit`: a tick that finds the units in
+/// flight skipped, as thread C skips it on `MacVideo::full`, and one that
+/// finds the submit thread busy left armed), and, after a submit that
+/// found the submit thread busy, a wait for that thread's wake rather than
+/// the tick (`MacVideo::idle_until`). A reader thread queues an input every
+/// millisecond and wakes the pacing thread, which takes the queued inputs
+/// before and after each submit, as thread C drains its lane. Each case
+/// prints, over `MEASURED` after `WARM`: pictures submitted and units out a
+/// second, ticks spent on units in flight (`skipped_per_s`), due ticks that
+/// found the submit thread busy and stayed armed (`armed_per_s`), the
+/// encode call on the pacing thread (p50, p99, max), how long a queued
+/// input waited for the pacing thread (p50, p99, max), and the units' dwell
+/// (p50, p95). The bitrate is Balanced's starting bits per frame at the
+/// case's pace, scaled by its size as a session's QoS scales it.
+///
+/// Minutes of one Mac's hardware: run it in release mode on a quiet
+/// machine, one test at a time:
+/// `cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture
+/// --test-threads=1 video_toolbox_submit_blocking`.
+#[test]
+#[ignore = "a measurement: about 2.5 minutes of encoding, in release mode"]
+fn video_toolbox_submit_blocking() {
+    let sizes = [
+        (1920, 1080),
+        (1920, 1200),
+        (2560, 1440),
+        (3328, 2160),
+        (3840, 2160),
+    ];
+    for (width, height) in sizes {
+        let ring = painted(width, height);
+        for codec in [VideoCodec::H264, VideoCodec::H265] {
+            for pace in [60, 120] {
+                paced_case(codec, &ring, pace, SUBMIT_DEPTH);
+            }
+        }
+    }
+}
+
+/// VideoToolbox's queue at sizes it encodes asynchronously (not multiples
+/// of 16, as a MacBook's built-in display at its default resolution gives),
+/// and one it encodes inside the call: `video_toolbox_submit_blocking`'s
+/// cases with the submit gate at four units and at two. Run it as that one
+/// is: `cargo test --release -p pb-mapper-desktop --lib -- --ignored
+/// --nocapture --test-threads=1 video_toolbox_in_flight`.
+#[test]
+#[ignore = "a measurement: about 3 minutes of encoding, in release mode"]
+fn video_toolbox_in_flight() {
+    for (width, height) in [(3024, 1964), (3340, 2160), (1920, 1080)] {
+        let ring = painted(width, height);
+        for codec in [VideoCodec::H264, VideoCodec::H265] {
+            for pace in [60, 120] {
+                for depth in [4, 2] {
+                    paced_case(codec, &ring, pace, depth);
+                }
+            }
+        }
+    }
+}
+
+/// The pictures each paced case encodes in turn.
+const PAINTED: usize = 8;
+/// How long a paced case runs before, and while, it is measured.
+const WARM: Duration = Duration::from_secs(1);
+const MEASURED: Duration = Duration::from_secs(5);
+/// How often the emulated reader queues an input.
+const INPUT_INTERVAL: Duration = Duration::from_millis(1);
+/// The submit gate `video_toolbox_submit_blocking` runs at: a Mac host's.
+const SUBMIT_DEPTH: usize = VT_IN_FLIGHT;
+
+/// `PAINTED` IOSurface pictures of the pattern, painted once.
+fn painted(width: usize, height: usize) -> Vec<CFRetained<CVPixelBuffer>> {
+    (0..PAINTED)
+        .map(|frame| {
+            let picture = surface(width, height);
+            paint(&picture, frame as u64);
+            picture
+        })
+        .collect()
+}
+
+/// One paced case's samples, in microseconds, and counts.
+#[derive(Default)]
+struct Paced {
+    submitted: u32,
+    units: u32,
+    skipped: u32,
+    /// Due ticks that found the submit thread busy and stayed armed.
+    armed: u32,
+    calls: Vec<u32>,
+    waits: Vec<u32>,
+    dwell: Vec<u32>,
+}
+impl Paced {
+    /// Take the queued inputs at `now`, as thread C drains its lane.
+    fn lane(&mut self, inputs: &std::sync::mpsc::Receiver<Instant>, measuring: bool) {
+        let now = Instant::now();
+        while let Ok(queued) = inputs.try_recv() {
+            if measuring {
+                self.waits
+                    .push(micros(now.saturating_duration_since(queued)));
+            }
+        }
+    }
+}
+
+fn micros(duration: Duration) -> u32 {
+    u32::try_from(duration.as_micros()).unwrap_or(u32::MAX)
+}
+
+/// The `share` quantile of `samples`, sorted in place.
+fn quantile(samples: &mut [u32], share: f64) -> u32 {
+    samples.sort_unstable();
+    let index = ((samples.len() as f64 * share) as usize).min(samples.len().saturating_sub(1));
+    samples.get(index).copied().unwrap_or(0)
+}
+
+/// One case of `codec` at `pace` over `ring`, its gate at `depth`.
+fn paced_case(codec: VideoCodec, ring: &[CFRetained<CVPixelBuffer>], pace: u32, depth: usize) {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let width = CVPixelBufferGetWidth(&ring[0]) as u32;
+    let height = CVPixelBufferGetHeight(&ring[0]) as u32;
+    let label = format!("codec={codec:?} size={width}x{height} pace={pace} depth={depth}");
+    if !super::encoder::encodes(codec) {
+        report(format_args!("{label} skipped: no hardware encoder"));
+        return;
+    }
+    let scale = (f64::from(width) * f64::from(height) / (1920.0 * 1080.0))
+        .powf(0.75)
+        .clamp(0.4, 3.0);
+    let bitrate = (66_667.0 * scale * f64::from(pace)) as u32;
+    let wake = Wake::new();
+    let waiter = Waiter::new(&wake).unwrap();
+    let mut encoder = match Encoder::new(codec, width, height, pace, bitrate, &Waker(wake.clone()))
+    {
+        Ok(encoder) => encoder,
+        Err(failure) => {
+            report(format_args!("{label} refused: {failure}"));
+            return;
+        }
+    };
+    // The reader: an input every millisecond, queued, and thread C woken.
+    let (lane, inputs) = std::sync::mpsc::channel::<Instant>();
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader = std::thread::spawn({
+        let (wake, stop) = (wake.clone(), Arc::clone(&stop));
+        move || {
+            let own = Wake::new();
+            let timer = Waiter::new(&own).unwrap();
+            let mut next = Instant::now();
+            while !stop.load(Ordering::Relaxed) {
+                next += INPUT_INTERVAL;
+                while Instant::now() < next {
+                    timer.wait(next).unwrap();
+                }
+                if lane.send(Instant::now()).is_err() {
+                    return;
+                }
+                wake.notify();
+            }
+        }
+    });
+    let start = Instant::now();
+    let (from, until) = (start + WARM, start + WARM + MEASURED);
+    let mut pacer = crate::pacer::Pacer::new(pace, start);
+    let mut paced = Paced::default();
+    let (mut frame, mut keyframe) = (0, true);
+    loop {
+        let now = Instant::now();
+        let measuring = now >= from;
+        paced.lane(&inputs, measuring);
+        while let Some(unit) = encoder.drain().unwrap() {
+            if measuring {
+                paced.units += 1;
+                paced.dwell.push(unit.format.encode_us);
+            }
+        }
+        if now >= until {
+            break;
+        }
+        // `MacVideo::idle_until`: a submit that found the submit thread busy
+        // waits for its wake, not the tick.
+        if pacer.due(now) && !encoder.waiting() {
+            keyframe |= encoder.keyframe_due();
+            match encoder.admit(depth) {
+                Admit::Full => {
+                    paced.skipped += u32::from(measuring);
+                    pacer.consume(now, None);
+                }
+                Admit::Busy => paced.armed += u32::from(measuring),
+                Admit::Free => {
+                    let called = Instant::now();
+                    encoder
+                        .encode(&ring[frame % ring.len()], keyframe, false)
+                        .unwrap();
+                    let call = called.elapsed();
+                    if measuring {
+                        paced.calls.push(micros(call));
+                        paced.submitted += 1;
+                    }
+                    (frame, keyframe) = (frame + 1, false);
+                    pacer.consume(now, None);
+                }
+            }
+            paced.lane(&inputs, measuring);
+        }
+        let wait = if encoder.waiting() {
+            now + LATE_OUTPUT
+        } else {
+            pacer.earliest()
+        };
+        waiter.wait(wait.min(until)).unwrap();
+    }
+    stop.store(true, Ordering::Relaxed);
+    reader.join().unwrap();
+    let seconds = MEASURED.as_secs_f64();
+    let Paced {
+        submitted,
+        units,
+        skipped,
+        armed,
+        mut calls,
+        mut waits,
+        mut dwell,
+    } = paced;
+    report(format_args!(
+        "{label} bitrate={bitrate} submitted_per_s={:.1} units_per_s={:.1} skipped_per_s={:.1} armed_per_s={:.1} call_p50_us={} call_p99_us={} call_max_us={} input_wait_p50_us={} input_wait_p99_us={} input_wait_max_us={} dwell_p50_ms={:.2} dwell_p95_ms={:.2}",
+        f64::from(submitted) / seconds,
+        f64::from(units) / seconds,
+        f64::from(skipped) / seconds,
+        f64::from(armed) / seconds,
+        quantile(&mut calls, 0.5),
+        quantile(&mut calls, 0.99),
+        quantile(&mut calls, 1.0),
+        quantile(&mut waits, 0.5),
+        quantile(&mut waits, 0.99),
+        quantile(&mut waits, 1.0),
+        f64::from(quantile(&mut dwell, 0.5)) / 1000.0,
+        f64::from(quantile(&mut dwell, 0.95)) / 1000.0,
+    ));
 }
 
 /// `MacDesktop` reads WindowServer for every check the injection boundary,
