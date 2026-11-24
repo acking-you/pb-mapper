@@ -8,11 +8,14 @@
 //! UIPI drops a process's input to a window of higher integrity (an
 //! elevated program in front of a host that is not elevated), and
 //! `SendInput` need not say so. A settle window that ends with the pointer
-//! still where a read in it found it, short of a target inside the cursor's
-//! clip, is taken for that (a target outside the clip is a clamp, which
-//! placing the pointer makes too): moves then place the pointer while the
-//! window then in the foreground stays there, and the token's integrity
-//! level is logged.
+//! still where the read before its first move found it, more than a pixel
+//! short of a target inside the cursor's clip, is taken for that (a target
+//! outside the clip is a clamp, which placing the pointer makes too): moves
+//! then place the pointer while the window then in the foreground stays
+//! there, and the token's integrity level is logged. A `SendInput` that
+//! takes nothing (another thread blocks input, or this thread may not send
+//! input to the input desktop) turns placing on at once, its Win32 error
+//! logged too.
 use crate::input::cursor::{Pointer, Settled};
 use std::{cell::Cell, rc::Rc, time::Instant};
 use windows::Win32::{
@@ -53,6 +56,13 @@ impl Moves {
         false
     }
 
+    /// `SendInput` took nothing, `GetLastError` saying `code`: moves place
+    /// the pointer at once, this one included, while the window in front
+    /// stays there.
+    pub(crate) fn refused(&mut self, code: u32) {
+        self.place(Some(code));
+    }
+
     /// The pointer to report at `now`, `shown` being where `GetCursorInfo`
     /// shows it; moves that never took effect turn placing on.
     pub(crate) fn settle(&mut self, shown: (i32, i32), now: Instant) -> (i32, i32) {
@@ -61,15 +71,23 @@ impl Moves {
             && self.placing.is_none()
             && within_clip(to)
         {
-            // SAFETY: no arguments; it reads the foreground window's handle.
-            self.placing = Some(unsafe { GetForegroundWindow() });
-            tracing::warn!(
-                target: "pb_mapper_desktop::session",
-                event = "desktop_moves_placed",
-                token = ?super::input::token_context(),
-            );
+            self.place(None);
         }
         at.unwrap_or(shown)
+    }
+
+    /// Moves place the pointer while the window now in front stays there;
+    /// logged once for each such window, with the Win32 error of a
+    /// `SendInput` that refused the move (none when the moves were dropped).
+    fn place(&mut self, refused: Option<u32>) {
+        // SAFETY: no arguments; it reads the foreground window's handle.
+        self.placing = Some(unsafe { GetForegroundWindow() });
+        tracing::warn!(
+            target: "pb_mapper_desktop::session",
+            event = "desktop_moves_placed",
+            win32 = ?refused,
+            token = %super::input::token_context(),
+        );
     }
 }
 

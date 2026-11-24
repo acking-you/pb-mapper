@@ -1142,32 +1142,45 @@ A Windows host injects each move as input: one `SendInput` event with
 its other input is. Low-level mouse hooks and raw-input readers see it, the
 idle timer counts it, and while a button is held Windows posts each move
 rather than merging them into the next `WM_MOUSEMOVE`, so a stroke drawn
-remotely keeps its points. Raw input gets it as an absolute move
-(`MOUSE_MOVE_ABSOLUTE`), not as a delta. Through 0.12.1 the host placed the
-pointer with `SetCursorPos`, which is no input at all. The pixel is scaled
-to 0–65535 over the virtual desktop that `GetSystemMetrics` reports at that
-move, in thread C's per-monitor DPI scope: the least value that falls on
-that pixel when Windows truncates the scaled coordinate, which falls there
-too when it rounds, as a unit test checks for every pixel of 1920-, 3840-
-and 7680-pixel axes. The system applies a move after `SendInput` returns, so
-the cursor reports the injected pixel until `GetCursorInfo` shows it or 250
-ms pass after the last move, as a Mac host does after `CGEventPost`; the
-controller's own move still comes back as its echo.
+remotely keeps its points. The cost is the other side of that: a program
+that handles each `WM_MOUSEMOVE` slowly while a button is held (a heavy
+window resized by its frame) gets every move too, where a physical mouse's
+moves merge, and can go on moving after the stroke ends; how much it trails,
+if at all, has not been measured on a device. Raw input gets it as an
+absolute move (`MOUSE_MOVE_ABSOLUTE`), not as a delta. Through 0.12.1 the
+host placed the pointer with `SetCursorPos`, which is no input at all. The
+pixel is scaled to 0–65535 over the virtual desktop that `GetSystemMetrics`
+reports at that move, in thread C's per-monitor DPI scope: the least value
+that falls on that pixel when Windows truncates the scaled coordinate, which
+falls there too when it rounds, as a unit test checks for every pixel of
+1920-, 3840- and 7680-pixel axes. The system applies a move after
+`SendInput` returns, so the cursor reports the injected pixel until
+`GetCursorInfo` shows it or 250 ms pass after the last move, as a Mac host
+does after `CGEventPost`; the controller's own move still comes back as its
+echo.
 
-`SendInput` takes nothing while another thread blocks input, and UIPI drops
-a host's input to a window of higher integrity (an elevated program in front
+`SendInput` takes nothing while another thread blocks input or when the
+host's thread may not send input to the input desktop, and UIPI drops a
+host's input to a window of higher integrity (an elevated program in front
 of an app that is not elevated), which `SendInput` need not report. A move
-`SendInput` refuses is placed with `SetCursorPos`. A settle window that ends
-with the pointer where an earlier read in it found it, short of a target
-inside the cursor's clip, means the moves never took effect: the host then
-places the pointer for every move while the window then in the foreground
-stays there, and warns `desktop_moves_placed` once with its token's session,
-integrity level and UIAccess. A target outside the clip (`ClipCursor`, a
-game's window) is a clamp, which placing would not change. A program that
-puts the pointer back itself, as a game that recentres it does, can look the
-same; its window then gets placed moves, as every window did before. The
-desktop service's worker runs as SYSTEM, above every window's integrity
-level, with the same injector.
+`SendInput` refuses is placed with `SetCursorPos` at once, and so is every
+move after it while the window then in the foreground stays there. A dropped
+move shows only when its settle window ends: if the pointer is still where
+the read before the window's first move found it, more than a pixel from a
+target inside the cursor's clip, the moves never took effect, and the host
+places the pointer for every move from then on while the window then in the
+foreground stays there. Over an elevated window, then, a stroke leaves the
+host's pointer where it was until the controller's pointer first rests for
+250 ms, and the controller's pointer goes back to it; the moves after that
+arrive. Either way the host warns `desktop_moves_placed` once for that
+window, with its token's session, integrity level and UIAccess and the Win32
+error of a refusal. A pointer that moved during the window (a move that
+landed a pixel off, the host's own mouse) says nothing of the moves. A
+target outside the clip (`ClipCursor`, a game's window) is a clamp, which
+placing would not change. A program that puts the pointer back itself, as a
+game that recentres it does, can look the same; its window then gets placed
+moves, as every window did before. The desktop service's worker runs as
+SYSTEM, above every window's integrity level, with the same injector.
 
 ### Adding an operating system
 
@@ -1932,9 +1945,12 @@ Each session's lifecycle is logged at info on `pb_mapper_desktop::session`:
 `keyframes_requested`, `backlog_drops`); a host also logs each H.265 probe as
 `desktop_h265_probe` (usable, ms, detail) and warns `desktop_h265_failed`
 when an H.265 encoder fails and H.265 is turned off. A Windows host warns
-`desktop_moves_placed` (token: the session, integrity level and UIAccess of
-its process) when its injected moves stopped taking effect and it places the
-pointer instead ([Pointer moves on Windows](#pointer-moves-on-windows)). A Mac host logs each
+`desktop_moves_placed` (win32: the error of a `SendInput` that refused a
+move, none when moves were dropped; token: the session, integrity level and
+UIAccess of its process) when `SendInput` refused a move or its injected
+moves stopped taking effect, and it places the pointer instead while that
+window stays in front
+([Pointer moves on Windows](#pointer-moves-on-windows)). A Mac host logs each
 encoder it opens as `macos_encoder_opened` (codec, `low_latency`, width,
 height, fps, hardware, gop, and `data_rate_limits`: whether VideoToolbox took
 the cap of 1.5 × the mean over 1 s), after

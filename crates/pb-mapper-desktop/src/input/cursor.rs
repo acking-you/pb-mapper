@@ -32,9 +32,12 @@ pub(crate) const SETTLE: std::time::Duration = std::time::Duration::from_millis(
 pub(crate) struct Pointer {
     /// Absolute pixel, and when it was posted.
     moved: Option<((i32, i32), std::time::Instant)>,
-    /// What the first read since a move showed, while no read has shown the
-    /// injected pixel; `Some(None)`: a pointer not on the bound display.
-    first: Option<Option<(i32, i32)>>,
+    /// What the last read showed (`Some(None)`: a pointer not on the bound
+    /// display); `None` before the first read.
+    shown: Option<Option<(i32, i32)>>,
+    /// What the last read before the open window's first move showed: where
+    /// the pointer was before any of its moves.
+    from: Option<Option<(i32, i32)>>,
 }
 
 /// What a read of the pointer reports while a move settles.
@@ -47,10 +50,12 @@ pub(crate) struct Settled {
     /// The pointer to report: the injected pixel until a read shows it.
     pub(crate) at: Option<(i32, i32)>,
     /// The injected pixel, when this read ended its settle window with the
-    /// pointer short of it and where an earlier read in the window found it:
-    /// no move posted since then took effect. A pointer that moved
-    /// (someone at the host), or a window no earlier read saw (no reads
-    /// meanwhile), says nothing of the moves.
+    /// pointer more than a pixel from it and where the last read before the
+    /// window's first move found it: no move posted in the window took
+    /// effect. A pointer that moved meanwhile (a move that landed a pixel off
+    /// or was stopped short, someone at the host), one that ends within a
+    /// pixel of the target, or a window opened before any read says nothing
+    /// of the moves.
     pub(crate) unmoved: Option<(i32, i32)>,
 }
 
@@ -59,33 +64,37 @@ pub(crate) struct Settled {
     expect(dead_code, reason = "for the hosts that post moves")
 )]
 impl Pointer {
-    /// A move to absolute pixel `to` was posted at `now`.
+    /// A move to absolute pixel `to` was posted at `now`; the first one
+    /// since the last window closed opens a window from the last read.
     pub(crate) fn moved(&mut self, to: (i32, i32), now: std::time::Instant) {
+        if self.moved.is_none() {
+            self.from = self.shown;
+        }
         self.moved = Some((to, now));
     }
 
     /// The pointer to report at `now`, given the absolute pixel the OS shows
     /// (`None`: not on the bound display).
     pub(crate) fn settle(&mut self, shown: Option<(i32, i32)>, now: std::time::Instant) -> Settled {
+        self.shown = Some(shown);
         let Some((to, at)) = self.moved else {
             return Settled {
                 at: shown,
                 unmoved: None,
             };
         };
-        let reached = shown == Some(to);
-        if !reached && now.saturating_duration_since(at) < SETTLE {
-            self.first.get_or_insert(shown);
+        if shown != Some(to) && now.saturating_duration_since(at) < SETTLE {
             return Settled {
                 at: Some(to),
                 unmoved: None,
             };
         }
         self.moved = None;
-        let first = self.first.take();
+        let from = self.from.take();
+        let near = shown.is_some_and(|(x, y)| x.abs_diff(to.0) <= 1 && y.abs_diff(to.1) <= 1);
         Settled {
             at: shown,
-            unmoved: (!reached && first == Some(shown)).then_some(to),
+            unmoved: (!near && from == Some(shown)).then_some(to),
         }
     }
 }
@@ -374,19 +383,26 @@ mod tests {
         assert_eq!(at(&mut pointer, Some((199, 80)), late), Some((199, 80)));
     }
 
-    /// A window that ends with the pointer where a read in it found it says
-    /// no move since took effect, however many were posted; one that ends
-    /// at the target, with a pointer that moved meanwhile, or at its first
-    /// read says nothing of the moves.
+    /// A window that ends with the pointer where the last read before its
+    /// first move found it, more than a pixel from the target, says no move
+    /// in it took effect, however many were posted; one that ends at or
+    /// next to the target, with a pointer that moved meanwhile, or that
+    /// opened before any read says nothing of the moves.
     #[test]
     fn a_window_that_ends_where_it_started_reports_its_moves_unmoved() {
         let start = Instant::now();
         let late = start + SETTLE;
-        let mut pointer = Pointer::default();
+        // A pointer last read at `shown`, with no window open.
+        let read = |shown| {
+            let mut pointer = Pointer::default();
+            pointer.settle(shown, start);
+            pointer
+        };
         let unmoved = |pointer: &mut Pointer, shown, now| pointer.settle(shown, now).unmoved;
 
         // Every move dropped: the pointer stays at (5, 5) throughout, and
         // the window, kept open by each move, ends `SETTLE` after the last.
+        let mut pointer = read(Some((5, 5)));
         pointer.moved((100, 40), start);
         assert_eq!(unmoved(&mut pointer, Some((5, 5)), start), None);
         pointer.moved((120, 40), start + Duration::from_millis(100));
@@ -402,31 +418,67 @@ mod tests {
         // Taken once: the window is over.
         assert_eq!(unmoved(&mut pointer, Some((5, 5)), end), None);
 
+        // No read in the window but the one that ends it.
+        let mut pointer = read(Some((5, 5)));
+        pointer.moved((100, 40), start);
+        assert_eq!(unmoved(&mut pointer, Some((5, 5)), late), Some((100, 40)));
+
         // Off the display before and after counts as the same place.
+        let mut pointer = read(None);
         pointer.moved((100, 40), start);
         assert_eq!(unmoved(&mut pointer, None, start), None);
         assert_eq!(unmoved(&mut pointer, None, late), Some((100, 40)));
 
-        // Someone at the host moved the mouse during the window.
+        // The move landed a pixel off, read there from the window's first
+        // read on.
+        let mut pointer = read(Some((5, 5)));
         pointer.moved((100, 40), start);
-        assert_eq!(unmoved(&mut pointer, Some((5, 5)), start), None);
+        assert_eq!(unmoved(&mut pointer, Some((101, 40)), start), None);
+        assert_eq!(unmoved(&mut pointer, Some((101, 40)), late), None);
+
+        // Someone at the host moved the mouse during the window, even
+        // before its first read, and then left it; a later move in the
+        // window keeps where the window started.
+        let mut pointer = read(Some((5, 5)));
+        pointer.moved((100, 40), start);
+        assert_eq!(unmoved(&mut pointer, Some((60, 9)), start), None);
+        pointer.moved((120, 40), start);
         assert_eq!(unmoved(&mut pointer, Some((60, 9)), late), None);
 
-        // No read in the window before the one that ends it.
+        // A stroke that comes back to where it started reached its target,
+        // and one that ends a pixel from it is as good as there.
+        let mut pointer = read(Some((5, 5)));
         pointer.moved((100, 40), start);
+        assert_eq!(unmoved(&mut pointer, Some((5, 5)), start), None);
+        pointer.moved((5, 5), start);
+        assert_eq!(unmoved(&mut pointer, Some((5, 5)), start), None);
+        let mut pointer = read(Some((5, 5)));
+        pointer.moved((6, 4), start);
         assert_eq!(unmoved(&mut pointer, Some((5, 5)), late), None);
 
         // Reached late, after reads of the old pixel.
+        let mut pointer = read(Some((5, 5)));
         pointer.moved((100, 40), start);
         assert_eq!(unmoved(&mut pointer, Some((5, 5)), start), None);
         assert_eq!(unmoved(&mut pointer, Some((100, 40)), late), None);
 
-        // A read that shows the move closes the window: its reads no longer
-        // count in the next one.
+        // A window opened before any read.
+        let mut pointer = Pointer::default();
         pointer.moved((100, 40), start);
         assert_eq!(unmoved(&mut pointer, Some((5, 5)), start), None);
+        assert_eq!(unmoved(&mut pointer, Some((5, 5)), late), None);
+
+        // A read that shows the move closes the window, and the next one
+        // starts where that read found the pointer.
+        let mut pointer = read(Some((5, 5)));
+        pointer.moved((100, 40), start);
         assert_eq!(unmoved(&mut pointer, Some((100, 40)), start), None);
         pointer.moved((200, 40), start);
+        assert_eq!(
+            unmoved(&mut pointer, Some((100, 40)), late),
+            Some((200, 40))
+        );
+        pointer.moved((300, 40), start);
         assert_eq!(unmoved(&mut pointer, Some((5, 5)), late), None);
     }
 

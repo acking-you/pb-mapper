@@ -379,7 +379,8 @@ Nothing in the SDK crates knows it exists.
     `SendInput` for absolute moves and physical keys' scancodes), `pointer`
     (what `input` and `cursor` share of a move: the injected pixel until it
     shows, the move's absolute coordinate, and placing the pointer while a
-    window UIPI keeps moves from stays in front), `cursor` (the shape once per
+    window that UIPI keeps moves from, or that was in front when `SendInput`
+    refused one, stays there), `cursor` (the shape once per
     new `HCURSOR`: kinds from the `LoadCursorW` handles, bitmaps from
     `GetIconInfo`/`GetDIBits`), `still`, `waiter`, `timer`, `mf`, `dpapi`
     (the one DPAPI call every Windows store uses), `win32` (the Win32 glue

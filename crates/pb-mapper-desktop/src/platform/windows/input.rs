@@ -39,6 +39,15 @@ use windows::Win32::{
     },
 };
 
+/// What became of a move sent through `SendInput`.
+enum Sent {
+    Injected,
+    /// No virtual desktop to scale it to: nothing was sent.
+    Unscaled,
+    /// `SendInput` took nothing; `GetLastError` said this.
+    Refused(u32),
+}
+
 pub(crate) struct WinInput {
     enigo: Enigo,
     keyboard: KeyboardState,
@@ -66,11 +75,20 @@ impl Injector for WinInput {
     const PHYSICAL_KEYS: bool = true;
     /// Injected through `SendInput`, which the system applies after it
     /// returns: the cursor reports `(x, y)` until it shows it. Placed with
-    /// `SetCursorPos` where `SendInput` takes nothing, or while placing
-    /// (`pointer.rs`).
+    /// `SetCursorPos` while placing, and when `SendInput` takes nothing,
+    /// which turns placing on (`pointer.rs`).
     fn pointer(&mut self, x: i32, y: i32) -> Result<()> {
         let mut moves = self.pointer.get();
-        let made = if !moves.placing() && self.send_move(x, y) {
+        let injected = !moves.placing()
+            && match self.send_move(x, y) {
+                Sent::Injected => true,
+                Sent::Unscaled => false,
+                Sent::Refused(code) => {
+                    moves.refused(code);
+                    false
+                }
+            };
+        let made = if injected {
             Ok(())
         } else {
             // SAFETY: plain coordinates, physical pixels in thread C's
@@ -157,9 +175,8 @@ impl WinInput {
     /// per-monitor DPI scope: four metric reads, so no display change goes
     /// unseen. While a button is held, Windows delivers every move rather
     /// than merging them into the next `WM_MOUSEMOVE`, so a stroke keeps its
-    /// points. `false` with no virtual desktop to scale to, or when
-    /// `SendInput` took nothing.
-    fn send_move(&self, x: i32, y: i32) -> bool {
+    /// points.
+    fn send_move(&self, x: i32, y: i32) -> Sent {
         // SAFETY: metric reads, with no arguments but the metric.
         let (left, top, width, height) = unsafe {
             (
@@ -173,7 +190,7 @@ impl WinInput {
             pointer::absolute(x, left, width),
             pointer::absolute(y, top, height),
         ) else {
-            return false;
+            return Sent::Unscaled;
         };
         let held = if self.buttons.contains(&true) {
             MOUSEEVENTF_MOVE_NOCOALESCE
@@ -196,8 +213,15 @@ impl WinInput {
                 },
             },
         };
-        // SAFETY: one initialised `INPUT`, its size as the call requires.
-        unsafe { SendInput(&[input], size_of::<INPUT>() as i32) == 1 }
+        // SAFETY: one initialised `INPUT`, its size as the call requires;
+        // the error is this thread's, read right after the call that set it.
+        unsafe {
+            if SendInput(&[input], size_of::<INPUT>() as i32) == 1 {
+                Sent::Injected
+            } else {
+                Sent::Refused(GetLastError().0)
+            }
+        }
     }
 
     fn send_key(&mut self, source: Pressed, down: bool) -> Result<()> {
