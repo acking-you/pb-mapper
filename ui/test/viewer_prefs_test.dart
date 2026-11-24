@@ -35,6 +35,34 @@ void main() {
     },
   );
 
+  test('a decoder install hint dismissed on this device stays dismissed '
+      'after a relaunch, and the others still show', () async {
+    SharedPreferences.setMockInitialValues({
+      // A hint from a build that knew others is dropped.
+      'viewer_decoder_hints_dismissed': ['someOtherHint'],
+    });
+    const windows = DesktopDecoders(
+      h264: DesktopDecoderLimit.largest,
+      installable: {'hevc'},
+    );
+    const linux = DesktopDecoders(missing: {'h264', 'h265'});
+    final first = ViewerPrefs();
+    await first.load();
+    expect(
+      first.decoderHint(windows, 'h264'),
+      DecoderInstallHint.hevcExtension,
+    );
+    await first.dismissDecoderHint(DecoderInstallHint.hevcExtension);
+    expect(first.decoderHint(windows, 'h264'), isNull);
+    expect(first.decoderHint(linux, 'jpeg'), DecoderInstallHint.gstreamer);
+
+    final relaunched = ViewerPrefs();
+    await relaunched.load();
+    expect(relaunched.decoderHint(windows, 'h264'), isNull);
+    expect(relaunched.decoderHint(linux, 'jpeg'), DecoderInstallHint.gstreamer);
+    expect(relaunched.decoderHint(null, 'jpeg'), isNull);
+  });
+
   test('the keyboard is chosen per computer, and one not remembered keeps it '
       'only until the app closes', () async {
     SharedPreferences.setMockInitialValues({});

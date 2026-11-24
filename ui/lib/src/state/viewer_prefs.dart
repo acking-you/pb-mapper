@@ -65,7 +65,8 @@ class KeyboardSettings {
 ///
 /// The picture's quality, resolution and maximum frame rate are not here:
 /// they belong to each remembered computer. The codec is: whether a picture
-/// can be H.265 is this device's affair. So is the keyboard, which is chosen
+/// can be H.265 is this device's affair, as are the decoder install hints
+/// dismissed here. So is the keyboard, which is chosen
 /// per computer but kept here, by the computer's id: it is how this device's
 /// keys and input method reach that computer.
 class ViewerPrefs extends ChangeNotifier {
@@ -83,6 +84,7 @@ class ViewerPrefs extends ChangeNotifier {
   static const _virtualMouseKey = 'viewer_virtual_mouse';
   static const _gestureSheetSeenKey = 'viewer_gestures_seen';
   static const _keyboardKey = 'viewer_keyboard';
+  static const _decoderHintsKey = 'viewer_decoder_hints_dismissed';
 
   /// Computers whose keyboard is kept, the most recently set: more than
   /// this device remembers.
@@ -128,6 +130,18 @@ class ViewerPrefs extends ChangeNotifier {
   KeyboardSettings keyboardFor(String? computerId) =>
       _keyboards[computerId ?? ''] ?? const KeyboardSettings();
 
+  /// The install hints this device no longer shows.
+  final _dismissedHints = <DecoderInstallHint>{};
+
+  /// What an install would add to a session decoding [codec] with
+  /// [decoders] under this device's codec preference
+  /// ([DesktopDecoders.installHint]); null when nothing would, or once it
+  /// was dismissed here.
+  DecoderInstallHint? decoderHint(DesktopDecoders? decoders, String? codec) {
+    final hint = decoders?.installHint(codec, _codec);
+    return hint == null || _dismissedHints.contains(hint) ? null : hint;
+  }
+
   Future<void> load() async {
     if (!persist) return;
     try {
@@ -152,6 +166,12 @@ class ViewerPrefs extends ChangeNotifier {
       );
       _virtualMouse = prefs.getBool(_virtualMouseKey) ?? false;
       _gestureSheetSeen = prefs.getBool(_gestureSheetSeenKey) ?? false;
+      // A hint from a build that knew others is dropped.
+      for (final name in prefs.getStringList(_decoderHintsKey) ?? const []) {
+        if (DecoderInstallHint.values.asNameMap()[name] case final hint?) {
+          _dismissedHints.add(hint);
+        }
+      }
       final keyboards = prefs.getString(_keyboardKey);
       if (keyboards != null) {
         final kept = jsonDecode(keyboards);
@@ -235,6 +255,16 @@ class ViewerPrefs extends ChangeNotifier {
     if (v == _gestureSheetSeen) return;
     _gestureSheetSeen = v;
     await _changed((prefs) => prefs.setBool(_gestureSheetSeenKey, v));
+  }
+
+  /// [hint] is not shown again on this device.
+  Future<void> dismissDecoderHint(DecoderInstallHint hint) async {
+    if (!_dismissedHints.add(hint)) return;
+    await _changed(
+      (prefs) => prefs.setStringList(_decoderHintsKey, [
+        for (final dismissed in _dismissedHints) dismissed.name,
+      ]),
+    );
   }
 
   /// Tell the viewer at once, then remember the choice.
