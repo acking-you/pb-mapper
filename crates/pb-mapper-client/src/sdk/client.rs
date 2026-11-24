@@ -41,6 +41,11 @@ pub(crate) struct ClientInner {
     pub(crate) credential: Arc<RwLock<Credential>>,
     pub(crate) keep_alive: bool,
     pub(crate) namespace: Option<u64>,
+    /// What this session's `connect_tcp` calls learned of direct, by
+    /// service, shared with the clients on the other carrier as the
+    /// credential is: a fallback in one call pauses direct for the next.
+    #[cfg(feature = "p2p")]
+    pub(crate) direct_memory: Arc<parking_lot::Mutex<crate::direct::DirectMemory>>,
 }
 
 impl ClientInner {
@@ -104,6 +109,8 @@ impl Client {
                 credential: Arc::new(RwLock::new(credential)),
                 keep_alive,
                 namespace,
+                #[cfg(feature = "p2p")]
+                direct_memory: Arc::default(),
             }),
         }
     }
@@ -130,6 +137,8 @@ impl Client {
                 credential: Arc::clone(&self.inner.credential),
                 keep_alive: self.inner.keep_alive,
                 namespace: self.inner.namespace,
+                #[cfg(feature = "p2p")]
+                direct_memory: Arc::clone(&self.inner.direct_memory),
             }),
         })
     }
@@ -372,6 +381,8 @@ impl Client {
             options.lan_transport,
             false,
         );
+        #[cfg(feature = "p2p")]
+        let memory = Arc::clone(&self.inner.direct_memory);
         let handle = worker.spawn(move |context| {
             run_owned_stream(
                 accepted,
@@ -384,6 +395,8 @@ impl Client {
                 context.shutdown,
                 context.diagnostics,
                 direct,
+                #[cfg(feature = "p2p")]
+                memory,
             )
         });
         Ok((stream, Connection::new(handle, key)))

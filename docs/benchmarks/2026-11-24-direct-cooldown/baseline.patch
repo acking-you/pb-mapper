@@ -1,0 +1,121 @@
+diff --git a/crates/pb-mapper-client/src/direct/consumer.rs b/crates/pb-mapper-client/src/direct/consumer.rs
+index a4e33e8..d7c5383 100644
+--- a/crates/pb-mapper-client/src/direct/consumer.rs
++++ b/crates/pb-mapper-client/src/direct/consumer.rs
+@@ -430,7 +430,12 @@ impl Consumer {
+         let network = self
+             .network
+             .get_or_try_init(|| async {
+-                Network::new(false, self.policy.port_mapping, &self.diagnostics)
++                let network = Network::new(false, self.policy.port_mapping, &self.diagnostics)?;
++                #[cfg(test)]
++                if key == "paused" {
++                    network.block_quic();
++                }
++                Ok::<_, io::Error>(network)
+             })
+             .await?
+             .clone();
+diff --git a/crates/pb-mapper-client/src/direct/tests.rs b/crates/pb-mapper-client/src/direct/tests.rs
+index cef78e1..6d0bbe2 100644
+--- a/crates/pb-mapper-client/src/direct/tests.rs
++++ b/crates/pb-mapper-client/src/direct/tests.rs
+@@ -760,3 +760,98 @@ fn presented(arrival: &Arrival) -> Option<Vec<u8>> {
+         Arrival::Tcp { stream, .. } => tcp::peer_certificate(stream).map(<[u8]>::to_vec),
+     }
+ }
++
++/// Baseline only, for 1515eda: the same timed calls as the shared-pause
++/// test, which needs what this baseline lacks.
++#[tokio::test]
++async fn baseline_connect_tcp_first_byte() {
++    use crate::sdk::{ConnectOptions, Connection, PathPolicy};
++
++    tokio::time::timeout(Duration::from_secs(30), async {
++        let relay = TestRelay::start(
++            "connect-tcp-pause",
++            Some(DirectServerConfig {
++                listen: "127.0.0.1:0".parse().unwrap(),
++                advertise: "127.0.0.1:0".parse().unwrap(),
++            }),
++        )
++        .await;
++        let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let backend_addr = backend.local_addr().unwrap();
++        let _echo = AbortOnDropHandle::new(tokio::spawn(async move {
++            loop {
++                let (mut stream, _) = backend.accept().await.unwrap();
++                let mut byte = [0; 1];
++                stream.read_exact(&mut byte).await.unwrap();
++                stream.write_all(&byte).await.unwrap();
++            }
++        }));
++        let publisher =
++            Client::from_credential(relay.addr.to_string(), relay.credential, false, None);
++        let registration = publisher
++            .register_with_options(
++                RegisterRequest {
++                    key: "paused".into(),
++                    local_addr: backend_addr.to_string(),
++                    transport: Transport::Tcp,
++                    codec: true,
++                    force_namespace: false,
++                },
++                RegisterOptions {
++                    allow_direct: true,
++                    ..Default::default()
++                },
++            )
++            .await
++            .unwrap();
++        registration
++            .wait_ready_timeout(Duration::from_secs(5))
++            .await
++            .unwrap();
++        let mut client =
++            Client::from_credential(relay.addr.to_string(), relay.credential, false, None);
++        Arc::get_mut(&mut client.inner).unwrap().endpoint =
++            RelayEndpoint::isolated(relay.addr.into());
++        let first_byte = async || -> (Duration, Connection) {
++            let started = Instant::now();
++            let (mut stream, connection) = client
++                .connect_tcp(
++                    "paused",
++                    ConnectOptions {
++                        path: PathPolicy::Auto,
++                        port_mapping: PortMapping::Off,
++                        lan_first: true,
++                        lan_transport: LanTransport::Quic,
++                    },
++                )
++                .await
++                .unwrap();
++            stream.write_all(b"x").await.unwrap();
++            let mut byte = [0; 1];
++            stream.read_exact(&mut byte).await.unwrap();
++            assert_eq!(&byte, b"x");
++            (started.elapsed(), connection)
++        };
++        let fallbacks = |connection: &Connection| {
++            connection
++                .diagnostics()
++                .direct
++                .map_or(0, |direct| direct.fallbacks)
++        };
++        let (fell_back, first) = first_byte().await;
++        let (again, second) = first_byte().await;
++        eprintln!(
++            "baseline connect_tcp to the first byte: {fell_back:?} falling back, \
++             {again:?} for the next call (fallbacks {}, {}; cooldown skips {})",
++            fallbacks(&first),
++            fallbacks(&second),
++            second.metrics().cooldown_skips
++        );
++        for connection in [first, second] {
++            connection.stop().await.unwrap();
++        }
++        registration.stop().await.unwrap();
++    })
++    .await
++    .unwrap();
++}

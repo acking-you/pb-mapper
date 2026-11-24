@@ -8,6 +8,7 @@ use super::{
     grant_fits,
     lan::Assessment,
     link::{counts, direct_link, lan_missed, log_path, stun_timings, summary},
+    memory::{Cooldown, PauseScope, Pauses, SharedPauses},
     reports::{self, REPORT_INTERVAL, SessionReporter, Sink},
     tcp,
 };
@@ -20,6 +21,7 @@ use crate::{
     endpoint::RelayEndpoint,
     sdk::LanTransport,
 };
+use parking_lot::{MappedMutexGuard, MutexGuard};
 use pb_mapper_auth::ADMIN_NAMESPACE;
 use pb_mapper_core::{checksum::Credential, timeout::RetryBackoff};
 use pb_mapper_protocol::{
@@ -28,7 +30,15 @@ use pb_mapper_protocol::{
     direct::*,
     forward::{ByteMeter, StreamForward},
 };
-use std::{io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    io,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio::{
     sync::{Mutex, OnceCell},
     time::Instant,
@@ -40,16 +50,7 @@ use uni_stream::stream::NetworkStream;
 /// the relay, as [`FallbackReason::NegotiationTimeout`].
 const NEGOTIATION_BUDGET: Duration = Duration::from_secs(3);
 /// How long a granted setup may search for a path before it falls back.
-const PUNCH_BUDGET: Duration = Duration::from_secs(2);
-
-/// First pause after a direct setup falls back to the relay.
-pub(super) const COOLDOWN_INITIAL: Duration = Duration::from_secs(10);
-/// Longest pause between direct attempts on a network that keeps refusing them.
-pub(super) const COOLDOWN_MAX: Duration = Duration::from_secs(300);
-const _: () = assert!(
-    !COOLDOWN_INITIAL.is_zero() && COOLDOWN_MAX.as_nanos() >= COOLDOWN_INITIAL.as_nanos(),
-    "RetryBackoff needs a first pause, and a cap no shorter"
-);
+pub(super) const PUNCH_BUDGET: Duration = Duration::from_secs(2);
 
 /// How long one delivery of reports may take, reconnecting included.
 const REPORT_ATTEMPT: Duration = Duration::from_secs(3);
@@ -60,49 +61,15 @@ const _: () = assert!(
     "RetryBackoff needs a first wait, and a cap no shorter"
 );
 
-/// When a tunnel may try direct again after falling back.
-///
-/// A path that cannot be punched — a symmetric NAT, blocked UDP, a relay or
-/// publisher without direct — fails the same way for every connection, and
-/// each failure costs that connection its whole setup budget before the relay
-/// takes over. Pausing direct after a fallback sends the next connections
-/// straight to the relay instead. The pause doubles while fallbacks repeat; a
-/// direct success or a network change, which can make a path punchable,
-/// clears it.
-#[derive(Debug)]
-pub(super) struct Cooldown {
-    until: Option<Instant>,
-    /// The pauses, from [`COOLDOWN_INITIAL`] doubling to [`COOLDOWN_MAX`].
-    pauses: RetryBackoff,
-}
-
-impl Default for Cooldown {
-    fn default() -> Self {
-        Self {
-            until: None,
-            pauses: RetryBackoff::new(COOLDOWN_INITIAL, COOLDOWN_MAX),
-        }
-    }
-}
-
-impl Cooldown {
-    pub(super) fn active(&self, now: Instant) -> bool {
-        self.until.is_some_and(|until| now < until)
-    }
-
-    /// Start the next pause, unless one is running. A burst of connections
-    /// that were all mid-attempt when the path failed is one failure, not one
-    /// per connection: counting each would jump straight to the cap.
-    pub(super) fn back_off(&mut self, now: Instant) {
-        if self.active(now) {
-            return;
-        }
-        self.until = Some(now + self.pauses.next_delay());
-    }
-
-    pub(super) fn clear(&mut self) {
-        *self = Self::default();
-    }
+/// What a fallback says of the path, for pauses that outlive the consumer:
+/// see [`PauseScope::Client`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Says {
+    /// That it will not punch for a while.
+    Unpunchable,
+    /// Nothing: the setup found no publisher to go direct to, or no
+    /// coordinator.
+    Nothing,
 }
 
 pub(crate) struct Consumer {
@@ -117,15 +84,21 @@ pub(crate) struct Consumer {
     _reporter: tokio_util::task::AbortOnDropHandle<()>,
     pub(super) network: OnceCell<Arc<Network>>,
     diagnostics: Diagnostics,
-    cooldown: std::sync::Mutex<Cooldown>,
-    /// When sessions may ask for TCP again, after one whose attempts missed:
-    /// a provider that refuses TCP, or whose firewall drops it, does so for
-    /// every session, and each would pay the head start. Never the relay's
-    /// pause: QUIC is still tried.
-    tcp_cooldown: std::sync::Mutex<Cooldown>,
+    /// When direct, and TCP within a LAN, may be tried again: a listener's
+    /// own, or shared with its client's other `connect_tcp` calls to the
+    /// service.
+    pauses: SharedPauses,
+    /// `Some` when `pauses` are the client's: whether this consumer's
+    /// fallback said the path will not punch, which pauses direct once the
+    /// relay carries the connection.
+    unpunchable: Option<AtomicBool>,
     policy: crate::direct_policy::DirectPolicy,
 }
 impl Consumer {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a tunnel's settings, and the pauses it goes by"
+    )]
     pub fn new(
         remote: RelayEndpoint,
         credential: Credential,
@@ -134,7 +107,12 @@ impl Consumer {
         keep_alive: bool,
         diagnostics: Diagnostics,
         policy: crate::direct_policy::DirectPolicy,
+        scope: PauseScope,
     ) -> Arc<Self> {
+        let (pauses, unpunchable) = match scope {
+            PauseScope::Own => (SharedPauses::default(), None),
+            PauseScope::Client(pauses) => (pauses, Some(AtomicBool::new(false))),
+        };
         let control = Arc::new(Mutex::new(None::<Arc<Control>>));
         let reports = Arc::new(reports::Latest::default());
         let report_wake = Arc::new(tokio::sync::Notify::new());
@@ -158,16 +136,22 @@ impl Consumer {
             _reporter: reporter,
             network: OnceCell::new(),
             diagnostics,
-            cooldown: std::sync::Mutex::default(),
-            tcp_cooldown: std::sync::Mutex::default(),
+            pauses,
+            unpunchable,
             policy,
         })
     }
-    fn cooldown(&self) -> std::sync::MutexGuard<'_, Cooldown> {
-        self.cooldown.lock().unwrap_or_else(|e| e.into_inner())
+    /// The pauses as they stand on the relay's network now.
+    fn pauses(&self) -> MutexGuard<'_, Pauses> {
+        let mut pauses = self.pauses.lock();
+        pauses.on_network(self.remote.network_generation());
+        pauses
     }
-    pub(super) fn tcp_cooldown(&self) -> std::sync::MutexGuard<'_, Cooldown> {
-        self.tcp_cooldown.lock().unwrap_or_else(|e| e.into_inner())
+    fn cooldown(&self) -> MappedMutexGuard<'_, Cooldown> {
+        MutexGuard::map(self.pauses(), |pauses| &mut pauses.direct)
+    }
+    pub(super) fn tcp_cooldown(&self) -> MappedMutexGuard<'_, Cooldown> {
+        MutexGuard::map(self.pauses(), |pauses| &mut pauses.tcp)
     }
     /// A setup that asked for TCP took `took`, or the relay: note why TCP
     /// was missed, pausing it when the miss cost the head start, or clear
@@ -213,7 +197,32 @@ impl Consumer {
     fn back_off(&self) {
         let mut cooldown = self.cooldown();
         cooldown.back_off(Instant::now());
-        self.diagnostics.direct_cooldown(cooldown.until);
+        self.diagnostics.direct_cooldown(cooldown.until());
+    }
+    /// A setup fell back, saying `says` of the path. A listener's own
+    /// pauses take every fallback at once; a client's, only one that says
+    /// the path will not punch, once the relay carries it.
+    fn fell_back(&self, says: Says) {
+        match &self.unpunchable {
+            None => self.back_off(),
+            Some(unpunchable) => {
+                if says == Says::Unpunchable {
+                    unpunchable.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    /// The relay carries the connection this consumer fell back for: if its
+    /// fallback said the path will not punch, pause direct for its client's
+    /// next calls to the service.
+    pub fn relay_carried(&self) {
+        if self
+            .unpunchable
+            .as_ref()
+            .is_some_and(|unpunchable| unpunchable.swap(false, Ordering::Relaxed))
+        {
+            self.back_off();
+        }
     }
     fn clear_cooldown(&self) {
         self.cooldown().clear();
@@ -246,10 +255,10 @@ impl Consumer {
             ..
         } = response
         else {
-            tracing::debug!(service = %key, "relay or publisher does not offer direct");
+            tracing::debug!(service = %key, "relay does not offer direct");
             *slot = None;
             // Set before the lock is released, so no queued setup repeats the query.
-            self.back_off();
+            self.fell_back(Says::Unpunchable);
             return Ok(None);
         };
         if capability.version != DIRECT_VERSION {
@@ -257,7 +266,7 @@ impl Consumer {
                 version = capability.version,
                 "unsupported direct coordination version"
             );
-            self.back_off();
+            self.fell_back(Says::Unpunchable);
             return Ok(None);
         }
         let control = Control::connect(&self.remote, self.credential, self.namespace).await?;
@@ -283,7 +292,13 @@ impl Consumer {
     ) -> io::Result<Option<Prepared>> {
         // A recent fallback says this path will not punch: take the ordinary
         // relay path without spending the connection's setup budget on it.
-        if self.cooldown().active(Instant::now()) {
+        // The fallback may have been another connection's, so say until when.
+        let paused = self
+            .cooldown()
+            .until()
+            .filter(|until| Instant::now() < *until);
+        if paused.is_some() {
+            self.diagnostics.direct_cooldown(paused);
             self.diagnostics.cooldown_skip();
             return Ok(None);
         }
@@ -302,19 +317,22 @@ impl Consumer {
         .await
         {
             Ok(Ok(Some(negotiated))) => Ok(negotiated),
-            Ok(Ok(None)) => Err(FallbackReason::NotOffered),
+            // No direct registration to grant: the publisher may be away,
+            // restarting or without direct. A relay without direct said so
+            // where it answered.
+            Ok(Ok(None)) => Err((FallbackReason::NotOffered, Says::Nothing)),
             Ok(Err(error)) => {
                 tracing::debug!(%error, "direct coordination or discovery failed before a grant");
-                Err(FallbackReason::NegotiationFailed)
+                Err((FallbackReason::NegotiationFailed, Says::Nothing))
             }
-            Err(_) => Err(FallbackReason::NegotiationTimeout),
+            Err(_) => Err((FallbackReason::NegotiationTimeout, Says::Unpunchable)),
         };
         let (control, network, discovered, grant) = match negotiated {
             Ok(negotiated) => negotiated,
-            Err(reason) => {
+            Err((reason, says)) => {
                 tracing::info!(event = "session_path_selected", path = "relay", service = %key, reason = reason.as_str());
                 attempt.fell_back(reason);
-                self.back_off();
+                self.fell_back(says);
                 return Ok(None);
             }
         };
@@ -360,12 +378,11 @@ impl Consumer {
                 lan_missed(&self.diagnostics, &lan, None);
                 self.tcp_settled(tcp_missed, None);
                 attempt.fell_back(FallbackReason::Unreachable);
-                self.back_off();
+                self.fell_back(Says::Unpunchable);
                 network.punching_failed();
-                return self
-                    .relay(key, &control, grant, &mut pending)
-                    .await
-                    .map(Some);
+                let relayed = self.relay(key, &control, grant, &mut pending).await?;
+                self.relay_carried();
+                return Ok(Some(relayed));
             }
         };
         // From this point on, timeout/cancellation/ACK loss MUST NOT select relay.
@@ -430,7 +447,12 @@ impl Consumer {
         let network = self
             .network
             .get_or_try_init(|| async {
-                Network::new(false, self.policy.port_mapping, &self.diagnostics)
+                let network = Network::new(false, self.policy.port_mapping, &self.diagnostics)?;
+                #[cfg(test)]
+                if self.pauses.lock().block_quic {
+                    network.block_quic();
+                }
+                Ok::<_, io::Error>(network)
             })
             .await?
             .clone();
