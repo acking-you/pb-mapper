@@ -1038,6 +1038,64 @@ fn watcher_replaces_the_host_pointer_while_a_controller_moves_it() {
     assert_eq!(h.state().record.reason, Some(StateReason::InputFailed));
 }
 
+/// A scroll, as a click or a wheel's notch, lands where its controller
+/// last put the pointer: when the host's pointer moved away meanwhile,
+/// thread C moves it back first, and a scroll it cannot move back for is
+/// not injected.
+#[test]
+fn a_scroll_returns_the_pointer_to_its_controller_first() {
+    let mut h = Harness::new(true, None);
+    let _watcher = h.join_watcher(60);
+    h.send(LaneCommand::Control { enabled: true });
+    h.present();
+    h.input(Input::Move { x: 6, y: 5 });
+    h.run(Duration::from_millis(20), true);
+    let scroll = Input::Scroll {
+        horizontal: 0,
+        vertical: 30,
+        continuous: true,
+    };
+    let injected_since = |h: &Harness, from: usize| {
+        let log = h.fake.log.lock();
+        log.inputs[from..]
+            .iter()
+            .map(|(_, input)| input.clone())
+            .collect::<Vec<_>>()
+    };
+
+    *h.fake.pointer.lock() = (2, 1);
+    h.run(Duration::from_millis(20), true);
+    let before = h.inputs();
+    h.input(scroll.clone());
+    h.step();
+    let injected = injected_since(&h, before);
+    assert!(
+        matches!(
+            injected.as_slice(),
+            [
+                Input::Move { x: 6, y: 5 },
+                Input::Scroll {
+                    horizontal: 0,
+                    vertical: 30,
+                    continuous: true
+                }
+            ]
+        ),
+        "{injected:?}"
+    );
+    // A sample that finds the pointer where the move back put it.
+    h.run(Duration::from_millis(20), true);
+
+    *h.fake.pointer.lock() = (2, 1);
+    h.run(Duration::from_millis(20), true);
+    h.fake.fail_move.store(true, Ordering::Release);
+    let before = h.inputs();
+    h.input(scroll);
+    h.step();
+    assert_eq!(h.inputs(), before);
+    assert_eq!(h.state().record.reason, Some(StateReason::InputFailed));
+}
+
 #[test]
 fn switching_codec_discards_inflight_output_before_the_next_drain() {
     let mut h = Harness::new(false, None);

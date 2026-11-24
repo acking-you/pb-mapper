@@ -392,6 +392,9 @@ impl Injector for MacInput {
         }
         self.post(event)
     }
+    fn forget_scroll(&mut self) {
+        self.scrolls = ScrollSteps::default();
+    }
     /// `Meta` is Command and `Control` Control: the viewer's Apple swap
     /// relies on it.
     fn key(&mut self, key: Key, down: bool) -> Result<()> {

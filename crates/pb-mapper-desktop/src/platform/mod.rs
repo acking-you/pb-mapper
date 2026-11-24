@@ -302,6 +302,11 @@ pub(crate) trait Injector: Sized {
         let _ = (horizontal, vertical, continuous);
         Err(BackendError::new(FailureKind::Unsupported, "high-resolution scrolling").into())
     }
+    /// Drop what [`Injector::scroll`] kept short of a step of its own (a
+    /// line, a point): `PlatformBackend` calls it as it releases held input,
+    /// so what one controller scrolled never completes the next one's step.
+    /// The default keeps nothing.
+    fn forget_scroll(&mut self) {}
     /// Called only when `can_lock`.
     fn lock(&mut self) -> Result<()>;
     fn double_click(&mut self) -> Option<DoubleClickGuard> {

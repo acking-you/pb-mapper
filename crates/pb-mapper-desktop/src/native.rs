@@ -411,8 +411,14 @@ impl<P: Platform> Backend for PlatformBackend<P> {
     fn presented(&mut self, _expected: &DesktopContext) -> Result<()> {
         Ok(())
     }
+    /// Held input is let go, and what a scroll kept short of a step is
+    /// dropped: thread C releases everything as control ends, the picture
+    /// goes stale or the desktop's generation moves on, after which that
+    /// part belongs to nobody's next scroll.
     fn release(&mut self) {
         release(&mut self.held, &mut self.parts.input);
+        self.notches = ScrollCarry::default();
+        self.parts.input.forget_scroll();
     }
     fn double_click_guard(&mut self) -> Option<DoubleClickGuard> {
         let _scope = self.parts.desktop.scope();
@@ -679,5 +685,50 @@ mod tests {
         assert_eq!(probe.checks(), forgot(fresh(1)));
         assert!(!backend.restore_display_mode().unwrap());
         assert_eq!(probe.checks(), forgot(Checks::default()));
+    }
+
+    /// Toward an injector that scrolls in notches alone, which the host
+    /// does not list as `wheel_hires`, a scroll goes as whole notches, the
+    /// rest kept for the next; a release drops what was kept, here and in
+    /// an injector that keeps its own, so one controller's part of a step
+    /// never completes the next one's.
+    #[test]
+    fn a_release_drops_what_a_scroll_kept_short_of_a_step() {
+        let probe = Probe::default();
+        let mut backend = PlatformBackend::<Synthetic<false, false>>::open(
+            Arc::new(probe.clone()),
+            &Probe::display(),
+            Journal::default(),
+        )
+        .unwrap();
+        assert!(!backend.describe(false).unwrap().caps.hires_wheel);
+        let context = backend.context().unwrap();
+        let scroll = |backend: &mut PlatformBackend<_>, vertical| {
+            let input = Input::Scroll {
+                horizontal: 0,
+                vertical,
+                continuous: false,
+            };
+            backend.input_in_context(&context, &input).unwrap();
+        };
+        scroll(&mut backend, 180);
+        assert_eq!(probe.wheels(), [(0, 1)]);
+        scroll(&mut backend, 30);
+        backend.release();
+        scroll(&mut backend, 60);
+        assert_eq!(probe.wheels(), [(0, 1)], "90 kept would make a notch");
+        scroll(&mut backend, 60);
+        assert_eq!(probe.wheels(), [(0, 1), (0, 1)]);
+        assert!(probe.scrolls().is_empty());
+
+        let probe = Probe::default();
+        let mut backend = PlatformBackend::<Synthetic<false>>::open(
+            Arc::new(probe.clone()),
+            &Probe::display(),
+            Journal::default(),
+        )
+        .unwrap();
+        backend.release();
+        assert_eq!(probe.scroll_forgets(), 1);
     }
 }
