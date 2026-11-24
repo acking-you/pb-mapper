@@ -19,9 +19,10 @@
 //! takes a longer GOP better. The host's display is the clip's size, read
 //! from the `--size` option (default 1280x720).
 //!
-//! The pointer's shape follows where the viewer puts it, in five vertical
-//! bands a fifth of the display wide: arrow, I-beam, the top-left to
-//! bottom-right resize arrow, hand, and a custom checkered disc. Every input
+//! The pointer's shape follows where the viewer puts it, in six vertical
+//! bands a sixth of the display wide: arrow, I-beam, the top-left to
+//! bottom-right resize arrow, hand, a custom checkered disc, and the busy
+//! hourglass, a kind a Mac viewer has no pointer of its own for. Every input
 //! the host applies is printed as one `host_input` line, every shape it
 //! reports as `host_shape`: that log is the evidence. `--no-shapes` hosts
 //! without the `cursor_shape` capability, as a 0.11 host does; `--macos`
@@ -57,13 +58,16 @@ use pb_mapper::desktop::{
 type Outcome<T = ()> = std::result::Result<T, Box<dyn Error>>;
 
 /// The bands, left to right, and their shapes.
-const BANDS: [CursorKind; 5] = [
+const BANDS: [CursorKind; 6] = [
     CursorKind::Arrow,
     CursorKind::Ibeam,
     CursorKind::ResizeNwse,
     CursorKind::Hand,
     CursorKind::Custom,
+    CursorKind::Wait,
 ];
+/// How many bands there are, as the pointer's arithmetic takes it.
+const BAND_COUNT: u32 = BANDS.len() as u32;
 
 struct Options {
     clip: PathBuf,
@@ -231,8 +235,10 @@ async fn wander(pointer: Pointer, width: u32, height: u32) {
     loop {
         ticks.tick().await;
         let t = started.elapsed().as_secs_f64();
-        let band = (t / 3.0) as u32 % 5;
-        let x = band * width / 5 + width / 10 + (t.sin() * f64::from(width) / 40.0) as u32;
+        let band = (t / 3.0) as u32 % BAND_COUNT;
+        let x = band * width / BAND_COUNT
+            + width / (2 * BAND_COUNT)
+            + (t.sin() * f64::from(width) / 40.0) as u32;
         let y = height / 2 + (t.cos() * f64::from(height) / 8.0) as u32;
         if let Ok(mut pointer) = pointer.lock() {
             *pointer = Some((x.min(width - 1), y.min(height - 1)));
@@ -374,7 +380,7 @@ impl Backend for Replay {
         let Some((x, y)) = self.pointer() else {
             return Ok(None);
         };
-        let band = ((x * 5) / self.width).min(4) as usize;
+        let band = ((x * BAND_COUNT) / self.width).min(BAND_COUNT - 1) as usize;
         if self.shown == Some(band) {
             return Ok(None);
         }
@@ -465,6 +471,17 @@ fn bitmap(kind: CursorKind) -> ((u32, u32), Vec<u8>) {
                 put(16, y, BLACK);
             }
             (16, 2)
+        }
+        CursorKind::Wait => {
+            // An hourglass: two black-edged triangles meeting at the middle.
+            for y in 2..30 {
+                let half = (y - 16_i32).abs() * 10 / 14;
+                for x in 15 - half..=16 + half {
+                    let edge = x == 15 - half || x == 16 + half || y == 2 || y == 29;
+                    put(x, y, if edge { BLACK } else { [64, 160, 255, 255] });
+                }
+            }
+            (16, 16)
         }
         _ => {
             // Custom: a magenta and green checkered disc.
