@@ -1555,11 +1555,23 @@ model) gets `bits per frame × pace`. Each session starts at the model its
 backend declares (`BackendCaps::rate_model`, `nominal` unless set), and every
 viewer of a room starts at the same one; today every platform's encoder, and
 every session through the Windows helper, starts at `nominal`. A `nominal`
-session whose encoder budgets per second would overspend at a reduced pace.
-When two consecutive 3 s windows at no more than 0.75 × the nominal rate
-produce more than 1.3 × the expected bits, the session latches to the
-`timestamp` model for good and traces `desktop_rate_model_latched`; nothing
-latches a session back to `nominal`. The
+session whose encoder budgets per second would overspend at a reduced pace,
+by about the nominal rate over the pace. At every 250 ms QoS tick the host
+adds up what the encoder produced since the last one: frames, unique frames,
+non-IDR bits, and the bits expected for those non-IDR frames at the tick's
+bits per frame (the higher of the tick's two ends, so a cut never makes the
+frames encoded before it look like an overshoot). When the last 2 s of ticks
+were each paced at no more than 0.75 × the nominal rate, at both ends, held
+at least six unique frames between them, and produced non-IDR bits above
+`max(1.3, 0.6 × nominal / mean pace)` × the bits expected for them, the
+session latches to the `timestamp` model for good and traces
+`desktop_rate_model_latched`; nothing latches a session back to `nominal`. A
+per-second budget overshoots by about `nominal / pace`, so it latches about
+2 s after the pace falls, while the second term keeps a per-frame encoder at
+its content floor, such as NVIDIA's at pace 5 below, from latching. Fewer
+than 3 pictures a second (the unresponsive viewer's 2 FPS, or capture waiting
+for credit on a link the encoder overfills) never make six unique frames in
+2 s, so they latch nothing until pictures flow faster again. The
 encoder bitrate stays between 256 kbit/s and 80 Mbit/s, which the encoder and
 the helper check too, and nothing raises it because the frame rate was cut.
 At 4K, Quality's maximum bits per frame give the encoder 68 Mbit/s at a
@@ -1586,9 +1598,10 @@ Measured on the development machine below with its NVIDIA GeForce RTX 5070 Ti
   produced/expected 0.962 / 0.995 / 1.008 / 1.040, within the ±25% bound. At
   nominal 120 and 8 Mbit/s: 0.834 / 0.954 / 0.993 / 1.096. At nominal 120 and
   only 4 Mbit/s the pattern's own minimum size decides the bitrate (up to 1.79
-  at pace 5), which is the content, not a timestamp model. Such a run would
-  still pass the latch's test, and a false latch lowers each frame's budget
-  while the pace is reduced, so acceptance runs on Smooth watch
+  at pace 5), which is the content, not a timestamp model. The latch's content
+  floor term asks for more than 0.6 × 120 / 5 = 14.4 times the expected bits
+  there, so such a run does not latch; a false latch would lower each frame's
+  budget while the pace is reduced, so acceptance runs on Smooth still watch
   `rate_model`.
 - The creation bitrate is honoured (4 → 4.05 and 16 → 15.97 Mbit/s), and a live
   bitrate change reads back exactly. The mean-bitrate read-back is stale until
@@ -1813,7 +1826,7 @@ shapes by content, never by number.
 | Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder |
 | Armed tick | a tick with no new picture stays armed; ScreenCaptureKit wakes thread C; DXGI, in process or through the helper, is asked again every 2 ms for 250 ms after an injected input or a new picture (an input brings a pending poll in to 2 ms), and once a period otherwise |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
-| QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves; Balanced starts at its ceiling after a first probe under 50 ms; tick 250 ms; bits-per-frame window 3 s; latch at 1.3 × over 2 windows at ≤ 0.75 × nominal |
+| QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves; Balanced starts at its ceiling after a first probe under 50 ms; tick 250 ms; bits-per-frame window 3 s; rate-model latch over the last 2 s of ticks, each at ≤ 0.75 × nominal, with ≥ 6 unique frames and non-IDR bits > max(1.3, 0.6 × nominal / mean pace) × expected |
 | Process timers | 1 ms, with power throttling opted out, while a session captures |
 | IDR | host minimum interval 300 ms; viewer minimum 500 ms, backoff to 4 s; 1 s hold after a discontinuity |
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued; IDR grace 500 ms; stall watchdog 700 ms |
@@ -2422,6 +2435,24 @@ decoder asks for an IDR every 2 s and discards what arrives before it, and
 unlimited link asks instead. Each reports how long every IDR took to arrive
 and the P-frames that came first, the viewer's requests, its sink's discards
 and the host's dropped frames and IDRs. No run of them is recorded yet.
+
+Two more run the slow presenter and the bandwidth limit on an encoder that
+budgets per second (the bitrate over the time since the previous capture, at
+most 1 s, so a picture after idle carries the idle's bits too). Each reports
+when the host latched the `timestamp` model, from the first capture or from
+the limit, and from the start of the last stretch the encoder was asked for
+45 FPS (0.75 × the nominal 60) or less, and the sent bitrate over the
+expected one before and after the latch.
+`per_second_encoder_latches_under_an_fps_cap` asserts the latch within 2.5 s
+of that stretch's start and the expected bitrate after it.
+`per_second_encoder_on_a_bandwidth_limit` asserts only that the session
+recovers: there the per-second pictures fill the 1 Mbit/s link, capture waits
+for credit and the pace falls to 3 FPS or below, so no 2 s of ticks holds six
+frames until pictures flow again after the limit, and by then the pace is
+climbing back. Every case on a per-frame budget asserts that nothing latched.
+The
+[rate-model latch measurements](benchmarks/2026-11-24-rate-model-latch/README.md)
+record them before and after the per-tick latch.
 
 `video_bench 10 60 --animate --max-width 1920 --max-height 1080` still reaches
 59.9 unique capture and encode FPS at a mean 1.9 ms encode with one unit in
