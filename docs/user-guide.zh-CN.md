@@ -164,11 +164,37 @@ relay 监听 `7666/tcp`，并为直连监听 `7666/udp`。请在防火墙和云�
 - `--direct-advertise <IP:PORT>`：UDP 端口与 TCP 端口映射不一致时，告诉客户端应使用的公网地址（默认使用客户端拨通 relay 的地址）
 - `--ipv6`：开启 IPv6 监听
 - `--keep-alive`：开启 TCP keep-alive
+- `--tcp-congestion <NAME>`：在 Linux 上指定 relay 发送所用的 TCP 拥塞控制算法，例如 `bbr`（默认沿用内核的设置；见[调优 Linux relay](#调优-linux-relay)）
 - `--auth-state-dir`：认证状态目录（Linux 系统服务默认 `/var/lib/pb-mapper/auth`；无特权 Linux、macOS 与 Windows 使用当前用户可写的应用目录）
 - `--max-temporary-keys`：临时 key 固定槽位容量，默认 `65536`
 - `--max-temporary-key-ttl`：临时 key 最大 TTL，默认 `30d`
 - `--legacy-protocol allow|deny`：旧协议初始接入策略
 - `--use-machine-msg-header-key`：明确启用旧版机器派生 key 兼容模式
+
+### 调优 Linux relay
+
+有两项内核设置决定 relay 在停顿之后、以及在丢包链路上发得多快。两者都只影响 relay 发出的数据，例如远程桌面发往查看端的画面；被共享的电脑发往 relay 的数据走那台电脑自己的网络栈。直连不受影响。
+
+**空闲后慢启动。** Linux 会在 TCP 连接空闲一段时间后重置它的拥塞窗口（`net.ipv4.tcp_slow_start_after_idle = 1`，默认值），所以画面静止之后的第一帧又要从慢启动开始。该设置开启时，relay 启动时会记录 `relay_tcp_idle_restart`。关闭方法：
+
+```bash
+echo 'net.ipv4.tcp_slow_start_after_idle = 0' | sudo tee /etc/sysctl.d/90-pb-mapper.conf
+sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0
+```
+
+这会作用于本机的所有 TCP 连接。安装脚本会询问是否写入这个文件（`PB_MAPPER_TCP_TUNING=yes` 或 `no` 可预先作答），Docker Compose 文件则只对容器本身设置它（需要 Linux 4.15 或更高版本）。
+
+**拥塞控制。** `--tcp-congestion bbr` 或 `PB_MAPPER_TCP_CONGESTION=bbr` 让 relay 接受的每条 TCP 连接都用 BBR 发送：跨境或移动网络这类长链路上的随机丢包不会像拖慢 Linux 默认的 Cubic 那样拖慢它。它默认关闭，因为在拥塞链路上 BBR 与 Cubic 流分享带宽不够均衡。
+
+以 root 运行的 relay（安装脚本装的服务和 `services/pb-mapper-server.service` 即是）可以选用内核自带的任何算法，内核会自行加载对应模块。这些服务会读取 `/etc/pb-mapper/server.env`：
+
+```bash
+sudo mkdir -p /etc/pb-mapper
+echo 'PB_MAPPER_TCP_CONGESTION=bbr' | sudo tee -a /etc/pb-mapper/server.env
+sudo systemctl restart pb-mapper-server
+```
+
+其他 relay 需要先加载 `tcp_bbr` 模块（`sudo modprobe tcp_bbr`，并在 `/etc/modules-load.d/` 下的文件里写上 `tcp_bbr`，重启后仍会加载），并且要么把 `bbr` 加进 `net.ipv4.tcp_allowed_congestion_control`，要么给 relay `CAP_NET_ADMIN`（Docker 中为 `cap_add: [NET_ADMIN]`）。内核拒绝时，relay 会以 error 级别记录 `relay_tcp_congestion_unavailable` 及修复方法，并沿用默认算法；`RUST_LOG=info` 时，设置生效后还会记录 `relay_tcp_congestion`。`PB_MAPPER_TCP_CONGESTION` 不是合法的算法名时，relay 记录 `relay_tcp_congestion_invalid` 并忽略它。在其他系统上，这个选项只会记录它无法生效。
 
 ### 管理员密钥与临时凭据
 
@@ -346,6 +372,7 @@ flutter run
 - `PB_MAPPER_NEW_STREAMS_PER_SECOND`：每命名空间持续新建 stream 速率，默认 `100`
 - `PB_MAPPER_NEW_STREAMS_BURST`：每命名空间新建 stream 突发量，默认 `200`
 - `PB_MAPPER_KEEP_ALIVE`：启用 TCP keep-alive（设置为 `ON`）
+- `PB_MAPPER_TCP_CONGESTION`：未给出 `--tcp-congestion` 时，Linux 上 relay 的 TCP 拥塞控制算法，例如 `bbr`；不设置则沿用内核默认值
 - `PB_MAPPER_LOG_FORMAT`：tracing 输出格式，可选 `pretty`（默认）、`compact` 或 `json`
 - `PB_MAPPER_CONTROL_IO_TIMEOUT`：通用控制 I/O 超时，默认 `30s`；恢复建连采用更短的自适应/总期限，上限 `5s`，配置更小值仍然生效
 - `PB_MAPPER_STREAM_ACK_TIMEOUT`：stream ACK 的初始/最小等待预算，默认 `300ms`；各控制连接根据实测延迟和超时调整预算，再切换候选
