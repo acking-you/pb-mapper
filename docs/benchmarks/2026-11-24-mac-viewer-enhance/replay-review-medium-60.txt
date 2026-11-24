@@ -1,0 +1,42 @@
+{'presenter': 'layer', 'enhance': 'medium', 'max_fps': 60, 'quality': 'balanced', 'seconds': 40, 'warmup_seconds': 5}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.258, 'decode_ms': 0.82, 'enhanced': None}
+{'decoded': 61, 'presented': 61, 'dropped': 0, 'present_ms': 0.259, 'decode_ms': 0.82, 'enhanced': None}
+{'decoded': 59, 'presented': 59, 'dropped': 0, 'present_ms': 0.261, 'decode_ms': 0.829, 'enhanced': None}
+{'decoded': 61, 'presented': 61, 'dropped': 0, 'present_ms': 0.258, 'decode_ms': 0.874, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.257, 'decode_ms': 0.855, 'enhanced': None}
+{'decoded': 59, 'presented': 59, 'dropped': 0, 'present_ms': 0.259, 'decode_ms': 0.821, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.251, 'decode_ms': 0.818, 'enhanced': None}
+{'decoded': 61, 'presented': 61, 'dropped': 0, 'present_ms': 0.252, 'decode_ms': 0.882, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.261, 'decode_ms': 1.107, 'enhanced': None}
+{'decoded': 59, 'presented': 59, 'dropped': 0, 'present_ms': 0.261, 'decode_ms': 0.917, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.346, 'decode_ms': 1.014, 'enhanced': None}
+{'decoded': 58, 'presented': 58, 'dropped': 0, 'present_ms': 0.268, 'decode_ms': 0.894, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.276, 'decode_ms': 0.851, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.258, 'decode_ms': 0.848, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.256, 'decode_ms': 0.819, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.257, 'decode_ms': 0.905, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.267, 'decode_ms': 0.851, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.268, 'decode_ms': 0.834, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.33, 'decode_ms': 0.849, 'enhanced': None}
+{'decoded': 59, 'presented': 59, 'dropped': 0, 'present_ms': 0.267, 'decode_ms': 0.89, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.258, 'decode_ms': 0.887, 'enhanced': None}
+{'decoded': 59, 'presented': 59, 'dropped': 0, 'present_ms': 0.266, 'decode_ms': 0.888, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.262, 'decode_ms': 0.829, 'enhanced': None}
+{'decoded': 61, 'presented': 61, 'dropped': 0, 'present_ms': 0.274, 'decode_ms': 0.876, 'enhanced': None}
+{'decoded': 60, 'presented': 59, 'dropped': 0, 'present_ms': 0.289, 'decode_ms': 29.851, 'enhanced': None}
+{'decoded': 21, 'presented': 22, 'dropped': 0, 'present_ms': 1.059, 'decode_ms': 11.12, 'enhanced': None}
+{'decoded': 15, 'presented': 15, 'dropped': 0, 'present_ms': 3.398, 'decode_ms': 8.711, 'enhanced': None}
+{'decoded': 24, 'presented': 24, 'dropped': 0, 'present_ms': 0.778, 'decode_ms': 1.25, 'enhanced': None}
+{'decoded': 35, 'presented': 35, 'dropped': 0, 'present_ms': 0.848, 'decode_ms': 1.177, 'enhanced': None}
+{'decoded': 45, 'presented': 45, 'dropped': 0, 'present_ms': 0.947, 'decode_ms': 1.225, 'enhanced': None}
+{'decoded': 55, 'presented': 55, 'dropped': 0, 'present_ms': 0.843, 'decode_ms': 1.214, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.818, 'decode_ms': 1.189, 'enhanced': None}
+{'decoded': 61, 'presented': 61, 'dropped': 0, 'present_ms': 0.914, 'decode_ms': 1.278, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.857, 'decode_ms': 1.247, 'enhanced': None}
+{'decoded': 60, 'presented': 60, 'dropped': 0, 'present_ms': 0.845, 'decode_ms': 1.18, 'enhanced': None}
+35 intervals, 0 with `enhanced` set
+decoded a second: median 60
+presented a second: median 60
+dropped a second: median 0
+present_ms median 0.267
+decode_ms median 0.888

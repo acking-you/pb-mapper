@@ -229,6 +229,13 @@ enum DecoderInstallHint {
   gpuDriver,
 }
 
+/// How much the viewer sharpens a remote picture it shows larger than its
+/// own size, one choice for the whole device ("Sharpen enlarged picture"):
+/// a runner that presents the picture itself upscales it on the GPU and
+/// sharpens its luma, more at each step. Off, the runner does nothing more.
+/// Each value's name is what the video channel's `enhance` carries.
+enum PictureEnhancement { off, low, medium, high }
+
 /// The largest picture one of this device's decoders takes.
 @immutable
 class DesktopDecoderLimit {
@@ -783,6 +790,7 @@ class DesktopPicture {
     this.textureId,
     this.platformViewType,
     this.plane = false,
+    this.enhances = false,
     required this.aspectRatio,
     required this.codec,
   });
@@ -796,6 +804,11 @@ class DesktopPicture {
   /// Whether the runner draws the native picture on its own plane under the
   /// Flutter view (the Linux video plane), where the viewer leaves a hole.
   final bool plane;
+
+  /// Whether the runner can sharpen the native picture while it shows it
+  /// enlarged ([PictureEnhancement]): the viewer offers the choice only
+  /// then.
+  final bool enhances;
   final double aspectRatio;
 
   /// The session's codec, `h264`, `h265` or `jpeg`; through a reconnect,
@@ -808,11 +821,18 @@ class DesktopPicture {
       other.textureId == textureId &&
       other.platformViewType == platformViewType &&
       other.plane == plane &&
+      other.enhances == enhances &&
       other.aspectRatio == aspectRatio &&
       other.codec == codec;
   @override
-  int get hashCode =>
-      Object.hash(textureId, platformViewType, plane, aspectRatio, codec);
+  int get hashCode => Object.hash(
+    textureId,
+    platformViewType,
+    plane,
+    enhances,
+    aspectRatio,
+    codec,
+  );
 }
 
 /// Another controlling viewer's pointer in host display pixels, as

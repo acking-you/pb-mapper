@@ -1308,6 +1308,81 @@ void main() {
   );
 
   testWidgets(
+    'Sharpen enlarged picture is offered only for a picture the runner '
+    'presents itself, which hears the device\'s level as it shows and each '
+    'change at once',
+    (tester) async {
+      _size(tester, const Size(1280, 800));
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform_views,
+        (call) async => null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform_views,
+          null,
+        ),
+      );
+      final submenu = find.byKey(const Key('display-sharpen'));
+      for (final viewType in [null, 'pb_mapper/desktop_video_view']) {
+        final api = FakeDesktopApi()..codec = 'h264';
+        final textures = FakeTextures()..platformViewType = viewType;
+        final store = DesktopStore(api, textures: textures.create);
+        final demand = store.demand(DesktopDemand.viewer);
+        await store.connect(_target);
+        api.viewerStatusValue = liveStatus(controlling: true);
+        await tester.pump(const Duration(milliseconds: 500));
+        final prefs = ViewerPrefs(persist: false);
+        await prefs.setEnhance(PictureEnhancement.high);
+        await tester.pumpWidget(
+          _app(DesktopViewer(desktop: store, prefs: prefs, title: 'Office')),
+        );
+        await tester.pump();
+        final texture = textures.created.single;
+        await tester.tap(find.byKey(const Key('viewer-display')));
+        await tester.pump(const Duration(milliseconds: 300));
+        if (viewType == null) {
+          // A Flutter texture: nothing to offer, nothing sent.
+          expect(submenu, findsNothing);
+          expect(texture.enhancements, isEmpty);
+          await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+          await tester.pump(const Duration(milliseconds: 300));
+        } else {
+          // The level kept for the device, as the picture showed.
+          expect(texture.enhancements, [PictureEnhancement.high]);
+          expect(submenu, findsOneWidget);
+          final mouse = await tester.createGesture(
+            kind: PointerDeviceKind.mouse,
+          );
+          await mouse.addPointer(location: tester.getCenter(submenu));
+          await mouse.moveBy(const Offset(4, 0));
+          await tester.pump(const Duration(milliseconds: 400));
+          for (final level in PictureEnhancement.values) {
+            expect(find.byKey(Key('sharpen-${level.name}')), findsOneWidget);
+          }
+          await tester.tap(find.byKey(const Key('sharpen-medium')));
+          await tester.pump();
+          expect(prefs.enhance, PictureEnhancement.medium);
+          await prefs.setEnhance(PictureEnhancement.off);
+          await tester.pump();
+          expect(texture.enhancements, [
+            PictureEnhancement.high,
+            PictureEnhancement.medium,
+            PictureEnhancement.off,
+          ]);
+          // Never a reconnect.
+          expect(api.argsOf('connect'), hasLength(1));
+          await mouse.removePointer();
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+        demand.dispose();
+        store.dispose();
+        await tester.pump(const Duration(seconds: 1));
+      }
+    },
+  );
+
+  testWidgets(
     'the pointer maps to display pixels and nothing is sent unless input is '
     'live',
     (tester) async {

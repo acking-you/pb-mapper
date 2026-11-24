@@ -174,6 +174,33 @@ presenter, the time from each `Decoded` to the frame that showed it, with
 Mac's default only with a median lower by at least half a refresh at both
 rates, a p95 no worse, and WindowServer's GPU time no higher.
 
+The layer's **Sharpen enlarged picture** is set for a run by
+`--dart-define=enhance=off|low|medium|high` (default `off`), which the
+report repeats as `enhance`; each sample's `native.enhanced` gives the level
+and size the metal layer drew at, and is missing while the content layer
+showed the picture (a picture shown smaller than its own size, or a window
+not visible). Build one bundle per level beside an `off` one, replay a
+1920x1080 and a 2560x1440 text clip from `desktop_ui_host` into a viewer
+made full screen, on a Retina panel and on a 4K or 5K display, at 60 and at
+120 frames a second, and compare against `off`:
+
+- `xcrun xctrace record --template 'Metal System Trace' --attach "$VIEWER_PID"`
+  for the GPU time of the `upscale` and `sharpenImage` passes (or
+  `sharpenPlanes` at 1:1) per picture, and WindowServer's;
+- `timings.present`, which with the enhancement runs to its present, and
+  the `Enhance` and `Commit` points of interest in Animation Hitches;
+- `timings.decode` and the decoded and presented rates, which must not
+  change: the decoder thread only hands the picture over;
+- crops of the same text region in Screenshot.app at each level;
+- a letterboxed viewer whose window height puts the picture's top edge on
+  a half pixel (for 1920x1080 fitted 3024 pixels wide on a 2x panel, a
+  picture area an odd number of pixels taller than 1701) beside one on a
+  whole pixel: the crops must be equally sharp, since the metal layer goes
+  on whole pixels;
+- a pinch zoom, a pan and a window resize while the remote desktop is
+  still, which must redraw the picture at its new size with nothing from
+  the host and keep it as sharp.
+
 ## Windows viewer
 
 Build the FFI library and helper with `scripts/build/pb-mapper-ffi-windows.ps1`,

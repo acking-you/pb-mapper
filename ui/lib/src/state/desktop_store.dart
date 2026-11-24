@@ -2231,6 +2231,23 @@ class DesktopStore {
     }
   }
 
+  /// How much the runner sharpens texture [textureId]'s picture while it
+  /// shows it enlarged ([DesktopPicture.enhances]); nothing once that
+  /// texture is gone, for any other, or where the runner cannot.
+  Future<void> enhancePicture(int textureId, PictureEnhancement level) async {
+    final texture = _texture;
+    if (texture == null ||
+        !texture.enhances ||
+        texture.textureId != textureId) {
+      return;
+    }
+    try {
+      await texture.enhance(level);
+    } catch (_) {
+      // A disposed or failed presenter keeps its picture as it is.
+    }
+  }
+
   /// Drops the texture and picture: the next picture is another target's.
   void _releaseMedia() {
     _mediaSerial++;
@@ -2257,6 +2274,7 @@ class DesktopStore {
         textureId: texture.textureId,
         platformViewType: texture.platformViewType,
         plane: texture.plane,
+        enhances: texture.enhances,
         aspectRatio: width > 1 && height > 1 ? width / height : 16 / 9,
         // Between sessions, the last one's.
         codec: _media?.codec ?? _picture.value?.codec ?? 'h264',

@@ -1,0 +1,1217 @@
+{
+ "schema": 2,
+ "presenter": "layer",
+ "enhance": "medium",
+ "plane": false,
+ "quality": "balanced",
+ "max_fps": 60,
+ "resolution": "native",
+ "seconds": 40,
+ "warmup_seconds": 5,
+ "host": {
+  "description": "desktop_ui_host replay on this Mac, G24H2 at 144 Hz",
+  "rate_model": "timestamp",
+  "gop": null
+ },
+ "samples": [
+  {
+   "elapsed_us": 1052280,
+   "phase": "live",
+   "native": {
+    "lowLatency": true,
+    "submitted": 31,
+    "recoveries": 0,
+    "lastRecovery": "",
+    "decoder": "VideoToolbox H.264",
+    "presented": 31,
+    "dropped": 0,
+    "configurations": 1,
+    "timings": {
+     "present": {
+      "max_ms": 0.0,
+      "mean_ms": 0.0,
+      "samples": 0
+     },
+     "decode": {
+      "samples": 0,
+      "mean_ms": 0.0,
+      "max_ms": 0.0
+     }
+    },
+    "refreshHz": 144.0,
+    "hardware": true,
+    "decoded": 31
+   }
+  },
+  {
+   "elapsed_us": 2054123,
+   "phase": "live",
+   "native": {
+    "refreshHz": 144.0,
+    "lastRecovery": "",
+    "dropped": 0,
+    "decoderCpuMs": 30.658458,
+    "decoder": "VideoToolbox H.264",
+    "decoded": 91,
+    "recoveries": 0,
+    "hardware": true,
+    "submitted": 91,
+    "lowLatency": true,
+    "timings": {
+     "present": {
+      "max_ms": 0.360625,
+      "mean_ms": 0.2541868166666667,
+      "samples": 60
+     },
+     "decode": {
+      "samples": 60,
+      "mean_ms": 0.7945944833333333,
+      "max_ms": 1.068417
+     }
+    },
+    "presented": 91,
+    "configurations": 1
+   }
+  },
+  {
+   "elapsed_us": 3057402,
+   "phase": "live",
+   "native": {
+    "configurations": 1,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "timings": {
+     "present": {
+      "max_ms": 0.424542,
+      "mean_ms": 0.25587081666666667,
+      "samples": 120
+     },
+     "decode": {
+      "samples": 120,
+      "mean_ms": 0.8164961833333334,
+      "max_ms": 1.715375
+     }
+    },
+    "hardware": true,
+    "recoveries": 0,
+    "decoded": 151,
+    "presented": 151,
+    "decoderCpuMs": 50.671625,
+    "lowLatency": true,
+    "dropped": 0,
+    "refreshHz": 144.0,
+    "submitted": 151
+   }
+  },
+  {
+   "elapsed_us": 4059214,
+   "phase": "live",
+   "native": {
+    "timings": {
+     "present": {
+      "max_ms": 0.424542,
+      "mean_ms": 0.2568682611111111,
+      "samples": 180
+     },
+     "decode": {
+      "samples": 180,
+      "mean_ms": 0.8344784555555556,
+      "max_ms": 3.999792
+     }
+    },
+    "decoded": 211,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "lowLatency": true,
+    "submitted": 211,
+    "configurations": 1,
+    "decoderCpuMs": 71.015333,
+    "presented": 211,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  },
+  {
+   "elapsed_us": 5059901,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 271,
+    "decoderCpuMs": 91.574958,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "present": {
+      "max_ms": 0.424542,
+      "mean_ms": 0.2579154375,
+      "samples": 240
+     },
+     "decode": {
+      "samples": 240,
+      "mean_ms": 0.8470899125,
+      "max_ms": 4.608625
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 271,
+    "decoded": 271,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 6063556,
+   "phase": "live",
+   "native": {
+    "timings": {
+     "present": {
+      "max_ms": 0.424542,
+      "mean_ms": 0.25783567333333335,
+      "samples": 300
+     },
+     "decode": {
+      "samples": 300,
+      "mean_ms": 0.8416895600000001,
+      "max_ms": 4.608625
+     }
+    },
+    "decoded": 331,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "submitted": 331,
+    "lowLatency": true,
+    "configurations": 1,
+    "decoderCpuMs": 111.982208,
+    "presented": 331,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  },
+  {
+   "elapsed_us": 7066823,
+   "phase": "live",
+   "native": {
+    "timings": {
+     "present": {
+      "max_ms": 0.424542,
+      "mean_ms": 0.2580980969529086,
+      "samples": 361
+     },
+     "decode": {
+      "samples": 361,
+      "mean_ms": 0.8379546121883656,
+      "max_ms": 4.608625
+     }
+    },
+    "decoded": 392,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "lowLatency": true,
+    "submitted": 392,
+    "configurations": 1,
+    "decoderCpuMs": 132.849583,
+    "presented": 392,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  },
+  {
+   "elapsed_us": 8068472,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 451,
+    "decoderCpuMs": 153.13,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "decode": {
+      "samples": 420,
+      "mean_ms": 0.8367211047619048,
+      "max_ms": 4.608625
+     },
+     "present": {
+      "max_ms": 0.424542,
+      "mean_ms": 0.2584964238095238,
+      "samples": 420
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 452,
+    "decoded": 451,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 9073543,
+   "phase": "live",
+   "native": {
+    "timings": {
+     "present": {
+      "samples": 481,
+      "mean_ms": 0.2584361517671518,
+      "max_ms": 0.424542
+     },
+     "decode": {
+      "max_ms": 4.642583,
+      "mean_ms": 0.8414432453222452,
+      "samples": 481
+     }
+    },
+    "decoded": 512,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "lowLatency": true,
+    "decoderCpuMs": 173.906583,
+    "configurations": 1,
+    "submitted": 512,
+    "presented": 512,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  },
+  {
+   "elapsed_us": 10076096,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 572,
+    "decoderCpuMs": 194.239458,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "decode": {
+      "samples": 541,
+      "mean_ms": 0.8429354417744916,
+      "max_ms": 4.642583
+     },
+     "present": {
+      "samples": 541,
+      "mean_ms": 0.25825901109057303,
+      "max_ms": 0.424542
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 572,
+    "decoded": 572,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 11078305,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 631,
+    "decoderCpuMs": 214.200375,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "present": {
+      "samples": 600,
+      "mean_ms": 0.2583227833333333,
+      "max_ms": 0.424542
+     },
+     "decode": {
+      "samples": 600,
+      "mean_ms": 0.8407656083333332,
+      "max_ms": 4.642583
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 631,
+    "decoded": 631,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 12081247,
+   "phase": "live",
+   "native": {
+    "timings": {
+     "decode": {
+      "samples": 660,
+      "mean_ms": 0.8386583181818182,
+      "max_ms": 4.642583
+     },
+     "present": {
+      "samples": 660,
+      "mean_ms": 0.25768593181818183,
+      "max_ms": 0.424542
+     }
+    },
+    "decoded": 691,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "lowLatency": true,
+    "submitted": 691,
+    "configurations": 1,
+    "decoderCpuMs": 234.264916,
+    "presented": 691,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  },
+  {
+   "elapsed_us": 13084088,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 752,
+    "decoderCpuMs": 254.543583,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "present": {
+      "samples": 721,
+      "mean_ms": 0.25717459361997225,
+      "max_ms": 0.424542
+     },
+     "decode": {
+      "samples": 721,
+      "mean_ms": 0.8423660859916782,
+      "max_ms": 4.642583
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 752,
+    "decoded": 752,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 14085935,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 812,
+    "decoderCpuMs": 274.268458,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "decode": {
+      "samples": 781,
+      "mean_ms": 0.8627022919334187,
+      "max_ms": 7.113792
+     },
+     "present": {
+      "samples": 781,
+      "mean_ms": 0.25744874263764406,
+      "max_ms": 0.878042
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 812,
+    "decoded": 812,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 15089408,
+   "phase": "live",
+   "native": {
+    "timings": {
+     "decode": {
+      "samples": 840,
+      "mean_ms": 0.8665163095238094,
+      "max_ms": 7.113792
+     },
+     "present": {
+      "samples": 840,
+      "mean_ms": 0.25766955714285716,
+      "max_ms": 0.878042
+     }
+    },
+    "decoded": 871,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "lowLatency": true,
+    "submitted": 871,
+    "configurations": 1,
+    "decoderCpuMs": 294.271916,
+    "presented": 871,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  },
+  {
+   "elapsed_us": 16092390,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 931,
+    "decoderCpuMs": 316.8805,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "decode": {
+      "samples": 900,
+      "mean_ms": 0.87636217,
+      "max_ms": 7.113792
+     },
+     "present": {
+      "samples": 900,
+      "mean_ms": 0.26353431666666666,
+      "max_ms": 2.391375
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 931,
+    "decoded": 931,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 17093762,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 989,
+    "decoderCpuMs": 337.1105,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "decode": {
+      "samples": 958,
+      "mean_ms": 0.8774523204592902,
+      "max_ms": 7.113792
+     },
+     "present": {
+      "samples": 958,
+      "mean_ms": 0.26380859394572026,
+      "max_ms": 2.391375
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 990,
+    "decoded": 989,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 18096726,
+   "phase": "live",
+   "native": {
+    "timings": {
+     "decode": {
+      "samples": 1018,
+      "mean_ms": 0.8759081807465618,
+      "max_ms": 7.113792
+     },
+     "present": {
+      "samples": 1018,
+      "mean_ms": 0.2645027504911592,
+      "max_ms": 2.391375
+     }
+    },
+    "decoded": 1049,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "submitted": 1049,
+    "lowLatency": true,
+    "configurations": 1,
+    "decoderCpuMs": 358.290875,
+    "presented": 1049,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  },
+  {
+   "elapsed_us": 19101746,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 1109,
+    "decoderCpuMs": 378.662375,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "decode": {
+      "samples": 1078,
+      "mean_ms": 0.8743384211502783,
+      "max_ms": 7.113792
+     },
+     "present": {
+      "samples": 1078,
+      "mean_ms": 0.2641199035250464,
+      "max_ms": 2.391375
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 1109,
+    "decoded": 1109,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 20104037,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 1169,
+    "decoderCpuMs": 398.72875,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "decode": {
+      "samples": 1138,
+      "mean_ms": 0.8714305694200352,
+      "max_ms": 7.113792
+     },
+     "present": {
+      "samples": 1138,
+      "mean_ms": 0.26369087521968365,
+      "max_ms": 2.391375
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 1169,
+    "decoded": 1169,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 21105433,
+   "phase": "live",
+   "native": {
+    "decoded": 1229,
+    "timings": {
+     "decode": {
+      "samples": 1198,
+      "mean_ms": 0.8731213397328882,
+      "max_ms": 7.113792
+     },
+     "present": {
+      "samples": 1198,
+      "mean_ms": 0.26337166527545913,
+      "max_ms": 2.391375
+     }
+    },
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "submitted": 1229,
+    "lowLatency": true,
+    "configurations": 1,
+    "decoderCpuMs": 419.127791,
+    "presented": 1229,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  },
+  {
+   "elapsed_us": 22108225,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 1289,
+    "decoderCpuMs": 439.744,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "present": {
+      "samples": 1258,
+      "mean_ms": 0.2635400461049285,
+      "max_ms": 2.391375
+     },
+     "decode": {
+      "samples": 1258,
+      "mean_ms": 0.8720474880763116,
+      "max_ms": 7.113792
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 1289,
+    "decoded": 1289,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 23110159,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 1349,
+    "decoderCpuMs": 460.697333,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "present": {
+      "samples": 1318,
+      "mean_ms": 0.26375939301972684,
+      "max_ms": 2.391375
+     },
+     "decode": {
+      "samples": 1318,
+      "mean_ms": 0.8703126487101669,
+      "max_ms": 7.113792
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 1349,
+    "decoded": 1349,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 24112765,
+   "phase": "live",
+   "native": {
+    "decoded": 1409,
+    "timings": {
+     "decode": {
+      "samples": 1378,
+      "mean_ms": 0.8693758381712626,
+      "max_ms": 7.113792
+     },
+     "present": {
+      "samples": 1378,
+      "mean_ms": 0.2666440863570392,
+      "max_ms": 2.391375
+     }
+    },
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "submitted": 1409,
+    "lowLatency": true,
+    "configurations": 1,
+    "decoderCpuMs": 482.464583,
+    "presented": 1409,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  },
+  {
+   "elapsed_us": 25115599,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 1468,
+    "decoderCpuMs": 502.980625,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "present": {
+      "samples": 1437,
+      "mean_ms": 0.26664756437021575,
+      "max_ms": 2.391375
+     },
+     "decode": {
+      "samples": 1437,
+      "mean_ms": 0.8702191976339596,
+      "max_ms": 7.113792
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 1468,
+    "decoded": 1468,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 26117397,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 1528,
+    "decoderCpuMs": 523.260666,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "present": {
+      "samples": 1497,
+      "mean_ms": 0.2662918964595858,
+      "max_ms": 2.391375
+     },
+     "decode": {
+      "samples": 1497,
+      "mean_ms": 0.8708761629926519,
+      "max_ms": 7.113792
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 1528,
+    "decoded": 1528,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 27121957,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 1587,
+    "decoderCpuMs": 543.499416,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "decode": {
+      "samples": 1556,
+      "mean_ms": 0.8715235629820052,
+      "max_ms": 7.113792
+     },
+     "present": {
+      "samples": 1556,
+      "mean_ms": 0.26628564460154247,
+      "max_ms": 2.391375
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 1588,
+    "decoded": 1587,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 28126637,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 1647,
+    "decoderCpuMs": 563.62225,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "decode": {
+      "samples": 1616,
+      "mean_ms": 0.8699331658415842,
+      "max_ms": 7.113792
+     },
+     "present": {
+      "samples": 1616,
+      "mean_ms": 0.2661338985148515,
+      "max_ms": 2.391375
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 1647,
+    "decoded": 1647,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 29128818,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 1708,
+    "decoderCpuMs": 585.012708,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "decode": {
+      "samples": 1677,
+      "mean_ms": 0.8701537167561121,
+      "max_ms": 7.113792
+     },
+     "present": {
+      "samples": 1677,
+      "mean_ms": 0.26641870483005364,
+      "max_ms": 2.391375
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 1708,
+    "decoded": 1708,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 32484185,
+   "phase": "recovering",
+   "native": {
+    "decoded": 1768,
+    "timings": {
+     "decode": {
+      "samples": 1736,
+      "max_ms": 1709.234084,
+      "mean_ms": 1.8551022937788018
+     },
+     "present": {
+      "samples": 1736,
+      "mean_ms": 0.2671698842165898,
+      "max_ms": 2.391375
+     }
+    },
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "submitted": 1768,
+    "lowLatency": true,
+    "configurations": 1,
+    "decoderCpuMs": 605.46175,
+    "presented": 1767,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  },
+  {
+   "elapsed_us": 33487591,
+   "phase": "live",
+   "native": {
+    "decoded": 1789,
+    "timings": {
+     "decode": {
+      "samples": 1758,
+      "mean_ms": 1.9710436325369738,
+      "max_ms": 1709.234084
+     },
+     "present": {
+      "max_ms": 4.478,
+      "samples": 1758,
+      "mean_ms": 0.2770787599544937
+     }
+    },
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "submitted": 1789,
+    "lowLatency": true,
+    "configurations": 1,
+    "decoderCpuMs": 618.645,
+    "presented": 1789,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  },
+  {
+   "elapsed_us": 34490564,
+   "phase": "live",
+   "native": {
+    "hardware": true,
+    "lastRecovery": "",
+    "presented": 1804,
+    "decoderCpuMs": 627.537833,
+    "configurations": 1,
+    "timings": {
+     "present": {
+      "samples": 1773,
+      "mean_ms": 0.3034835736040609,
+      "max_ms": 42.816958
+     },
+     "decode": {
+      "max_ms": 1709.234084,
+      "samples": 1773,
+      "mean_ms": 2.028065400451213
+     }
+    },
+    "recoveries": 0,
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 1804,
+    "decoded": 1804,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 35492479,
+   "phase": "live",
+   "native": {
+    "hardware": true,
+    "lastRecovery": "",
+    "presented": 1828,
+    "decoderCpuMs": 647.360041,
+    "configurations": 1,
+    "timings": {
+     "decode": {
+      "max_ms": 1709.234084,
+      "samples": 1797,
+      "mean_ms": 2.017672530328325
+     },
+     "present": {
+      "samples": 1797,
+      "mean_ms": 0.3098176588759043,
+      "max_ms": 42.816958
+     }
+    },
+    "recoveries": 0,
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 1828,
+    "decoded": 1828,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 36495935,
+   "phase": "live",
+   "native": {
+    "decoded": 1863,
+    "timings": {
+     "decode": {
+      "samples": 1832,
+      "mean_ms": 2.0016102794759827,
+      "max_ms": 1709.234084
+     },
+     "present": {
+      "max_ms": 42.816958,
+      "samples": 1832,
+      "mean_ms": 0.320098297489083
+     }
+    },
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "submitted": 1864,
+    "lowLatency": true,
+    "configurations": 1,
+    "decoderCpuMs": 679.87275,
+    "presented": 1863,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  },
+  {
+   "elapsed_us": 37499370,
+   "phase": "live",
+   "native": {
+    "timings": {
+     "present": {
+      "samples": 1877,
+      "mean_ms": 0.3351228902503996,
+      "max_ms": 42.816958
+     },
+     "decode": {
+      "max_ms": 1709.234084,
+      "samples": 1877,
+      "mean_ms": 1.982986409163559
+     }
+    },
+    "decoded": 1908,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "lowLatency": true,
+    "decoderCpuMs": 727.105,
+    "configurations": 1,
+    "submitted": 1908,
+    "presented": 1908,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  },
+  {
+   "elapsed_us": 38500596,
+   "phase": "live",
+   "native": {
+    "decoded": 1963,
+    "timings": {
+     "present": {
+      "samples": 1932,
+      "mean_ms": 0.3495743400621118,
+      "max_ms": 42.816958
+     },
+     "decode": {
+      "max_ms": 1709.234084,
+      "samples": 1932,
+      "mean_ms": 1.9611080408902692
+     }
+    },
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "submitted": 1963,
+    "lowLatency": true,
+    "configurations": 1,
+    "decoderCpuMs": 779.89525,
+    "presented": 1963,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  },
+  {
+   "elapsed_us": 39503903,
+   "phase": "live",
+   "native": {
+    "lastRecovery": "",
+    "hardware": true,
+    "presented": 2023,
+    "decoderCpuMs": 834.665333,
+    "configurations": 1,
+    "recoveries": 0,
+    "timings": {
+     "present": {
+      "samples": 1992,
+      "mean_ms": 0.36368118473895583,
+      "max_ms": 42.816958
+     },
+     "decode": {
+      "max_ms": 1709.234084,
+      "samples": 1992,
+      "mean_ms": 1.9378593062248997
+     }
+    },
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 2024,
+    "decoded": 2023,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 40506252,
+   "phase": "live",
+   "native": {
+    "hardware": true,
+    "lastRecovery": "",
+    "presented": 2084,
+    "decoderCpuMs": 894.474375,
+    "configurations": 1,
+    "timings": {
+     "present": {
+      "max_ms": 42.816958,
+      "mean_ms": 0.3800417671699951,
+      "samples": 2053
+     },
+     "decode": {
+      "max_ms": 1709.234084,
+      "samples": 2053,
+      "mean_ms": 1.9182557579152462
+     }
+    },
+    "recoveries": 0,
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 2084,
+    "decoded": 2084,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 41507620,
+   "phase": "live",
+   "native": {
+    "hardware": true,
+    "lastRecovery": "",
+    "presented": 2144,
+    "decoderCpuMs": 952.146958,
+    "configurations": 1,
+    "timings": {
+     "present": {
+      "max_ms": 42.816958,
+      "mean_ms": 0.39359475011831524,
+      "samples": 2113
+     },
+     "decode": {
+      "max_ms": 1709.234084,
+      "samples": 2113,
+      "mean_ms": 1.8991909952673924
+     }
+    },
+    "recoveries": 0,
+    "refreshHz": 144.0,
+    "lowLatency": true,
+    "submitted": 2144,
+    "decoded": 2144,
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264"
+   }
+  },
+  {
+   "elapsed_us": 42512181,
+   "phase": "live",
+   "native": {
+    "decoded": 2204,
+    "timings": {
+     "present": {
+      "max_ms": 42.816958,
+      "mean_ms": 0.40607150161067646,
+      "samples": 2173
+     },
+     "decode": {
+      "max_ms": 1709.234084,
+      "samples": 2173,
+      "mean_ms": 1.87933608835711
+     }
+    },
+    "dropped": 0,
+    "decoder": "VideoToolbox H.264",
+    "lastRecovery": "",
+    "submitted": 2204,
+    "lowLatency": true,
+    "configurations": 1,
+    "decoderCpuMs": 1008.755541,
+    "presented": 2204,
+    "recoveries": 0,
+    "hardware": true,
+    "refreshHz": 144.0
+   }
+  }
+ ]
+}

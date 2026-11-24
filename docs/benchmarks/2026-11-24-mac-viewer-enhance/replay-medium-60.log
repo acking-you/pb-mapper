@@ -1,0 +1,3 @@
+2026-11-24 22:45:52.315 pb-mapper[52688:8856887] PbDesktopVideo: Video library instance: Dart 0x1072e3640, runner 0x1072e3640
+2026-11-24 22:45:52.319 pb-mapper[52688:8856887] PbDesktopVideo: Video view 0 for 1: its layer
+2026-11-24 22:45:52.349 pb-mapper[52688:8857102] PbDesktopVideo: VideoToolbox H.264 configured for 1920x1080 (hardware: true, real time: true)

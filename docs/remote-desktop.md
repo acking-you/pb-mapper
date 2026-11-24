@@ -4205,11 +4205,88 @@ colours there, the grey still as the WindowServer composites it, the cursor,
 clicks, scrolls and gestures through the responder chain, live resizing and
 a ProMotion panel are what the run with the display on checks.
 
+With the layer presenter, the Display menu also offers **Sharpen enlarged
+picture**: Off, Low, Medium or High, one choice for the device
+(`viewer_enhance` in the viewer's preferences), Off until chosen, offered
+only for a picture the runner presents itself and sent at once as the
+channel's `enhance {textureId, level}`. It follows airhand's enhancement
+(`client/src/lib/enhance.ts`). While the level is not Off and the picture
+shows on screen at least its own size on both axes, but no larger than its
+screen, the decoder thread hands each picture to a presenter thread of its
+own through a slot of one, the newest winning, and returns at once: it never
+waits for the GPU or a drawable. The whole picture is drawn, not the part a
+zoom shows, so a picture that fills the screen goes back to the content
+layer as soon as it is zoomed in. The size on screen is the view's layer
+bounds in the window's root layer, which takes in the sublayer transform
+that Flutter's zoom puts on the view's container, times the backing scale,
+with each edge moved to the nearest edge between device pixels. Flutter
+places the view at fractional pixels; the metal layer takes that rect on
+whole pixels and its drawable exactly that many pixels, so the WindowServer
+composites it one texel a pixel and does not filter, and blur, it again.
+While the level is not Off, the view measures it again as Flutter sets its
+frame, which Flutter does each frame it composites the view in, once it
+placed the view's ancestors; as the zoom transform changes, which it
+observes; in `layout()`, which is where a view new in the window has joined
+its layer tree; and as its backing scale, window or occlusion change. The
+metal layer moves at once, in the transaction Flutter moves the view in;
+the size and the switch between layers follow in the platform thread's next
+turn, so that a frame that sets the view's frame before its zoom is acted
+on only once. The presenter thread wraps the decoder's
+420v planes for Metal without a copy (`CVMetalTextureCache`). A first pass,
+skipped at 1:1, upscales luma by Catmull-Rom from nine bilinear taps, kept
+within its four nearest texels so that it never rings, takes chroma
+bilinear, and converts through the picture's matrix with no transfer
+conversion, as the content layer shows it. A second pass sharpens luma
+alone, as AMD FidelityFX CAS does, with airhand's peaks (-0.06, -0.1,
+-0.14): less where the 3×3 around a pixel already has contrast, which
+limits overshoot beside an edge but does not prevent it, and never chroma,
+which 4:2:0 carries at half the resolution. It draws into a `CAMetalLayer`
+(BGRA8, sRGB, three drawables, the size on screen) beside the content
+layer: the presenter thread takes a drawable first, which may wait, and
+only then the newest picture, and presents in a transaction once the GPU
+has scheduled the work. That present is the picture's receipt, and
+`timings.present` runs to it, unless the activation ended meanwhile (the
+layer is hidden by then) or the picture is no newer than the last one
+acknowledged, which Rust's sink would reject anyway; a picture replaced in
+the slot before it was drawn counts as dropped. Until its first present the
+decoder thread commits each picture to the content layer too, so the
+picture keeps moving while the shaders compile (110 ms the first time on
+the M6). The metal layer then takes the content layer's place, in one
+platform-thread transaction, and pictures go to it alone; when the
+enhancement stops the content layer takes the newest picture in the
+transaction that shows it again, so the picture never blanks. Each word
+from the presenter thread names the enhancement it came from, so one from
+an enhancement released since changes nothing. The presenter thread keeps
+the last picture and draws it again when the size on screen or the level
+changes, though the host sends nothing while the desktop is still. A
+picture shown smaller than its own size, a window not visible, three
+pictures the GPU failed in a row, two seconds without a drawable or no
+Metal device leave the picture to the content layer; at Off none of it
+exists, neither the thread, nor any GPU state, nor the watch on the view.
+The shaders compile from source at run time, so neither runner project
+carries a `.metal` file. A snapshot still takes the decoded picture. While
+the metal layer shows the picture, `stats` adds `enhanced` (`level`,
+`width`, `height`). Offscreen on an M6 with the runner's own code, both
+passes took 0.52 ms of GPU time a picture for 1080p shown at 3024×1701 and
+0.94 ms at 4096×2304, the sharpening alone 0.08 ms for 1080p at 1:1, the
+same at each level; at 1:1 with no sharpening the colours matched the
+content layer's exactly on eight patches, and over text the mean luma
+gradient rose 10 to 14 % over the content layer's linear filter from the
+upscale alone and 15 to 20 % at High, while a 16 to 235 edge reached 13 to
+237 at Low and 9 to 241 at High; in a window, the metal layer's frame
+landed on whole pixels for a view at fractional points, moved and zoomed
+([measurements](benchmarks/2026-11-24-mac-viewer-enhance/README.md)). The
+picture on a lit screen, its time to the glass, a letterboxed picture whose
+edge falls on a half pixel, a pinch, a pan or a resize while the desktop
+is still, and the WindowServer's work with the metal layer are what the run
+with the display on checks.
+
 While the stats ask for timings, the runner marks Instruments points of
 interest (subsystem `pb-mapper.desktop-video`), each with the picture's
 generation and frame: `Decoded` as a picture leaves the decoder, `Commit`
-around the layer presenter's commit, and `Consumed` when Flutter's
-compositor takes a texture's picture. They go to the system log whether or
+around the layer presenter's commit or its enhancement's present,
+`Enhance` from the enhancement encoding its GPU work to the GPU scheduling
+it, and `Consumed` when Flutter's compositor takes a texture's picture. They go to the system log whether or
 not a trace records them, hence only while timed. Animation Hitches records
 them once the Points of Interest instrument is added
 (`xcrun xctrace record --template 'Animation Hitches' --instrument 'Points of Interest'`),
@@ -4608,7 +4685,14 @@ What each platform's new code has been through:
   time to the screen against the texture's, the picture on a screen, its
   colours and grey still there, the pointer over it, the first click into
   an inactive window, live resizing and a ProMotion panel are outstanding;
-  they decide whether it becomes the Mac's default.
+  they decide whether it becomes the Mac's default. Its **Sharpen enlarged
+  picture** ran only on that M6 with the display asleep, in a harness built
+  from the runner's own code
+  ([measurements](benchmarks/2026-11-24-mac-viewer-enhance/README.md)):
+  the GPU passes' time and output offscreen, and the metal layer's
+  placement on whole pixels, the hand-off, the switch between layers and
+  the presents in a window. Its look and cost on a lit screen are
+  outstanding.
 - **Native pointer shapes.** The desktop viewers' host bitmaps as their own
   cursors (`pb_mapper/desktop_pointer`, see
   [The viewer's pointer](#input-and-cursor)) have run only on a Mac.
@@ -4928,7 +5012,7 @@ routing; QUIC carrier and independent cross-network UI acceptance remain separat
 | Direct and forced relay | Android VM runtime baselines above and deployed TCP experiments recorded; independent cross-network UI acceptance outstanding |
 | Android viewer | Native MediaCodec/Flutter texture path exercised in an Android VM; physical phone validation outstanding |
 | iOS viewer | Native VideoToolbox path; the app, linking the FFI static library (built without netdev, so no port mapping on iOS), is built unsigned in CI with its exports checked; device validation outstanding |
-| macOS viewer | VideoToolbox hardware decoding of H.264 and H.265 on an M3 Pro; thumbnail written on disconnect; the opt-in layer presenter's commits and receipts in replays on an M6 with its display asleep; the layer on screen outstanding |
+| macOS viewer | VideoToolbox hardware decoding of H.264 and H.265 on an M3 Pro; thumbnail written on disconnect; the opt-in layer presenter's commits and receipts in replays on an M6 with its display asleep, and its picture enhancement's GPU passes and presents in a harness there; the layer on screen outstanding |
 | Linux viewer | Native GStreamer path ran in WSL2 (WSLg) with NVDEC and gst-libav, against a host replaying recorded clips; CI builds the app and decodes clips with software decoders; VA-API, V4L2 and a real Linux desktop outstanding |
 | macOS host | Compiled, linked and unit-tested in CI on a macOS runner (the encoder, the display list, the pointer read in a window-server session, thread C's waiter, a 60 fps session paced at 60 frames a second); view-only 1080p H.265 streaming on an M3 Pro |
 | Pointer shapes | Windows host's shapes read over an owned window through a viewer, the custom one pixel for pixel; the Windows app and the Android emulator paint the host's shapes; in the Windows app, against a host replaying a clip, the real local pointer took the host's shapes in control, one pointer showing; the bitmap's growth with Android pinch zoom not seen; macOS cursor shape fidelity awaits hardware comparison |

@@ -63,6 +63,28 @@ void main() {
     expect(relaunched.decoderHint(null, 'jpeg'), isNull);
   });
 
+  test('sharpening an enlarged picture starts off, is kept for the device, '
+      'and a level a later build named falls back to off', () async {
+    SharedPreferences.setMockInitialValues({});
+    final first = ViewerPrefs();
+    await first.load();
+    expect(first.enhance, PictureEnhancement.off);
+    var heard = 0;
+    first.addListener(() => heard++);
+    await first.setEnhance(PictureEnhancement.medium);
+    await first.setEnhance(PictureEnhancement.medium);
+    expect(heard, 1);
+
+    final relaunched = ViewerPrefs();
+    await relaunched.load();
+    expect(relaunched.enhance, PictureEnhancement.medium);
+
+    SharedPreferences.setMockInitialValues({'viewer_enhance': 'ultra'});
+    final unknown = ViewerPrefs();
+    await unknown.load();
+    expect(unknown.enhance, PictureEnhancement.off);
+  });
+
   test('the keyboard is chosen per computer, and one not remembered keeps it '
       'only until the app closes', () async {
     SharedPreferences.setMockInitialValues({});
