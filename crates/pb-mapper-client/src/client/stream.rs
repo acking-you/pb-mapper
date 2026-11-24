@@ -102,6 +102,10 @@ pub(crate) async fn handle_local_stream<LocalStream: NetworkStream + StreamForwa
         },
         setup_latency,
     ) = subscription.with_retry(&setup, deadline, budget).await?;
+    #[cfg(feature = "p2p")]
+    if let Some(direct) = &setup.direct {
+        direct.relay_carried();
+    }
     drop(global_permit);
     remote_addr.protocol_succeeded();
     setup.diagnostics.succeeded(setup_latency);

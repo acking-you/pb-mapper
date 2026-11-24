@@ -11,6 +11,7 @@ description = "Register, connect, status, and admin client implementation for pb
 publish = ["crates-io"]
 
 [dependencies]
+parking_lot = { workspace = true, optional = true }
 portmapper = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
@@ -52,7 +53,7 @@ tokio = { workspace = true, features = ["test-util"] }
 [features]
 port-mapping = ["p2p", "dep:portmapper"]
 relay-quic = ["dep:quinn", "pb-mapper-protocol/relay-quic"]
-p2p = ["dep:quinn", "dep:rcgen", "dep:stun-proto", "dep:ring", "dep:netdev", "dep:socket2", "dep:tokio-rustls"]
+p2p = ["dep:quinn", "dep:rcgen", "dep:stun-proto", "dep:ring", "dep:netdev", "dep:socket2", "dep:tokio-rustls", "dep:parking_lot"]
 udp-timeout = ["uni-stream/udp-timeout", "pb-mapper-protocol/udp-timeout"]
 
 [lints]
