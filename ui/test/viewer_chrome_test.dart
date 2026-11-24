@@ -442,6 +442,134 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  test("two decoder reads give each timing's mean over the samples between "
+      "them (the second read's own when the first has none), the decoder "
+      "thread's CPU a second, and the hardware flag; a CPU time missing from "
+      'either read, or one that went back, gives none', () {
+    Map<String, Object?> timing(int samples, double meanMs) => {
+      'samples': samples,
+      'mean_ms': meanMs,
+      'max_ms': meanMs * 2,
+    };
+    // A Mac's reads a second apart, the decode timing holding a key frame.
+    final mac = DesktopDecoderStats.between(
+      {
+        'decoded': 100,
+        'decoderCpuMs': 1000.0,
+        'timings': {'decode': timing(100, 2.0), 'present': timing(100, 1.0)},
+      },
+      {
+        'decoded': 160,
+        'decoderCpuMs': 1042.0,
+        'hardware': true,
+        'timings': {'decode': timing(150, 2.2), 'present': timing(150, 1.2)},
+      },
+      const Duration(seconds: 1),
+    );
+    expect(mac.decodeMs, closeTo(2.6, 1e-9));
+    expect(mac.presentMs, closeTo(1.6, 1e-9));
+    expect(mac.decoderCpuMsPerSecond, closeTo(42, 1e-9));
+    expect(mac.hardware, isTrue);
+    expect(mac.convertMs, isNull);
+
+    // Windows' convert is its own figure, never a decode time.
+    final windows = DesktopDecoderStats.between(
+      {
+        'timings': {'convert': timing(60, 1.0)},
+      },
+      {
+        'timings': {'convert': timing(120, 1.5)},
+      },
+      const Duration(seconds: 2),
+    );
+    expect(windows.convertMs, closeTo(2, 1e-9));
+    expect(windows.decodeMs, isNull);
+    expect(windows.decoderCpuMsPerSecond, isNull);
+    expect(windows.hardware, isNull);
+
+    // The timings just began: the first read has no timing and no CPU time
+    // yet. A timing counts from nothing, a CPU time cannot.
+    final first = DesktopDecoderStats.between(const {}, {
+      'decoderCpuMs': 12.0,
+      'timings': {'decode': timing(30, 2.5)},
+    }, const Duration(seconds: 1));
+    expect(first.decodeMs, closeTo(2.5, 1e-9));
+    expect(first.decoderCpuMsPerSecond, isNull);
+    // A CPU time that went back gives none, as a count that went back does.
+    expect(
+      DesktopDecoderStats.between(
+        const {'decoderCpuMs': 900.0},
+        const {'decoderCpuMs': 12.0},
+        const Duration(seconds: 1),
+      ).decoderCpuMsPerSecond,
+      isNull,
+    );
+  });
+
+  testWidgets("the panel shows the Mac's decode time and decoder CPU and "
+      "Windows' convert time under their own labels, each only where "
+      'reported', (tester) async {
+    _size(tester, const Size(1280, 800));
+    final decoder = ValueNotifier<DesktopDecoderStats?>(
+      const DesktopDecoderStats(
+        decodedPerSecond: 60,
+        decodeMs: 2.64,
+        decoderCpuMsPerSecond: 42,
+        surfaceConsumeMs: 7.5,
+        hardware: true,
+        lowLatency: true,
+        refreshHz: 120,
+      ),
+    );
+    await tester.pumpWidget(
+      _app(
+        Align(
+          alignment: Alignment.topLeft,
+          child: QualityPanel(
+            session: ValueNotifier(
+              const DesktopSessionView(
+                target: _target,
+                phase: DesktopPhase.live,
+                path: 'direct',
+              ),
+            ),
+            stats: ValueNotifier(DesktopStats.fromJson({'codec': 'h264'})),
+            decoder: decoder,
+          ),
+        ),
+      ),
+    );
+    final l10n = AppLocalizations.of(
+      tester.element(find.byType(QualityPanel)),
+    )!;
+    Finder row(String id, String text) => find.descendant(
+      of: find.byKey(Key('quality-$id')),
+      matching: find.text(text),
+    );
+    expect(row('decode', l10n.qualityDecodeTime), findsOneWidget);
+    expect(row('decode', '2.6 ms'), findsOneWidget);
+    expect(row('decoder-cpu', l10n.qualityDecoderCpu), findsOneWidget);
+    expect(row('decoder-cpu', '4.2 %'), findsOneWidget);
+    expect(row('surface', '7.5 ms'), findsOneWidget);
+    expect(row('refresh', '120 Hz'), findsOneWidget);
+    expect(find.byKey(const Key('quality-convert')), findsNothing);
+    expect(find.byKey(const Key('quality-present')), findsNothing);
+
+    decoder.value = const DesktopDecoderStats(
+      decodedPerSecond: 60,
+      convertMs: 1.84,
+      presentMs: 0.5,
+    );
+    await tester.pump();
+    expect(row('convert', l10n.qualityConvertTime), findsOneWidget);
+    expect(row('convert', '1.8 ms'), findsOneWidget);
+    expect(row('present', l10n.qualityPresentTime), findsOneWidget);
+    expect(row('present', '0.5 ms'), findsOneWidget);
+    expect(find.byKey(const Key('quality-decode')), findsNothing);
+    expect(find.byKey(const Key('quality-decoder-cpu')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('a LAN path over TCP names its carrier and shows no network '
       'round trip, which TCP has only from its handshake', (tester) async {
     _size(tester, const Size(1280, 800));
