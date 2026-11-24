@@ -16,7 +16,8 @@
 use super::{
     Transport, ipc,
     proto::{
-        AdapterKey, PENDING_MAX, Record, Request, Response, ShapeHeader, inside, presented_at,
+        AdapterKey, PENDING_MAX, PRESENT_AGE_MAX, Record, Request, Response, ShapeHeader, inside,
+        presented_at,
     },
 };
 use crate::{
@@ -907,12 +908,10 @@ async fn read<R: tokio::io::AsyncRead + Unpin>(
             }
             Record::Fresh {
                 presented_ago_us,
-                presented_count,
+                presented_count: _,
             } => {
-                stats.fresh(
-                    presented_at(presented_ago_us, presented_count, received),
-                    received,
-                );
+                // Thread C dates what it submits by the capture's answer.
+                stats.fresh(presented_ago_us);
                 let mut pushed = shared.lock();
                 pushed.fresh = true;
                 pushed.wake();
@@ -976,8 +975,8 @@ struct PushStats {
     /// in microseconds, on the system clock both read.
     receipts: [u32; PUSH_SAMPLES],
     receipts_len: usize,
-    /// From each fresh picture's present to its notice's receipt here, as
-    /// the notice's age dates it, in microseconds.
+    /// Each fresh picture's age as the worker wrote its notice, in
+    /// microseconds.
     ages: [u32; PUSH_SAMPLES],
     ages_len: usize,
 }
@@ -1016,13 +1015,13 @@ impl PushStats {
         }
     }
 
-    /// A fresh picture's notice arrived at `received`, of the picture
-    /// `presented` dates.
-    fn fresh(&mut self, presented: Option<Presented>, received: Instant) {
+    /// A fresh picture's notice arrived, dating it `ago_us` old as the
+    /// worker wrote it, within `PRESENT_AGE_MAX`.
+    fn fresh(&mut self, ago_us: Option<u32>) {
         self.fresh += 1;
-        if let (Some(presented), Some(slot)) = (presented, self.ages.get_mut(self.ages_len)) {
-            let us = received.saturating_duration_since(presented.at).as_micros();
-            *slot = u32::try_from(us).unwrap_or(u32::MAX);
+        let age = ago_us.filter(|us| Duration::from_micros((*us).into()) <= PRESENT_AGE_MAX);
+        if let (Some(us), Some(slot)) = (age, self.ages.get_mut(self.ages_len)) {
+            *slot = us;
             self.ages_len += 1;
         }
     }
