@@ -754,7 +754,10 @@ The design and its rules are in `docs/ui-design.md`.
     the macOS runner only, `linux/runner/desktop_pointer.cc`).
     `tool/pointer_latency.dart` times both paths against the rebuild they
     replace, and the painted pointer the bitmap path replaces, in a release
-    build. The gestures and key rules are in `docs/remote-desktop.md`
+    build. `decoder_hint.dart` says, in the quality panel and under the
+    codec choices, when an install would add a decoder here (the HEVC Video
+    Extensions on Windows, GStreamer's decoders on Linux). The gestures and
+    key rules are in `docs/remote-desktop.md`
 
 - **`lib/src/shell/`**: Navigation and window chrome
   - `app_scope.dart`: `AppPage` (six places; the phone bar has five, Logs
@@ -779,7 +782,8 @@ The design and its rules are in `docs/ui-design.md`.
   `RemoteComputerStore` (`remote_computers.dart`: the remembered list and
   its thumbnails) and `ViewerPrefs` (`viewer_prefs.dart`, which also keeps
   each computer's keyboard setting, `viewer_keyboard`: the input method and
-  the Ctrl/Cmd swap, by remembered computer, at most 64). `DesktopStore`
+  the Ctrl/Cmd swap, by remembered computer, at most 64, and the decoder
+  install hints dismissed on this device). `DesktopStore`
   fetches the pointer-shape definition each time the view's number changes
   and keeps the last 16 decoded by content, since a number names another
   definition once the viewer's counter has gone round; on a Mac it shares
@@ -833,9 +837,12 @@ The design and its rules are in `docs/ui-design.md`.
     names. Dart binds it to a video source; the decoder
     pulls the video from Rust itself. The channel's `decoders` method says,
     without creating a decoder, how large H.264 and H.265 this device
-    decodes and its fastest refresh; the store offers H.265 and the
-    frame-rate choices from it. A probe that fails or does not answer is no
-    decoder (JPEG) except on Android (`unprobedDesktopDecoders`)
+    decodes and its fastest refresh, and on Windows what an install would
+    add (`installable`); the store offers H.265 and the frame-rate choices
+    from it. A probe that fails or does not answer is no decoder (JPEG)
+    except on Android (`unprobedDesktopDecoders`); a Linux answer without a
+    codec, from an app bundling its decoder module, is that codec's decoder
+    missing (`DesktopDecoders.missing`)
   - `display_refresh.dart`: `DisplayRefresh`, the refresh rate of the
     display the window is on, which a viewer on macOS, Windows and Linux
     sends as `display_refresh` once connected and whenever it changes:

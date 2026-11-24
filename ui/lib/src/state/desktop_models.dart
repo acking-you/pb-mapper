@@ -212,6 +212,23 @@ enum DesktopCodecPreference {
   h264,
 }
 
+/// A decoder this device lacks that an install would add, which the viewer
+/// suggests while a session goes without it ([DesktopDecoders.installHint]).
+enum DecoderInstallHint {
+  /// Windows: the GPU decodes H.265 (DXVA HEVC Main) but no decoder MFT is
+  /// registered, which Microsoft's HEVC Video Extensions add.
+  hevcExtension,
+
+  /// Linux: GStreamer decodes no H.264 here (its decoders, or GStreamer
+  /// itself, are missing), so the picture is JPEG at up to 8 FPS.
+  gstreamer,
+
+  /// Linux: no hardware H.265 decoder, which a GPU's video driver may add
+  /// (on Intel and AMD before GStreamer 1.24, with GStreamer's VA-API
+  /// plugin).
+  gpuDriver,
+}
+
 /// The largest picture one of this device's decoders takes.
 @immutable
 class DesktopDecoderLimit {
@@ -262,6 +279,8 @@ class DesktopDecoders {
     this.h265,
     this.displayMaxHz,
     this.windowRefresh = false,
+    this.installable = const {},
+    this.missing = const {},
   });
 
   factory DesktopDecoders.fromJson(Map<String, Object?> json) {
@@ -272,11 +291,17 @@ class DesktopDecoders {
       _ => null,
     };
     final hz = json['display_max_hz'];
+    final installable = json['installable'];
     return DesktopDecoders(
       h264: limit(json['h264']),
       h265: limit(json['h265']),
       displayMaxHz: hz is num && hz.isFinite && hz > 0 ? hz.toDouble() : null,
       windowRefresh: json['window_refresh'] == true,
+      installable: {
+        if (installable is List)
+          for (final codec in installable)
+            if (codec is String) codec,
+      },
     );
   }
 
@@ -297,11 +322,44 @@ class DesktopDecoders {
   /// (`DisplayRefresh`).
   final bool windowRefresh;
 
+  /// Codecs this device's GPU decodes that no installed decoder takes, as
+  /// the Windows runner reports them (`installable`): `hevc` where the HEVC
+  /// Video Extensions are missing.
+  final Set<String> installable;
+
+  /// Codecs the probe found no decoder for where an install may add one
+  /// ([decodersFromProbe], on Linux): `h264` without GStreamer's decoders,
+  /// `h265` without a hardware one. Kept as probed: a decoder that failed
+  /// to decode here ([withoutH265]) is not missing.
+  final Set<String> missing;
+
   DesktopDecoders withoutH265() => DesktopDecoders(
     h264: h264,
     displayMaxHz: displayMaxHz,
     windowRefresh: windowRefresh,
+    installable: installable,
+    missing: missing,
   );
+
+  /// What an install would add to a session decoding [codec] (`h264`,
+  /// `h265` or `jpeg`; null before its first picture) on a device that
+  /// prefers [preference]; null when nothing would. GStreamer's decoders
+  /// for a JPEG session where they are missing, under either preference,
+  /// since both take H.264 once they are there. H.265's for an H.264
+  /// session on Auto, which then offers it: the HEVC Video Extensions where
+  /// the GPU decodes H.265, else a GPU driver where no hardware decoder
+  /// takes it.
+  DecoderInstallHint? installHint(
+    String? codec,
+    DesktopCodecPreference preference,
+  ) => switch (codec) {
+    'jpeg' when missing.contains('h264') => DecoderInstallHint.gstreamer,
+    'h264' when preference != DesktopCodecPreference.auto => null,
+    'h264' when installable.contains('hevc') =>
+      DecoderInstallHint.hevcExtension,
+    'h264' when missing.contains('h265') => DecoderInstallHint.gpuDriver,
+    _ => null,
+  };
 
   /// D6: H.265 is offered when the preference is Auto and there is an
   /// H.265 decoder: Rust fits the session's limits inside its largest
@@ -351,9 +409,18 @@ class DesktopDecoders {
       other.h264 == h264 &&
       other.h265 == h265 &&
       other.displayMaxHz == displayMaxHz &&
-      other.windowRefresh == windowRefresh;
+      other.windowRefresh == windowRefresh &&
+      setEquals(other.installable, installable) &&
+      setEquals(other.missing, missing);
   @override
-  int get hashCode => Object.hash(h264, h265, displayMaxHz, windowRefresh);
+  int get hashCode => Object.hash(
+    h264,
+    h265,
+    displayMaxHz,
+    windowRefresh,
+    Object.hashAllUnordered(installable),
+    Object.hashAllUnordered(missing),
+  );
 }
 
 enum DesktopPhase {

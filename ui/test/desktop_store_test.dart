@@ -874,6 +874,66 @@ void main() {
     );
   });
 
+  test('what an install would add follows the probe: the HEVC Video '
+      "Extensions where Windows' GPU decodes H.265 without them, GStreamer's "
+      'decoders or a hardware H.265 one on Linux; hinted only while the '
+      'session goes without it, and H.265 only on Auto', () {
+    const auto = DesktopCodecPreference.auto,
+        h264 = DesktopCodecPreference.h264;
+    const limit = {'max_width': 3840, 'max_height': 2160};
+    final windows = decodersFromProbe({
+      'h264': limit,
+      'h265': null,
+      'installable': ['hevc', 7],
+    }, android: false);
+    expect(windows.installable, {'hevc'});
+    expect(windows.missing, isEmpty);
+    expect(windows.installHint('h264', auto), DecoderInstallHint.hevcExtension);
+    expect(windows.installHint('h264', h264), isNull);
+    expect(windows.installHint('h265', auto), isNull);
+    expect(windows.installHint(null, auto), isNull);
+    expect(windows, isNot(DesktopDecoders(h264: windows.h264)));
+
+    // Linux without GStreamer's decoders: JPEG, which they would make
+    // H.264 under either preference.
+    final bare = decodersFromProbe(
+      {'h264': null, 'h265': null},
+      android: false,
+      linux: true,
+    );
+    expect(bare.missing, {'h264', 'h265'});
+    expect(bare.installHint('jpeg', auto), DecoderInstallHint.gstreamer);
+    expect(bare.installHint('jpeg', h264), DecoderInstallHint.gstreamer);
+    // H.264 in software only: a GPU's driver would add H.265.
+    final software = decodersFromProbe(
+      {
+        'h264': {'max_width': 1920, 'max_height': 1080},
+        'h265': null,
+      },
+      android: false,
+      linux: true,
+    );
+    expect(software.installHint('h264', auto), DecoderInstallHint.gpuDriver);
+    expect(software.installHint('h264', h264), isNull);
+    // JPEG from a host that encodes no H.264: nothing to install here.
+    expect(software.installHint('jpeg', auto), isNull);
+
+    // A Linux H.265 decoder that failed here is not missing, and a probe
+    // that failed, or another platform's, says nothing is.
+    final hardware = decodersFromProbe(
+      {'h264': limit, 'h265': limit},
+      android: false,
+      linux: true,
+    );
+    expect(hardware.withoutH265().installHint('h264', auto), isNull);
+    expect(
+      decodersFromProbe(null, android: false, linux: true).missing,
+      isEmpty,
+    );
+    expect(decodersFromProbe({'h264': null}, android: false).missing, isEmpty);
+    expect(bare.withoutH265(), bare);
+  });
+
   testWidgets(
     'a viewer whose runner reads its window display, as on Windows and '
     'Linux, asks for exact display rates, not whole hertz: it connects at '

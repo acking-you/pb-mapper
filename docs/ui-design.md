@@ -341,8 +341,9 @@ offers Reconnect where that can help.
   in a fixed cell so the centred bar never shifts; it shows or hides the
   quality panel), View and Control, Display (scaling, picture preference,
   then Resolution, **Remote resolution**, Maximum frame rate and Codec as
-  submenus that name the current choice, then the quality panel and the
-  quality monitor),
+  submenus that name the current choice, Codec ending with a decoder
+  install hint where one applies, then the quality panel and the quality
+  monitor),
   Shortcuts, More, full screen and Disconnect. It is pinned at first;
   unpinned, it folds to a handle 2 s after the pointer leaves it, and never
   while one of its menus is open. In control, a hint says that keyboard and
