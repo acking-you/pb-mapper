@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -28,7 +29,9 @@ const kTouchIndicatorFade = Duration(milliseconds: 150);
 /// are handled here. The picture is [child], laid out at the viewport's
 /// scene and moved by one [Transform]: zoom, pan, the soft keyboard and
 /// reconnects change the transform only, never the child's element, so a
-/// native texture is never re-created (P1-4).
+/// native texture is never re-created (P1-4). The surface tells the
+/// viewport where it is in the view, so a pixel-exact picture lands on
+/// whole device pixels.
 class RemoteSurface extends StatefulWidget {
   const RemoteSurface({
     super.key,
@@ -58,6 +61,9 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
 
   double _wheelX = 0, _wheelY = 0;
   double _panZoomScale = 1;
+
+  /// A read of the surface's place in the view waits for the frame's end.
+  bool _originDue = false;
 
   RemoteViewport get _viewport => widget.viewport;
   RemoteInput get _input => widget.input;
@@ -125,6 +131,7 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
       _arm();
       return;
     }
+    _viewport.setOrigin(_originOf(e));
     final n = _viewport.toNormalized(e.localPosition);
     if (n == null || !_input.ready.value) return;
     _syncButtons(e.pointer, e.buttons, n);
@@ -138,6 +145,8 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
     }
     final held = _buttons[e.pointer];
     if (held == null || !_input.ready.value) return;
+    // A drag's moves keep its down's transform, stale if the stage moved
+    // since: the origin came with the down, or with a layout since.
     _viewport.autoScrollTo(e.localPosition);
     final n = _viewport.toNormalized(e.localPosition, clamp: true);
     if (n == null) return;
@@ -191,7 +200,9 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
   /// remote pointer goes to what is under the local one afterwards.
   void _hover(PointerHoverEvent e) {
     if (_isTouch(e)) return;
-    _viewport.autoScrollTo(e.localPosition);
+    _viewport
+      ..setOrigin(_originOf(e))
+      ..autoScrollTo(e.localPosition);
     final n = _viewport.toNormalized(e.localPosition);
     if (n != null && _input.ready.value) _input.hover(n);
   }
@@ -237,10 +248,38 @@ class _RemoteSurfaceState extends State<RemoteSurface> {
     _input.wheel(nx, ny);
   }
 
+  // ---------------------------------------------------------------- origin
+
+  /// The surface's top left in the view, from the transform of a hover or
+  /// a down, each hit-tested where the stage is now: current even when the
+  /// stage moved without a new layout. Null unless it only translates.
+  static Offset? _originOf(PointerEvent e) {
+    final transform = e.transform;
+    if (transform == null) return Offset.zero;
+    final toLocal = MatrixUtils.getAsTranslation(transform);
+    return toLocal == null ? null : -toLocal;
+  }
+
+  /// Once the frame that laid the surface out is done, where that put it
+  /// in the view: the viewport snaps a pixel-exact picture relative to it.
+  void _readOrigin() {
+    if (_originDue) return;
+    _originDue = true;
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      _originDue = false;
+      final box = mounted ? context.findRenderObject() : null;
+      if (box is! RenderBox || !box.attached) return;
+      _viewport.setOrigin(
+        MatrixUtils.getAsTranslation(box.getTransformTo(null)),
+      );
+    });
+  }
+
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       _viewport.layout(constraints.biggest);
+      _readOrigin();
       return Listener(
         behavior: HitTestBehavior.opaque,
         onPointerDown: _down,

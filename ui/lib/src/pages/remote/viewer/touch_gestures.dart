@@ -472,6 +472,7 @@ class TouchGestureMachine {
 
   /// A third finger freezes navigation and scrolls.
   void _toScroll() {
+    _viewport.endPinch();
     _phase = _Phase.scroll;
     _scrollTravel = 0;
     _wheelStarted = _live;
@@ -479,6 +480,7 @@ class TouchGestureMachine {
   }
 
   void _end() {
+    _viewport.endPinch();
     _graceAt = _longPressAt = _holdAt = _pressDueAt = _wheelAt = null;
     _pressSent = false;
     _dragPending = false;

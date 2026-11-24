@@ -280,9 +280,9 @@ class _PictureFrame extends StatelessWidget {
   );
 }
 
-/// Keeps the viewport's aspect and scale mode in step with the picture,
-/// the remote display and the scale preference. A reconnect that keeps the
-/// display keeps the user's zoom and pan.
+/// Keeps the viewport's aspect, pixels and scale mode in step with the
+/// picture, the remote display, the screen and the scale preference. A
+/// reconnect that keeps the display keeps the user's zoom and pan.
 class _ViewportSync extends StatefulWidget {
   const _ViewportSync({
     required this.picture,
@@ -302,7 +302,6 @@ class _ViewportSync extends StatefulWidget {
 
 class _ViewportSyncState extends State<_ViewportSync> {
   double _dpr = 1;
-  Size? _remote;
 
   Listenable get _sources =>
       Listenable.merge([widget.picture, widget.geometry, widget.prefs]);
@@ -319,7 +318,6 @@ class _ViewportSyncState extends State<_ViewportSync> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     _dpr = MediaQuery.devicePixelRatioOf(context);
-    _remote = null;
     _apply();
   }
 
@@ -336,7 +334,6 @@ class _ViewportSyncState extends State<_ViewportSync> {
     }
     _listening.removeListener(_apply);
     _listening = _sources..addListener(_apply);
-    _remote = null;
     _apply();
   }
 
@@ -351,16 +348,18 @@ class _ViewportSyncState extends State<_ViewportSync> {
     final picture = widget.picture.value;
     if (picture != null) viewport.aspectRatio = picture.aspectRatio;
     final g = widget.geometry.value;
-    final remote = g == null
-        ? Size.zero
-        : Size(g.displayWidth.toDouble(), g.displayHeight.toDouble());
+    // Unchanged pixels change nothing: a reconnect keeps the zoom.
+    viewport.setPixels(
+      display: g == null
+          ? Size.zero
+          : Size(g.displayWidth.toDouble(), g.displayHeight.toDouble()),
+      video: g == null
+          ? Size.zero
+          : Size(g.videoWidth.toDouble(), g.videoHeight.toDouble()),
+      dpr: _dpr,
+    );
     final mode = widget.prefs.scaleMode;
-    final modeChanged = mode != viewport.mode;
-    final sizeChanged = mode == ViewerScaleMode.original && remote != _remote;
-    if (modeChanged || sizeChanged) {
-      _remote = remote;
-      viewport.setMode(mode, remotePixels: remote, dpr: _dpr);
-    }
+    if (mode != viewport.mode) viewport.setMode(mode);
   }
 
   @override
