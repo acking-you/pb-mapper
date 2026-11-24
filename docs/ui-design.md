@@ -409,8 +409,8 @@ on a pause, a release or a fresh grant.
 **Figures at a glance.** Speed is RustDesk's: everything the session moves
 each way, per second, as the tunnel counts it. The chip and the phone's
 quality button show the speed received; the quality panel adds Speed both
-ways, the encoded resolution, the codec (H.265, H.264 or JPEG) and its
-chroma. The quality monitor, off at first and remembered for the device,
+ways, the encoded resolution, the codec (H.265, H.264 or JPEG) with the
+decoder's name under it, and its chroma. The quality monitor, off at first and remembered for the device,
 puts RustDesk's few figures (speed, frame rate, delay, target bitrate, codec,
 chroma, resolution) small and translucent at the picture's top right — left
 of the quality panel while that is open, under the minimap on a phone — and

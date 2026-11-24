@@ -2254,8 +2254,10 @@ left out; while the connection is down the core rows show dashes.
   received and, from the host, sent.
 - **Picture**: the picture delay with its host and viewer ends, the rate
   presented, received and captured by the host, the encoded resolution, the
-  codec (H.265, H.264 or JPEG) with its chroma, and keyframes with those the
-  viewer asked for.
+  codec (H.265, H.264 or JPEG) with its chroma and, under it while connected,
+  the name of the decoder the viewer reported (a Linux viewer's names the
+  render node it decodes on, a Windows viewer's its adapter), and keyframes
+  with those the viewer asked for.
 - **Host**: the preset with its ceiling (Quality stays at 30 by design, so a
   30 under it is expected; Balanced reaches 60, Smooth 120, each within the
   viewer's display limit; a maximum frame rate the viewer chose is every
@@ -2394,10 +2396,13 @@ is `NSScreen.maximumFramesPerSecond` (the fastest screen; before macOS 12 the
 fastest display mode's rate) or `UIScreen.maximumFramesPerSecond`, 60 when
 nothing is known.
 
-On Linux the module looks in GStreamer's registry and builds nothing: H.264
-is offered when any decoder factory for it exists, a hardware one (VA-API,
-NVDEC, V4L2) at the largest viewer bound its caps allow, a software one at
-1920×1080; H.265 only with a hardware decoder, as on Windows and Android.
+On Linux the module looks in GStreamer's registry and sysfs and builds
+nothing: H.264 is offered when any decoder factory for it exists, a hardware
+one (VA-API, NVDEC, V4L2) at the largest viewer bound its caps allow, a
+software one at 1920×1080; H.265 only with a hardware decoder, as on Windows
+and Android. The decoder it names is the first a session would try, one on
+the GPU that draws the window ahead of one on another GPU (see the Linux
+viewer below).
 A session's decoder obeys the same rule (`Allows` in `desktop_video_gst.cc`):
 none decodes H.265, or H.264 above 1080p, in software. The refresh is the fastest
 GDK monitor's. Without the module, without GStreamer, without decoder
@@ -2601,13 +2606,15 @@ texture, `desktop_video_gl.cc` for the GPU conversion; the GStreamer module
 `libpb_mapper_desktop_video.so`, built from `desktop_video_gst.cc` when the
 GStreamer development files are present and loaded with `dlopen` at the
 first probe or session, so the app starts without it; module and runner
-share the C interface `desktop_video_module.h`, whose ABI number, 2, rejects
+share the C interface `desktop_video_module.h`, whose ABI number, 3, rejects
 a stale module). Each source's decoder thread pulls straight into pooled
 `GstBuffer`s (one copy of the compressed data) and feeds `appsrc →
 h264parse/h265parse → decoder → appsink`, pulling the next unit only while
 fewer than four are inside the pipeline, so a backlog stays in Rust's sink,
 which drops to an IDR. Decoders are chosen from the registry, hardware first
-(VA-API, NVDEC, V4L2) and then by rank; one that fails to start is skipped,
+(VA-API, NVDEC, V4L2), and among those the ones on the GPU that draws the
+window first, then those whose GPU is unknown, then those on another GPU;
+then by rank. One that fails to start is skipped,
 and one that fails or stalls before its first picture is left out for the
 rest of the run (and from later probes), so the next keyframe falls back to
 the next decoder the probe's rule allows. When none is left, every keyframe
@@ -2676,13 +2683,49 @@ sample then counts from an earlier one, or is skipped), each
 read as `decoders` reads it), `dmabuf` (pictures arrive as dma-bufs) and
 `videoconvert` (the pipeline converts). Without timings `frame_ready` reads
 no clock. `G_MESSAGES_DEBUG=pb-mapper-video` shows the module's log,
-including the caps each decoder gives, so whether dma-bufs were negotiated;
+including the caps each decoder gives, so whether dma-bufs were negotiated,
+and the GPU that draws (`Presenting GPU`) and the render nodes it chose among;
 `GST_DEBUG=3` shows GStreamer's. A viewer needs GStreamer's base and
 bad plugins and a decoder: gst-libav (or openh264 for H.264) in software,
 the VA-API driver, or NVIDIA's driver; the user guide lists the packages.
 The release bundles no GStreamer library: `scripts/build/check-linux-bundle.sh`
 fails a bundle without the module, with a GStreamer or ORC library inside, or
 whose FFI or module does not load.
+
+On the GTK thread, before the probe and before each decoder starts, the
+runner asks Flutter's EGL display which GPU it renders on
+(`EGL_EXT_device_query`): the device's render node
+(`EGL_EXT_device_drm_render_node`), else its primary node
+(`EGL_EXT_device_drm`), which sysfs maps to its render node. The module
+places each hardware decoder from its factory's name and sysfs only, so
+placing them loads no plugin and opens no device, which would wake a GPU
+that sleeps:
+- A va factory for every GPU but the first carries its render node in its
+  name (`varenderD129h264dec`). The plain one (`vah264dec`) is on the first
+  render node, by name, that the va plugin opens (one this process may open,
+  with Intel's or Mesa's driver; NVIDIA's only under `GST_VA_ALL_DRIVERS`)
+  and that has no factory of its own; when more than one could be, its GPU
+  is unknown, though it is another GPU's when the one that draws cannot be
+  among them.
+- NVDEC (nvcodec) runs on NVIDIA's driver alone: with one GPU on it, it is
+  that one, and it is never a GPU another driver runs. Which of several
+  NVIDIA GPUs a factory is on takes CUDA's numbering, and asking CUDA would
+  wake them all, so with several it is unknown.
+- gstreamer-vaapi's decoders use the display server's GPU, which is the one
+  that draws unless the app is offloaded to another (`DRI_PRIME`,
+  `prime-run`); theirs, like V4L2's and any other plugin's, is unknown.
+
+So on a hybrid laptop whose integrated GPU draws the window, VA-API there goes
+before NVDEC, so that the NVIDIA GPU can stay asleep and every picture stays
+on the GPU that shows it, where its dma-bufs can be imported (not yet tried
+on such a laptop); NVDEC stays the fallback before software. An app
+offloaded to the NVIDIA GPU takes NVDEC first, and on two VA GPUs the one
+that draws takes its own factory. With no GPU known (an EGL without these
+extensions, a software renderer such as llvmpipe) the order is hardware,
+then rank, as before. A decoder's name, which the probe logs and
+the session reports to the quality panel, says where it runs:
+`vah264dec (VA-API H.264 Decoder) on renderD128`, or
+`nvh264dec on renderD129, another GPU`.
 
 ## Measurements and remaining acceptance
 
@@ -2771,7 +2814,9 @@ What each platform's new code has been through:
   VA-API, V4L2 and a real Linux desktop have not run. That run predates
   the GPU conversion, which is built and whose clip harness runs only in
   CI, on llvmpipe; its dma-buf path (GStreamer 1.24 with a VA-API decoder)
-  has not run.
+  has not run. Nor has the order by the GPU that draws on a machine with
+  more than one GPU: CI checks it as a pure function of made-up GPUs and
+  sysfs trees, and its llvmpipe names no GPU.
 - **macOS host.** Compiled, linked, linted and unit-tested on a macOS
   runner in CI. The unit tests cover the VideoToolbox encoder, the display
   list, the system pointer read off the main thread in a window-server
@@ -3153,7 +3198,10 @@ clips (and 4K where a decoder takes it) offered at 60 and 120 fps, decoded
 and presented pictures a second, the mean decode time and every thread's
 CPU per decoded picture.
 On llvmpipe the GL work runs on the CPU too, so CI's figures are no
-measure of a GPU.
+measure of a GPU. Before the clips, `desktop_video_device_test` checks the
+order the module tries decoders in for made-up GPUs (a hybrid laptop either
+way round, two VA GPUs, two NVIDIA ones, none known) and reads GPUs from a
+sysfs tree of its own.
 
 For Android, rebuild the FFI for the intended ABI before Flutter: ARM64 for a
 matching phone, or x86_64 for the development VM. For example,
