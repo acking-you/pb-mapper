@@ -48,6 +48,9 @@ struct State {
     released: Vec<Pressed>,
     /// Every key, physical key and text injected, in order.
     typed: Vec<Typed>,
+    /// Every scroll injected, in order: its units each way and whether it
+    /// was continuous.
+    scrolls: Vec<(i32, i32, bool)>,
     /// Ready to drained, per unit.
     latencies: Vec<Duration>,
     /// The display's size now, once a mode changed it.
@@ -185,6 +188,9 @@ impl Probe {
     /// The keyboard injections so far, in order.
     pub(crate) fn typed(&self) -> Vec<Typed> {
         self.0.lock().typed.clone()
+    }
+    pub(crate) fn scrolls(&self) -> Vec<(i32, i32, bool)> {
+        self.0.lock().scrolls.clone()
     }
     pub(crate) fn released(&self) -> Vec<Pressed> {
         self.0.lock().released.clone()
@@ -598,6 +604,7 @@ pub(crate) struct SynInput(Probe);
 impl Injector for SynInput {
     const LOCK: bool = false;
     const PHYSICAL_KEYS: bool = true;
+    const HIRES_WHEEL: bool = true;
     fn pointer(&mut self, x: i32, y: i32) -> Result<()> {
         self.0.0.lock().pointer = Some((x, y));
         Ok(())
@@ -624,6 +631,14 @@ impl Injector for SynInput {
     }
     fn physical_key(&mut self, usage: u16, down: bool) -> Result<()> {
         self.0.0.lock().typed.push(Typed::Physical(usage, down));
+        Ok(())
+    }
+    fn scroll(&mut self, horizontal: i32, vertical: i32, continuous: bool) -> Result<()> {
+        self.0
+            .0
+            .lock()
+            .scrolls
+            .push((horizontal, vertical, continuous));
         Ok(())
     }
     fn lock(&mut self) -> Result<()> {
@@ -722,12 +737,9 @@ mod tests {
 
         let watching = Presenting::connect(&client, &host).await;
         let controlled = watching.control().await;
-        assert!(
-            controlled
-                .capabilities
-                .iter()
-                .any(|listed| listed == "physical_keys")
-        );
+        for listed in ["physical_keys", "wheel_hires"] {
+            assert!(controlled.capabilities.iter().any(|l| l == listed));
+        }
         let shift = Input::Key {
             key: Key::Shift,
             down: true,
@@ -771,6 +783,22 @@ mod tests {
                 Typed::Text("b".into()),
             ]
         );
+        // A trackpad's travel and a wheel's notch reach the injector as the
+        // viewer sent them, in 1/120 of a notch.
+        let scroll = |vertical, continuous| Input::Scroll {
+            horizontal: -5,
+            vertical,
+            continuous,
+        };
+        watching
+            .viewer
+            .input(
+                controlled.generation,
+                &[scroll(7, true), scroll(120, false)],
+            )
+            .unwrap();
+        until(|| probe.scrolls().len() == 2).await;
+        assert_eq!(probe.scrolls(), [(-5, 7, true), (-5, 120, false)]);
         if !PUSH {
             // The pointer takes another shape where the controller's own
             // move left it: the shape reaches the viewer all the same, and

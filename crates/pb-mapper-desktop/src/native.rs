@@ -11,7 +11,7 @@ use crate::{
     VideoCodec, VideoFormat, VideoLimits, VideoRate, Waker,
     backend::capture_checked,
     error,
-    input::{Typed, cursor::confine, held::Held},
+    input::{SCROLL_UNITS_PER_NOTCH, ScrollCarry, Typed, cursor::confine, held::Held},
     modes::{self, Guard, Journal, Mode, ModeList},
     platform::{
         self, CursorSource, Desktop, DisplayModes, Injector, Parts, Platform, StillCapture,
@@ -42,6 +42,9 @@ pub(crate) struct PlatformBackend<P: Platform> {
     parts: Parts<P>,
     grant: Arc<P::Grant>,
     held: Held,
+    /// What an `Input::Scroll` toward an injector that scrolls only in
+    /// notches left short of the next one.
+    notches: ScrollCarry,
     limits: VideoLimits,
     /// A pushing source's wake: a session's once bound, else one of its own,
     /// so a backend no session drives (the helper's worker, a bench) is never
@@ -77,6 +80,7 @@ impl<P: Platform> PlatformBackend<P> {
             parts,
             grant,
             held: Held::default(),
+            notches: ScrollCarry::default(),
             limits: UNCONFIGURED,
             waker: Waker(crate::scheduler::Wake::new()),
             modes: Guard::new(journal),
@@ -158,6 +162,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
                 physical_keys: <P::Input as Injector>::PHYSICAL_KEYS,
                 cursor_shapes: <P::Cursor as CursorSource>::SHAPES,
                 rate_model: <P::Video as VideoSource>::RATE_MODEL,
+                hires_wheel: <P::Input as Injector>::HIRES_WHEEL,
             },
             display,
         })
@@ -369,6 +374,26 @@ impl<P: Platform> Backend for PlatformBackend<P> {
             Input::PhysicalKey { .. } => {
                 Err(BackendError::new(FailureKind::Unsupported, "physical keys").into())
             }
+            Input::Scroll {
+                horizontal,
+                vertical,
+                continuous,
+            } if <P::Input as Injector>::HIRES_WHEEL => {
+                input.scroll(*horizontal, *vertical, *continuous)
+            }
+            // A host that did not list `wheel_hires` is sent none; one that
+            // comes anyway scrolls whole notches, the rest kept for the next.
+            Input::Scroll {
+                horizontal,
+                vertical,
+                ..
+            } => match self
+                .notches
+                .take((*horizontal, *vertical), 1, SCROLL_UNITS_PER_NOTCH.into())
+            {
+                (0, 0) => Ok(()),
+                (horizontal, vertical) => input.wheel(horizontal, vertical),
+            },
             // The interactive session's own lock; the desktop switch that
             // follows invalidates the generation through the context check.
             Input::Lock {} if input.can_lock() => input.lock(),

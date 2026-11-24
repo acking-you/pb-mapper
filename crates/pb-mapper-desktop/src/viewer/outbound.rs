@@ -23,6 +23,7 @@
 use super::InputError;
 use crate::{
     Input, InputEvent, KeyframeReason, QualityPreset,
+    input::SCROLL_UNITS_MAX,
     modes::Mode,
     protocol::{Route, ViewerMessage},
 };
@@ -306,6 +307,34 @@ impl Outbound {
             self.notify.notify_one();
             return Ok(());
         }
+        // A scroll adds itself to a queued tail scroll of the same generation
+        // and continuity while the sum stays within a scroll's bound, so a
+        // trackpad's stream cannot fill the queue either. The sum takes a new
+        // sequence and the newer stamp, as a replaced move does.
+        if let [scroll @ Input::Scroll { .. }] = inputs
+            && let Some(tail) = queue.events.back_mut()
+            && tail.event.generation == generation
+            && let Some(summed) = summed_scroll(&tail.event.input, scroll)
+        {
+            let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+            // Read once the sequence is taken: a barrier pushed before then
+            // made the tail obsolete, and every event queued ahead of it, so
+            // the scroll goes alone rather than carry the tail past it.
+            let current = tail.event.sequence >= self.controls.lock().obsolete_below;
+            let input = if current { summed } else { scroll.clone() };
+            let len = encoded_len(&input);
+            let old = std::mem::replace(&mut tail.len, len);
+            tail.event = InputEvent {
+                generation,
+                frame_id,
+                sequence,
+                input,
+            };
+            queue.bytes = queue.bytes - old + len;
+            drop(queue);
+            self.notify.notify_one();
+            return Ok(());
+        }
         let mut lens = [0; INPUT_BATCH_MAX];
         for (len, input) in lens.iter_mut().zip(inputs) {
             *len = encoded_len(input);
@@ -449,6 +478,36 @@ fn presented_message((generation, frame_id): (u64, u64)) -> ViewerMessage {
         generation,
         frame_id,
     }
+}
+
+/// `tail` and `scroll` as one scroll: both scrolls of the same continuity
+/// whose sum stays within a scroll's bound on each axis.
+fn summed_scroll(tail: &Input, scroll: &Input) -> Option<Input> {
+    let (
+        Input::Scroll {
+            horizontal: tail_horizontal,
+            vertical: tail_vertical,
+            continuous: tail_continuous,
+        },
+        Input::Scroll {
+            horizontal,
+            vertical,
+            continuous,
+        },
+    ) = (tail, scroll)
+    else {
+        return None;
+    };
+    let sum = |queued: i32, more: i32| {
+        queued
+            .checked_add(more)
+            .filter(|sum| sum.unsigned_abs() <= SCROLL_UNITS_MAX)
+    };
+    (tail_continuous == continuous).then_some(Input::Scroll {
+        horizontal: sum(*tail_horizontal, *horizontal)?,
+        vertical: sum(*tail_vertical, *vertical)?,
+        continuous: *continuous,
+    })
 }
 
 /// The length of `input` as JSON, counted without allocating.
@@ -614,6 +673,106 @@ mod tests {
         assert!(matches!(
             send(&outbound, now),
             ViewerMessage::Control { enabled: false }
+        ));
+        assert!(idle(&outbound, now));
+    }
+
+    /// A stream of scrolls while the uplink stalls queues as one scroll per
+    /// continuity, up to a scroll's bound, with the newest stamp and a newer
+    /// sequence; anything between two scrolls keeps them apart.
+    #[test]
+    fn scrolls_add_up_in_the_queue_within_a_scrolls_bound() {
+        let outbound = Outbound::new(None, false);
+        let now = Instant::now();
+        let congested = std::cell::Cell::new(false);
+        let scroll = |vertical, continuous| Input::Scroll {
+            horizontal: -1,
+            vertical,
+            continuous,
+        };
+        let submit = |input: Input, stamp: (u64, u64)| {
+            outbound.submit(&[input], || Ok(stamp), || congested.set(true))
+        };
+        // A trackpad's 1 000 events fill one scroll to its bound; the next
+        // starts another, and those that turn back add to that one.
+        for frame in 0..1000 {
+            submit(scroll(12, true), (1, frame)).unwrap();
+        }
+        assert_eq!(outbound.inputs.lock().events.len(), 1);
+        submit(scroll(12, true), (1, 1000)).unwrap();
+        for _ in 0..5 {
+            submit(scroll(-12, true), (1, 1000)).unwrap();
+        }
+        assert_eq!(outbound.inputs.lock().events.len(), 2);
+        // A wheel's notch is not a trackpad's travel, a move parts two
+        // scrolls, and a scroll of a new generation starts its own.
+        submit(scroll(120, false), (1, 1000)).unwrap();
+        submit(Input::Move { x: 1, y: 1 }, (1, 1000)).unwrap();
+        submit(scroll(120, false), (1, 1000)).unwrap();
+        submit(scroll(120, false), (2, 1)).unwrap();
+        submit(scroll(120, false), (2, 2)).unwrap();
+        assert!(!congested.get());
+        let mut sent = Vec::new();
+        while let Next::Send(message) = outbound.next(now, now) {
+            if let ViewerMessage::Input { event } = message {
+                sent.push(event);
+            }
+        }
+        let scrolls: Vec<_> = sent
+            .iter()
+            .map(|event| match event.input {
+                Input::Scroll {
+                    horizontal,
+                    vertical,
+                    continuous,
+                } => Some((event.frame_id, horizontal, vertical, continuous)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            scrolls,
+            [
+                Some((999, -1000, 12_000, true)),
+                Some((1000, -6, -48, true)),
+                Some((1000, -1, 120, false)),
+                None,
+                Some((1000, -1, 120, false)),
+                Some((2, -2, 240, false)),
+            ]
+        );
+        assert!(
+            sent.windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+    }
+
+    /// A scroll never carries what a barrier made obsolete past it: queued
+    /// before the barrier, the tail goes, and only the newer scroll is sent.
+    #[test]
+    fn a_barrier_keeps_an_obsolete_scroll_out_of_the_next() {
+        let outbound = Outbound::new(None, false);
+        let now = Instant::now();
+        let scroll = |vertical| Input::Scroll {
+            horizontal: 0,
+            vertical,
+            continuous: true,
+        };
+        outbound
+            .submit(&[scroll(50)], || Ok((1, 1)), || {})
+            .unwrap();
+        outbound.barrier(Barrier::Release);
+        outbound.submit(&[scroll(7)], || Ok((1, 2)), || {}).unwrap();
+        assert!(matches!(send(&outbound, now), ViewerMessage::Release {}));
+        let ViewerMessage::Input { event } = send(&outbound, now) else {
+            panic!("the scroll after the release was discarded");
+        };
+        assert!(matches!(
+            event.input,
+            Input::Scroll {
+                horizontal: 0,
+                vertical: 7,
+                continuous: true
+            }
         ));
         assert!(idle(&outbound, now));
     }

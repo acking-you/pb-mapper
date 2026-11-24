@@ -8,7 +8,8 @@
 //!   -x264-params keyint=1:min-keyint=1:scenecut=0:repeat-headers=1:aud=1 \
 //!   -f h264 clip.h264
 //! cargo run -p pb-mapper --features desktop --example desktop_ui_host -- \
-//!   --clip clip.h264 --dir target/desktop-ui [--no-shapes] [--macos] [--relay-only]
+//!   --clip clip.h264 --dir target/desktop-ui [--no-shapes] [--no-hires-wheel] \
+//!   [--macos] [--relay-only]
 //! node scripts/test/desktop-bootstrap.cjs target/desktop-ui
 //! ```
 //!
@@ -27,9 +28,12 @@
 //! reports as `host_shape`: that log is the evidence. `--no-shapes` hosts
 //! without the `cursor_shape` capability, as a 0.11 host does; `--macos`
 //! names macOS as the host's OS (`os_macos`), so a viewer offers the Apple
-//! modifier swap. The host also lists `physical_keys`. `--relay-only` keeps
-//! the host off direct paths and tells the viewer to stay on the relay, which
-//! listens on loopback only. `--view-only` hosts without control; `--wander`
+//! modifier swap. The host also lists `physical_keys`, and `wheel_hires`, so
+//! a viewer scrolls in 1/120 of a notch (`Scroll`); `--no-hires-wheel`
+//! hosts without it, as a 0.12 host does, so a viewer scrolls in notches
+//! (`Wheel`). `--relay-only` keeps the host off direct paths and tells the
+//! viewer to stay on the relay, which listens on loopback only.
+//! `--view-only` hosts without control; `--wander`
 //! moves the host's own pointer across the bands, three seconds in each, as
 //! someone at the host would. `--fps N` sends at most N units a second
 //! (default 60), for a viewer as slow as an emulator.
@@ -75,6 +79,7 @@ struct Options {
     width: u32,
     height: u32,
     shapes: bool,
+    hires_wheel: bool,
     macos: bool,
     relay_only: bool,
     view_only: bool,
@@ -108,6 +113,7 @@ fn options() -> Outcome<Options> {
         width,
         height,
         shapes: !flag("--no-shapes"),
+        hires_wheel: !flag("--no-hires-wheel"),
         macos: flag("--macos"),
         relay_only: flag("--relay-only"),
         view_only: flag("--view-only"),
@@ -138,7 +144,7 @@ async fn main() -> Outcome {
     // Relay only: nothing listens beyond loopback, so no firewall asks.
     host_options.allow_direct = !options.relay_only;
     let (width, height) = (options.width, options.height);
-    let (shapes, macos) = (options.shapes, options.macos);
+    let (shapes, macos, hires_wheel) = (options.shapes, options.macos, options.hires_wheel);
     let fps = options.fps.clamp(1, 120);
     let interval = Duration::from_secs(1) / fps;
     let clip = units.clone();
@@ -161,6 +167,7 @@ async fn main() -> Outcome {
                 width,
                 height,
                 shapes,
+                hires_wheel,
                 os: if macos {
                     HostOs::Macos
                 } else {
@@ -297,6 +304,7 @@ struct Replay {
     width: u32,
     height: u32,
     shapes: bool,
+    hires_wheel: bool,
     os: HostOs,
     pointer: Pointer,
     /// The band whose shape was reported last.
@@ -322,6 +330,7 @@ impl Backend for Replay {
         let mut caps = BackendCaps::default();
         caps.os = Some(self.os);
         caps.physical_keys = true;
+        caps.hires_wheel = self.hires_wheel;
         caps.cursor_shapes = self.shapes;
         Ok(Description {
             display: self.display()?,

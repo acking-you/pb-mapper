@@ -464,8 +464,10 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         };
         // When another controller moved the OS cursor in the meantime, return
         // the pointer to this viewer's last position before clicking/scrolling.
-        if matches!(input, Input::Button { .. } | Input::Wheel { .. })
-            && let Some((x, y)) = slot.pointer
+        if matches!(
+            input,
+            Input::Button { .. } | Input::Wheel { .. } | Input::Scroll { .. }
+        ) && let Some((x, y)) = slot.pointer
             && self.last_pointer_owner != Some((slot.slot, x, y))
         {
             let reposition = Input::Move { x, y };
@@ -485,9 +487,11 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             Input::Button { button, down, .. } => slot.held.button(button, down, inject),
             Input::Key { key, down } => slot.held.key(key, down, inject),
             Input::PhysicalKey { usage, down } => slot.held.physical(usage, down, inject),
-            Input::Move { .. } | Input::Wheel { .. } | Input::Text { .. } | Input::Lock {} => {
-                self.backend.input_in_context(context, input)
-            }
+            Input::Move { .. }
+            | Input::Wheel { .. }
+            | Input::Scroll { .. }
+            | Input::Text { .. }
+            | Input::Lock {} => self.backend.input_in_context(context, input),
         }
     }
 

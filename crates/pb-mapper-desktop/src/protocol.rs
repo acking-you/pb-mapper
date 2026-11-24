@@ -49,6 +49,9 @@ pub(crate) const CAPABILITY_ARRIVAL_TIME: &str = "arrival_time";
 /// Both ways: this end speaks keyframe sequences. Only when both listed it
 /// does the viewer write `Keyframe::after_seq`.
 pub(crate) const CAPABILITY_KEYFRAME_SEQ: &str = "keyframe_seq";
+/// From a host: it injects `Input::Scroll`, 1/120 of a notch at a time. A
+/// viewer sends that input to no other host.
+pub(crate) const CAPABILITY_WHEEL_HIRES: &str = "wheel_hires";
 pub(crate) const MAX_CAPABILITIES: usize = 16;
 
 /// Viewers a host serves at once.
