@@ -10,6 +10,7 @@ use crate::{
     codec::{
         annexb::{AccessUnit, ParameterSets},
         rate_fit::Fit,
+        sps::SpsReorder,
     },
     platform::DisplayModes,
     scheduler::{Waiter, Wake},
@@ -112,6 +113,13 @@ fn keyframes_come_only_when_asked_and_carry_their_parameter_sets() {
             let mut sets = ParameterSets::new(VideoCodec::H264);
             sets.observe(&parsed).unwrap();
             assert!(sets.complete() && sets.carried(&parsed), "frame {frame}");
+            // The SPS rewriter reads this session's SPS whole, whatever it
+            // says of reordering.
+            assert!(
+                !matches!(sets.sps_reorder(), None | Some(SpsReorder::Unread)),
+                "frame {frame}: {:?}",
+                sets.sps_reorder()
+            );
         }
     }
     assert_eq!(encoder.pending(), 0);
