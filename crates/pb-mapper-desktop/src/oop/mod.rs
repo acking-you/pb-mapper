@@ -1,9 +1,11 @@
 //! The out-of-process backend: a [`Backend`](crate::Backend) carried over a
-//! byte transport to a worker that serves its own backend. The protocol
-//! (`proto`), framing (`ipc`), client (`RemoteBackend`) and server (`serve`)
-//! are neutral; a platform brings the transport, peer verification,
-//! installation and session tracking. Windows serves its privileged helper
-//! over a named pipe.
+//! byte transport to a worker that serves its own backend, and pushes what
+//! the host would otherwise poll for (finished units, fresh pictures for an
+//! armed tick, the pointer). The protocol (`proto`), framing (`ipc`), client
+//! (`RemoteBackend`, with its I/O thread) and server (`serve`, the worker's
+//! loop `work`, and `exchange`) are neutral; a platform brings the
+//! transport, peer verification, installation and session tracking.
+//! Windows serves its privileged helper over a named pipe.
 pub(crate) mod client;
 pub(crate) mod ipc;
 pub(crate) mod proto;

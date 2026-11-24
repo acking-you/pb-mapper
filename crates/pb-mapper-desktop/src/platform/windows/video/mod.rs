@@ -971,6 +971,19 @@ impl Encoder {
     pub fn presented(&self) -> Option<Presented> {
         self.presented
     }
+    /// When the display presented the new picture the capture thread
+    /// published, or the one held back while it looks past it, and the
+    /// presents it covers: the picture the next `submit` sends, unless a
+    /// newer one replaces it. `None` when there is none, or DXGI did not
+    /// date it.
+    pub fn published(&self) -> Option<Presented> {
+        self.capture
+            .peek(|picture| {
+                let fresh = &picture.fresh;
+                fresh.at.map(|at| Presented::new(at, fresh.presents))
+            })
+            .flatten()
+    }
     /// Whether the last `submit` sent the last picture again (a liveness
     /// repeat, a refinement repeat, or a keyframe on a still desktop),
     /// copied rather than converted.

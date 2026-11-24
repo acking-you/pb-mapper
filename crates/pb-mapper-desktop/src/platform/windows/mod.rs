@@ -173,6 +173,11 @@ impl VideoSource for video::Encoder {
     fn presented(&self) -> Option<Presented> {
         video::Encoder::presented(self)
     }
+    /// The picture the capture thread published, dated as `presented` will
+    /// date it once submitted.
+    fn published(&self) -> Option<Presented> {
+        video::Encoder::published(self)
+    }
     /// After a submit that found no input request, a retry at the poll
     /// interval until the request comes, and at once once it has, even if
     /// it came before thread C chose its next poll. Otherwise at the tick

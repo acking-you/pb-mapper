@@ -824,12 +824,14 @@ Windows service, independently of Flutter or an agent harness:
   revocation, session change, renderer staleness and local stop release input;
   the service gives the worker a bounded exit interval before its job is closed.
 
-Each answer of the worker, with the unit or the shape it carries, crosses
-two pipes: the worker's private pipe to the service, and the helper pipe on
-to the app. Both carry `u32 BE length | bytes` records (`oop/ipc.rs`): a
-request or an answer as JSON of at most 8 KiB, and after each answer a byte
-record of up to 4 MiB. The worker writes an answer and its byte record in
-one vectored write, and the app each request in one. mio, from 1.2.5, makes
+Each answer of the worker, with the unit or the shape it carries, and each
+record it pushes between its answers (protocol 12, below), crosses two
+pipes: the worker's private pipe to the service, and the helper pipe on to
+the app. Both carry `u32 BE length | bytes` records (`oop/ipc.rs`): a
+request, an answer or a push as JSON of at most 8 KiB, and after each
+answer and each pushed unit a byte record of up to 4 MiB. The worker writes
+an answer, or a pushed unit, and its byte record in one vectored write, and
+the app each request in one. mio, from 1.2.5, makes
 such a write one overlapped `WriteFile` instead of one per length and per
 body, copying the slices into its write buffer as it copied each write
 before, so joining them copies nothing more. A pipe keeps that buffer for
@@ -842,11 +844,14 @@ direction (`helper/transfer.rs`), so a write that fits beside what already
 waits completes without waiting for its reader. The service relays toward
 the app through a 256 KiB buffer, reading on while a write is in flight so
 that the next write takes all it gathered, and toward the worker through
-64 KiB, so each of its writes stays under that 1 MiB. The records, and so
-the helper protocol, are unchanged. `examples/pipe_relay_bench.rs` times a
-unit through two pipes and such a relay, and counts the writes and reads it
-took; its 3.7 MB unit is the one whose write allocates on 1.2.5. No Windows
-run of it is recorded yet.
+64 KiB, so each of its writes stays under that 1 MiB. That change left the
+records, and so the helper protocol, as they were.
+`examples/pipe_relay_bench.rs` times a
+unit through two pipes and such a relay, pushed as protocol 12 sends it
+(from the worker's write until the app holds it) or, with `--mode answer`,
+answered as protocol 11 did (from the request), and counts the writes and
+reads it took; its 3.7 MB unit is the one whose write allocates on 1.2.5.
+No Windows run of it is recorded yet.
 
 Installation is serialized, replaces configuration atomically, waits for the
 service to report Running, and attempts to restore the previous configuration
@@ -891,17 +896,76 @@ configuring it from here would replace its view-only, relay-only or paused
 policy, and under another service name its invitation.
 
 Protocol 12 is the current one, with the pipes
-`pb-mapper.desktop-helper.v12` and `pb-mapper.desktop-background.v12`. Its
-`Request::Input` may carry `Input::Scroll`, scrolling in 1/120 of a notch
-(see [Input and cursor](#input-and-cursor)), which the worker injects as
+`pb-mapper.desktop-helper.v12` and `pb-mapper.desktop-background.v12`.
+Between its answers the worker pushes what the app would otherwise have to
+ask for again and again, so the app's thread C never polls the worker.
+Every record the worker writes names its `kind` (`Record` in
+`oop/proto.rs`): `reply`, an answer, its response's fields beside the tag;
+`unit`, a unit its encoder finished, with the desktop generation its
+capture was checked against and the units the encoder still holds, its
+bytes the next record; `failed`, a failure its encoder met as the worker
+collected its output, which thread C takes in the units' order as a drain's
+failure; `pending`, a lower pending count when the encoder discarded a late
+output with nothing to send; `fresh`, that its source wants the tick the app's last capture
+left armed: it published a picture, dated by its age where it can be, or a
+repeat came due (liveness, a keyframe), or its encoder asked for input;
+and `pointer`, the pointer on the desktop it last reported, with the newest
+shape's number once the app asked for shapes. `Request::Stream` says
+whether thread C wants video: while it does, the worker pushes `fresh`, at
+most once per armed tick, and `pointer`, and holds fine timers; when every
+viewer pauses it stops, and its capture thread stops looking. Units are
+pushed either way. `Request::Video` always captures: `submit` and `wait_ms`
+are gone, and with them the drain's long poll. Its answer dates the picture
+it submitted (`presented_ago_us`, `presented_count`), which the app dates
+by its own receipt of the answer, a little later than the present by the
+answer's way through the pipes, and its pacing anchors on it. A `Video`
+request no longer reads the pointer: it checks the desktop twice, around
+the capture, where it checked five times. Its `Request::Input` may also
+carry `Input::Scroll`, scrolling in 1/120 of a notch (see
+[Input and cursor](#input-and-cursor)), which the worker injects as
 `SendInput` wheel data, and the `Start` answer's caps say whether the worker
 scrolls that finely (`hires_wheel`), which the host then lists to its viewers
-as `wheel_hires`. Both ends refuse a scroll beyond 12 000 units each way.
+as `wheel_hires`; both ends refuse a scroll beyond 12 000 units each way.
 
-Protocol 11 added `Request::Adapter`, which the host sends only for a viewer
-that decodes H.265, just before it would ask `Request::H265`: the worker
-answers with the GPU that drives its display and that GPU's driver
-(`adapter`: the adapter's
+The worker's loop (`server::work`) waits on one wake that the exchange,
+its encoder's event watcher and its capture thread share: it serves the
+request that came first, then pushes each unit its encoder finished, a
+`fresh` when its source wants the armed tick (`Backend::capture_idle_until`
+of its own backend says so), and the pointer every 16 ms (once a period at
+a faster pace, down to 8 ms) and 2 ms and 8 ms after an input moved it,
+when the pointer or its shape's number differs from what the app holds,
+as its last push or an answer that carried the pointer left it: an
+input's answer reports the move it applied, so a move the system then
+stopped short is pushed where the pointer stopped. On the app's side one
+I/O thread owns the pipe and the runtime that drives it: it writes each
+call's request, and reads every record in order, handing an answer to the
+waiting call, queueing a unit or a failure for thread C, which takes them
+with no pipe call and is woken for each, raising a flag for `fresh`, and
+keeping the pointer, so an answer read late never undoes a push that came
+after it. A pushed pointer that changed what thread C would read wakes it
+too (`Backend::cursor_changed`), and thread C samples it at once rather
+than at its own next sample, so a pointer the viewer did not move (the
+host user's, an app's) waits for the worker's sampling and the pipes, not
+for thread C's sampling as well. Both ends check what they read: a unit
+within 4 MiB, and of the generation thread C expects when it takes it
+(another's is dropped); at most 64 units pending, and at most six pushed
+and not yet taken, two more than thread C lets in flight; a pointer inside
+the display the worker last reported (one outside is not taken); an age within 1 s (an
+older one is no date); and no unknown kind or field. A broken record ends
+the session, as a lost pipe does. Each pushed unit also carries when the
+worker collected it, on the system clock both processes read, from which
+the app's once-a-second debug event `desktop_helper_push` (target
+`pb_mapper_desktop::feedback`) reports the delay to its receipt (p50, p95,
+maximum), with the answers, which are the round trips, units, fresh
+pictures and pointers it received per second, and each fresh picture's age
+as the worker wrote its notice. How much sooner a unit, a picture and an
+input arrive on a Windows computer, and what it saves of the app's, the
+service's and the worker's processor time, is still to be measured there.
+
+Protocol 11 added `Request::Adapter`, which the host sends only for a
+viewer that decodes H.265, just before it would ask `Request::H265`: the
+worker answers with the
+GPU that drives its display and that GPU's driver (`adapter`: the adapter's
 vendor, device, subsystem and revision ids from DXGI, and the user-mode
 driver's version). The answer to `Request::H265` names the GPU in `adapter`
 too, but only when that answer is the worker's probe of it; the host keeps
@@ -1470,35 +1534,40 @@ up to 64/63 of it. Without dates, on an even grid, a display a little faster
 than the pace drifts ahead of its ticks, each picture waiting longer, until
 one is replaced before a capture takes it. A skip, a repeat and an undated
 picture keep the even grid, which keeps its long-run rate (120 FPS on a
-165 Hz display is not rounded down). In process, a Windows host dates a
-picture by its present and a Mac host by its arrival from ScreenCaptureKit;
-the helper's answer carries no date yet, so a host behind the helper keeps
-the grid. A tick that finds no new picture stays armed, so the next picture
-is taken as it appears rather than a tick later. ScreenCaptureKit, which
-pushes, wakes the thread for it, and so, in the app's process, does the
-Windows encoder's capture thread, which such a tick arms and which waits
-for the display's next present (see the Windows host below): thread C never
-polls DXGI there. Behind the helper, whose answer says when a capture left
-the tick armed, nothing wakes the thread, so the worker is asked again,
-never at once: every 2 ms (`DRAIN_POLL`, or the backend's `capture_poll`)
-for 250 ms (`HOT_WINDOW`) after an input the thread injected or a new
-picture, when the next present is likely, and while the encoder still holds
-units, which may be what kept the tick, and once a period otherwise, so a
-still desktop costs no more capture calls than the grid. An injected input
-also brings a poll due a period later in to 2 ms. Anchoring adds such polls
-on an active desktop: after a dated picture the next tick opens three
-quarters of a period later, and the worker is asked every 2 ms from then
-until the next present lands, where a grid at the display's own rate mostly
-found a present already waiting at its tick. `desktop_capture_pacing`'s
-`empty_polls_per_s` and `video_bench`'s `polls_per_s` count them, together
-with the asks of a Windows encoder that had not asked for input yet
-(`video_bench`'s `waiting` counts those apart) and a Windows encoder's
-refinement repeats; in process they count the captures that armed the
-capture thread or sent a refinement repeat: at most one a tick on an
-active desktop, and on a still desktop an arming after each 250 ms repeat
-besides a burst's repeats. A change of the viewers' limits that changes only
-the frame rate keeps the capture source where it can serve the new limits as
-it is (a Mac host's can while the encode size stays the same, and the
+165 Hz display is not rounded down). A Windows host dates a picture by its
+present, in the app's process and behind the helper, whose answer gives
+the picture's age (protocol 12), and a Mac host by its arrival from
+ScreenCaptureKit. A tick that finds no new picture stays armed, so the next
+picture is taken as it appears rather than a tick later. ScreenCaptureKit,
+which pushes, wakes the thread for it, and so does the Windows encoder's
+capture thread, which such a tick arms and which waits for the display's
+next present (see the Windows host below): in the app's process directly,
+and behind the helper through the worker, which tells the app once its
+source wants the armed tick, whose I/O thread wakes thread C. Thread C
+never polls DXGI, nor the worker. A source that cannot push (none ships;
+the synthetic test platform has one) is asked again, never at once: every
+2 ms (`DRAIN_POLL`, or the backend's `capture_poll`) for 250 ms
+(`HOT_WINDOW`) after an input the thread injected or a new picture, when
+the next present is likely, and while the encoder still holds units, which
+may be what kept the tick, and once a period otherwise, so a still desktop
+costs no more capture calls than the grid. An injected input also brings a
+poll due a period later in to 2 ms. `desktop_capture_pacing`'s
+`empty_polls_per_s` and `video_bench`'s `polls_per_s` count the captures
+that left the tick armed, together with the asks of a Windows encoder that
+had not asked for input yet (`video_bench`'s `waiting` counts those apart)
+and a Windows encoder's refinement repeats: the captures that armed the
+capture thread or sent a refinement repeat, at most one a tick on an active
+desktop, and on a still desktop an arming after each 250 ms repeat besides
+a burst's repeats. Behind the helper each of them is a round trip through
+the pipes: on a desktop that keeps changing, a tick that finds nothing new
+arms the worker's source, and a capture takes the picture the worker then
+tells of; an encoder that has not asked for input yet costs one more each
+time the worker's source names its retry (2 ms later) or its input request
+comes. How many round trips a second that makes on a Windows computer is
+still to be measured (`desktop_helper_push`'s `replies_per_s`). A change
+of the viewers' limits that changes only the frame rate keeps the capture source
+where it can serve the new limits as it is (a Mac host's can while the
+encode size stays the same, and the
 synthetic test platform's; the Windows source is still built again), and
 asks for an IDR either way. Thread C passes each
 change of limits to the backend as it happens, during an outage too, so a
@@ -1657,12 +1726,13 @@ encoder is built again. An encoder without `IMFShutdown`, or without a
 watcher, has its events read at each drain, every 2 ms while it holds
 units. Behind
 the helper, the worker's encoder has its watcher and its capture thread
-too, but nothing they wake: thread C still polls the worker every 2 ms, the
-worker reads the counts each millisecond of a drain's long poll, and a
-capture request that finds nothing new arms the worker's capture thread,
-which converts the next present as it comes for the next request to take,
-and stops looking once no request has armed it for 2 s, as while the host,
-every viewer paused, sends none.
+too, and they wake the worker's loop (protocol 12): it collects each output
+as it is announced and pushes it to the app, whose thread C its I/O thread
+wakes, and a capture request that finds nothing new arms the worker's
+capture thread, which converts the next present as it comes; the worker
+then tells the app, which asks for it. The capture thread stops looking
+when every viewer pauses (`Request::Stream`), and once no request has
+armed it for 2 s.
 An encoder that holds nothing and
 has asked for no input for 2 s after it last took or gave a unit is
 stalled, as one that holds a unit for 2 s is.
@@ -1684,8 +1754,8 @@ publishes the picture, disarms itself and wakes thread C, whose tick,
 already due, submits it. A frame that only moved the pointer is released and
 waited past, and wakes nothing. Unarmed (once it published, until thread
 C's next tick finds nothing new; after a repeat; while every viewer has
-paused; or once thread C has not armed it again for 2 s, as when a paused
-host behind the helper sends no request), the thread waits for thread C, and DXGI
+paused; or once thread C has not armed it again for 2 s, as when its
+caller went without saying so), the thread waits for thread C, and DXGI
 folds the desktop's updates into its next frame, which the next arming
 takes at once. A picture that waited 2 ms or more before a submit takes
 it, as one does while thread C skips ticks for backpressure, across a
@@ -2091,8 +2161,8 @@ app when hidden, Windows 11 fires every timer on its 15.6 ms tick and ignores
 timer resolution. That is every tokio timer: the writer's credit recheck and
 QUIC's pacing and ACK timers. While a session captures, its thread C holds a
 process-wide guard that opts out of timer and execution-speed throttling and
-asks for 1 ms; the helper's capture worker holds one while the host asks it
-for video. The last guard released restores the earlier throttling state and
+asks for 1 ms; the helper's capture worker holds one while the host streams
+(`Request::Stream`). The last guard released restores the earlier throttling state and
 the period, so a paused or idle host costs no power, and a failed call only
 leaves timers coarse. Measured here, a 2 ms tokio sleep took 15.7 ms, 3.5 ms
 under the guard and 15.6 ms after it. Thread C paces on its own
@@ -2115,8 +2185,8 @@ that a session that starts or resumes on one gets its first picture without
 anyone at the host. It clears the request 2 s after the last capture
 (`awake::LINGER`): a pause, a disconnect or a lost helper. While a session runs
 unpaused, thread C asks for a capture at least once a second, and reads the
-pointer at least every 16 ms (through the helper, the worker reads it at each desktop
-check and video request) even while the network or the encoder holds capture
+pointer at least every 16 ms (through the helper, the worker reads it as
+often while the host streams) even while the network or the encoder holds capture
 back, so a stall does not let the request lapse. When to take and clear it is
 `awake::Watchdog`, which the unit tests drive through whole sessions with an
 injected clock. `powercfg /requests` lists the request under DISPLAY and
@@ -3312,8 +3382,10 @@ answer an earlier move. A look reports only a new shape, as a sample would, and
 starts the sample clock again; otherwise it reports nothing, so a viewer gets
 a position sooner than the clock only together with a new shape. Through the
 helper the shape still crosses the pipe only when the worker numbered a new
-one, which each capture call observes: every 2 ms after an input while the
-picture is still, at the frame rate while it changes.
+one, which it reads with each pointer it samples (as often as thread C
+does, and 2 ms and 8 ms after a move it applied) and pushes with the
+pointer; a pushed change wakes thread C, which samples it at once
+(`Backend::cursor_changed`) and starts its sample clock again from it.
 
 The desktop-bound thread reports at once every sample unlike its last report,
 except the controlling viewer's own move coming back: the viewer draws
@@ -3325,9 +3397,9 @@ is reported. A hidden pointer carries no position and is never an echo.
 Comparing with the last report, not the last sample, reports a move the OS
 stopped short (a `ClipCursor`, an edge) where the pointer stopped. Nothing is
 held back and sent late. A backend reports the pointer as every
-input it applied left it: the helper's worker, which observes it during the
-capture call, also answers each input with the pointer, so its report is
-never older than the last move. A new generation, a display change included,
+input it applied left it: the helper's worker, which pushes it as it moves,
+also answers each input with the pointer, in order with its pushes, so its
+report is never older than the last move. A new generation, a display change included,
 always reports where the pointer is, and a viewer that does not control sees
 every change. The writer sends each report once, outside the video queue,
 after its generation's `State`. Observing the pointer, its shape included,
@@ -3489,7 +3561,7 @@ so read at the display's rate, and a still one on the timer only.
 | Encoder cap | a rolled second is full with a full tick (a due tick skipped for 4 in the encoder) and 3 or more units inside on average (units a second × median dwell); uncapped, a full one caps at max(the viewers' presets' highest minimum, ⌊0.95 × units a second⌋) where that is below the units a second; judged by the first second loading the cap (0.9 × it or more) at least max(2, ⌈3 ÷ (units a second − cap)⌉ + 1) rolls later, at most 8, whose median dwell not below 0.6 × the capping second's lifts it, none again for 30 s, doubling with each lift in a row up to 8 min; capped, 3 loaded seconds since a full one raise it to ⌊0.95 ÷ median dwell⌋ when that is a twentieth (≥ 1) more, below the cap it last filled at unless a twentieth above that too, and from 30 s after a measurement a probe adds a twentieth (≥ 1) each loaded second, that hold doubling with each fill up to 4 min; a full second lowers it to ⌊0.95 × units a second⌋; unloaded seconds and a pace asked at or below it leave it; cleared at the asked pace; reset when the encoder is rebuilt |
 | Mac encoder | low latency with QP up to 51; a dropped newest picture sent again at the next tick, at most twice a picture; dropped pictures traced at most once a second |
 | Mac capture interval | (n − 0.5) / refresh: n the pace's multiple where the refresh is one within 1%, else 1 below eight times the pace and floor(refresh / pace / 4) above, at most the most refreshes that fit in 0.9 / `max_fps`, at least 1; 0.9 / `max_fps` with no refresh; a slower pace after 1 s, a faster one, a new refresh (read each second), frame-rate limit or pause at once; the longest allowed while every viewer is paused; one change in flight, a refused one failing the stream |
-| Armed tick | a tick with no new picture, or whose Windows encoder has not asked for input, stays armed; ScreenCaptureKit wakes thread C, and in process so does the Windows encoder's capture thread for the next present, which it waits for at most 16 ms an `AcquireNextFrame` while armed, and the encoder's input request (asked again every 2 ms meanwhile); a repeat due, or a published picture taken 2 ms or more after it was published, waits up to 32 ms after the capture thread's arming for its answer that nothing newer waits; a capture thread not armed again (or asked again by a refinement repeat) for 2 s stops looking; through the helper the worker is asked again every 2 ms for 250 ms after an injected input or a new picture and while the encoder holds units (an input brings a pending poll in to 2 ms), and once a period otherwise |
+| Armed tick | a tick with no new picture, or whose Windows encoder has not asked for input, stays armed; ScreenCaptureKit wakes thread C, and in process so does the Windows encoder's capture thread for the next present, which it waits for at most 16 ms an `AcquireNextFrame` while armed, and the encoder's input request (asked again every 2 ms meanwhile); a repeat due, or a published picture taken 2 ms or more after it was published, waits up to 32 ms after the capture thread's arming for its answer that nothing newer waits; a capture thread not armed again (or asked again by a refinement repeat) for 2 s stops looking; through the helper the worker's capture thread and encoder wake its loop, which tells the host when its source wants the armed tick (protocol 12), and the host asks then, or 250 ms after the arming at the latest; a source that cannot push is asked again every 2 ms for 250 ms after an injected input or a new picture and while the encoder holds units (an input brings a pending poll in to 2 ms), and once a period otherwise |
 | Still refinement (Windows, encoders a device run listed: none yet) | from 200 ms after the last new picture or keyframe, once a fresh unit since the picture last finished refining filled ¾ of a frame's budget, a repeat a period of the pace apart, the tick and the capture thread left armed; ends after 3 outputs at two in a row under 512 B or two that did not lower the QP, at a QP of 18 or less, or at 15 repeats of the picture (from a new picture's unit that filled its budget, keyframes of it included) or 1 s; none at a pace of 4 or less, nor after a liveness repeat until a fresh unit fills its budget again; then liveness every 250 ms |
 | Capture pacing | after a dated picture, the next tick a period after its present, up to ¼ period early and, for a picture of a single present, at most 1/64 period earlier than a period after the last tick (long-run rate ≤ 64/63 × pace); a picture of several presents that waited keeps the tick a period after the last; ¾ period floor after a stall; a present over a period old counts as undated, and DXGI dates no picture presented over 1 s ago |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
@@ -3500,7 +3572,7 @@ so read at the display's rate, and a still one on the timer only.
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued, drained until the IDR or a head under 125 ms; IDR grace 500 ms; stall watchdog 700 ms |
 | fps cap | tick 250 ms; capacity from ≥ 4 busy ticks of the last 8; × 0.9 direct, × 0.8 relay; minimum 5; after 3 s, +5 per 30 fps of ceiling or a quarter of the cap, up to 95% of the capacity; probes of 10% watched 3 s (not by the queue within the IDR grace; a pause takes one back), backoff 3 s doubling to 60 s; turnaround late past 2 frame intervals (≥ 40 ms) over its 10 s floor; ≥ 1 s between changes but for a probe taken back; within the window's display rate (rounded, 30 to 120), a change of which goes at the next tick, and beneath which a backlog cap is held, not raised, probed or removed |
 | Input | viewer queue 512 events or 256 KiB, batches of 16, a lone move replacing a queued tail move and a lone scroll adding to a queued tail scroll of its generation and continuity; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input; `Wheel` at most 100 notches each way, `Scroll` (to a host that lists `wheel_hires`) 120 units a notch, at most 12 000 each way; a viewer's notch the embedder's (Windows `lines × 100 / 3` physical px cut to whole, macOS 40 and Linux 53 logical px, else 30), a touchpad's travel 1.2 units a logical px (30 px a notch toward an older host); a fling from 50 px/s, at most 8 000, on a Mac or iPad until below 20 device px/s, elsewhere for the time Android's curve computes for its speed |
-| Cursor | sampled every 16 ms, or once a period of a faster pace down to 8 ms; the shape looked at 2 ms and 8 ms after a shape-reading controller's newest move, one look pending, a sooner one an earlier move left kept; the controller's own move never reported; an injected move is the pointer until the OS shows it, at most 250 ms after the last (`SETTLE`); a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated, the pointer shows on the shared display and the OS pointer changed (a failed read again after 250 ms), an image over 1024 px a side never, 1 to 256 px a side sent, 64 slots on each end |
+| Cursor | sampled every 16 ms, or once a period of a faster pace down to 8 ms, and behind the helper also as the worker pushes a change; the shape looked at 2 ms and 8 ms after a shape-reading controller's newest move, one look pending, a sooner one an earlier move left kept; the controller's own move never reported; an injected move is the pointer until the OS shows it, at most 250 ms after the last (`SETTLE`); a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated, the pointer shows on the shared display and the OS pointer changed (a failed read again after 250 ms), an image over 1024 px a side never, 1 to 256 px a side sent, 64 slots on each end |
 | Codec | `Accepted` waits at most 3 s for the backend's display and H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3; Windows H.264 in Constrained High, then High, then Baseline, `QualityVsSpeed` 0, no scenario |
 
 ### Diagnostics
@@ -3560,7 +3632,16 @@ viewers ask for, before the cap), the rolled second's `full_ticks`, `units`
 and `window_ms` (none of these for `reset`, which a rebuilt encoder brings),
 and `dwell_before_us`, the median dwell of the second that set the cap,
 with, for `kept` and `lifted`, `dwell_after_us`, that of the second the
-guard judged by. A
+guard judged by. Behind the Windows helper the dates come from the
+worker's answers, and the app's link to the helper traces
+`desktop_helper_push` there, once a second while records come:
+`replies_per_s` (answers, so the pipe's round trips), `units_per_s`,
+`fresh_per_s` and `pointers_per_s` (the worker's pushes), `refused` (pushed
+pointers outside the display), `receipt_p50_us`, `receipt_p95_us` and
+`receipt_max_us`, from the worker's collection of each pushed unit to its
+receipt in the app, on the system clock both read, and `fresh_age_p50_us`
+and `fresh_age_p95_us`, a fresh picture's age as the worker wrote its
+notice. A
 Mac host traces `macos_capture_timing` there too, once a second while it
 submits: ScreenCaptureKit's `complete_per_s`, `idle_per_s` and
 `replaced_per_s` (pictures a newer one replaced before thread C took them),

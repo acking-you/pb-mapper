@@ -50,11 +50,12 @@ const STOP_WAIT: Duration = Duration::from_millis(100);
 pub(crate) const FRESH_FOR: Duration = DRAIN_POLL;
 
 /// How long an armed thread that thread C has not asked again goes on
-/// looking: past the slowest pace's period (1 s), at which a privileged
-/// helper's host asks, and past the liveness repeat, by which thread C
-/// asks in process (a refinement repeat, which leaves the thread armed,
-/// asks it again, `PresentWaiter::keep_armed`), so that only a caller that
-/// stopped asking (every viewer paused, or the host went) trips it.
+/// looking: past the slowest pace's period (1 s), and past the liveness
+/// repeat, by which thread C asks, in process or as the privileged
+/// helper's worker tells its host to (a refinement repeat, which leaves the
+/// thread armed, asks it again, `PresentWaiter::keep_armed`), so that only
+/// a caller that stopped asking (it went, or paused without saying so)
+/// trips it.
 pub(crate) const ASKED_WITHIN: Duration = Duration::from_secs(2);
 const _: () = assert!(
     ASKED_WITHIN.as_millis() > 1_000 && ASKED_WITHIN.as_millis() > LIVENESS_INTERVAL.as_millis(),
@@ -316,6 +317,18 @@ impl<S: PresentSource> PresentWaiter<S> {
         self.held.take()
     }
 
+    /// What `read` makes of the picture thread C would take next, without
+    /// taking it: the one the thread published, else the one thread C holds
+    /// back; `None` when there is neither. For the privileged helper's
+    /// worker, which dates the picture to its host.
+    pub(crate) fn peek<R>(&self, read: impl FnOnce(&S::Picture) -> R) -> Option<R> {
+        let state = self.shared.state.lock();
+        match (&state.picture, &self.held) {
+            (Some((picture, _)), _) | (None, Some(picture)) => Some(read(picture)),
+            (None, None) => None,
+        }
+    }
+
     /// The failure that ended the thread, once; then that it ended.
     pub(crate) fn failed(&self) -> Result<()> {
         let mut state = self.shared.state.lock();
@@ -455,7 +468,7 @@ fn run<S: PresentSource>(mut source: S, shared: &Shared<S::Target, S::Picture>, 
                         break;
                     }
                     // Thread C stopped asking: its caller paused, or went,
-                    // without saying so, as a privileged helper's host does.
+                    // without saying so.
                     state.disarm();
                 }
                 #[cfg(test)]
@@ -735,6 +748,7 @@ mod tests {
         assert!(rig.woken.wait(soon()).unwrap());
         let status = rig.waiter.status();
         assert!(status.published && status.armed.is_none());
+        assert_eq!(rig.waiter.peek(Vec::clone), Some(vec![1]));
         assert_eq!(rig.log.lock().looks, [Duration::ZERO]);
         assert_eq!(
             rig.waiter.arm(false, target(&mut made)).unwrap(),
@@ -845,9 +859,12 @@ mod tests {
         assert!(rig.woken.wait(soon()).unwrap());
         let status = rig.waiter.status();
         assert!(status.held && status.idle && !status.published);
+        // The picture thread C would take next, without taking it.
+        assert_eq!(rig.waiter.peek(Vec::clone), Some(vec![1]));
         assert_eq!(rig.take(), Some(vec![1]));
         assert_eq!(rig.take(), None);
         assert!(!rig.waiter.status().held);
+        assert_eq!(rig.waiter.peek(Vec::clone), None);
 
         // A newer present came meanwhile: the look takes it at once, and it
         // goes in the held one's place, however late it is taken.
@@ -907,8 +924,8 @@ mod tests {
     }
 
     /// An armed thread that thread C does not ask again within its
-    /// source's `ASKED_WITHIN` stops looking, as a paused host behind the
-    /// helper never says it paused; the next arming looks at once again.
+    /// source's `ASKED_WITHIN` stops looking, as when its caller went or
+    /// paused without saying so; the next arming looks at once again.
     #[test]
     fn an_armed_thread_not_asked_again_stops_looking() {
         let rig = Rig::<16>::new(false);

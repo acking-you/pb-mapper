@@ -33,7 +33,6 @@ use crate::{
 };
 use config::{Configuration, configuration};
 use std::sync::Arc;
-use tokio::net::windows::named_pipe::NamedPipeClient;
 #[cfg(feature = "windows-helper")]
 use {crate::error, std::path::PathBuf};
 
@@ -67,10 +66,7 @@ pub(crate) fn launch(selection: &DisplaySelection) -> Result<Arc<dyn Launch>> {
 
 /// Connect from the dedicated SDK capture worker. No automatic privilege
 /// escalation or fallback: failure is observable at the viewer and local UI.
-pub(crate) fn backend(
-    display_id: u32,
-    display_device: Option<String>,
-) -> Result<RemoteBackend<NamedPipeClient>> {
+pub(crate) fn backend(display_id: u32, display_device: Option<String>) -> Result<RemoteBackend> {
     ensure_ready()?;
     let config = configuration()?;
     connect_backend(display_id, display_device, &config)
@@ -80,10 +76,7 @@ pub(crate) fn backend(
 /// independently accepts only its own kernel-reported PID, never arbitrary
 /// SYSTEM callers, and binds the worker to the approved owner's current login.
 #[cfg(feature = "windows-helper")]
-fn service_backend(
-    display_id: u32,
-    display_device: Option<String>,
-) -> Result<RemoteBackend<NamedPipeClient>> {
+fn service_backend(display_id: u32, display_device: Option<String>) -> Result<RemoteBackend> {
     let config = configuration()?;
     if os::current_sid()? != os::LOCAL_SYSTEM_SID
         || os::session(std::process::id())? != 0
@@ -98,7 +91,7 @@ fn connect_backend(
     display_id: u32,
     display_device: Option<String>,
     config: &Configuration,
-) -> Result<RemoteBackend<NamedPipeClient>> {
+) -> Result<RemoteBackend> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -130,9 +123,16 @@ fn connect_backend(
 /// the host keeps its tick armed and polls. 11: `Request::Adapter` names the
 /// GPU and driver that drive the worker's display (`adapter`), and the
 /// `H265` answer names the GPU its probe answered of, under which the host
-/// keeps that answer for later workers. 12: `Request::Input` may carry
-/// `Input::Scroll`, and the `Start` caps say whether the worker scrolls in
-/// 1/120 of a notch (`hires_wheel`).
+/// keeps that answer for later workers. 12: the worker pushes between its
+/// answers, each a tagged record (`oop::proto::Record`): every unit as its
+/// encoder finishes it, a failure it met meanwhile, that its source wants
+/// the tick the host left armed, and the pointer as it moves; answers are
+/// tagged `reply`, and a capture's dates its picture (`presented_ago_us`,
+/// `presented_count`). `Request::Stream` turns the pushes for a streaming
+/// host on and off, `Request::Video` no longer drains alone or waits
+/// (`submit`, `wait_ms`), `Request::Input` may carry `Input::Scroll`, and
+/// the `Start` caps say whether the worker scrolls in 1/120 of a notch
+/// (`hires_wheel`).
 pub const HELPER_PROTOCOL: u32 = 12;
 
 /// What a worker exits with when a display mode it changed is still

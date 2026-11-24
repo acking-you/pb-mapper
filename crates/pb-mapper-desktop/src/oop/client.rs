@@ -1,16 +1,48 @@
 //! The out-of-process backend's client: a [`Backend`] whose calls cross a
-//! transport to a worker that serves its own backend (`server::serve`).
+//! transport to a worker that serves its own backend (`server::work`).
 //! Windows connects it over the helper's named pipe; any platform with a
 //! privileged agent can connect it over its own transport.
+//!
+//! One I/O thread owns the transport and the runtime that drives it
+//! ([`Link`]): it writes each call's request, and reads whatever the worker
+//! writes, in order: the call's answer, which goes back to the waiting call,
+//! and the pushes between answers. A pushed unit or failure waits in a
+//! queue that thread C drains without crossing the pipe, a fresh picture
+//! for an armed tick is a flag, and a pushed pointer replaces the last
+//! one; each wakes thread C, the pointer when it changed what thread C
+//! would read (`Backend::cursor_changed`). What depends on the order of
+//! answers and pushes (the queue, the pointer, the units the worker's
+//! encoder holds) is kept by the I/O thread as each arrives, so that an
+//! answer thread C reads late never undoes a push that came after it.
 use super::{
     Transport, ipc,
-    proto::{AdapterKey, DRAIN_WAIT_MAX_MS, Request, Response, ShapeHeader},
+    proto::{
+        AdapterKey, PENDING_MAX, PRESENT_AGE_MAX, Record, Request, Response, ShapeHeader, inside,
+        presented_at,
+    },
 };
 use crate::{
-    Backend, BackendCaps, BackendError, Description, DesktopContext, FailureKind, Input, Result,
-    VideoCodec, Waker, error,
+    Backend, BackendCaps, BackendError, CursorPosition, Description, DesktopContext, EncodedFrame,
+    FailureKind, Input, Presented, Result, VideoCodec, VideoLimits, Waker,
+    codec::pipeline::LIVENESS_INTERVAL,
+    error,
     modes::{Mode, ModeList},
+    worker::ENCODER_DEPTH,
 };
+use parking_lot::Mutex;
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    sync::{Arc, mpsc},
+    time::{Duration, Instant, SystemTime},
+};
+use tokio_util::sync::CancellationToken;
+
+/// The most units and failures the worker may have pushed that thread C has
+/// not taken yet: thread C submits only while the worker's encoder and this
+/// queue hold fewer than `ENCODER_DEPTH` together, so a worker that pushes
+/// more is broken, and its link is dropped.
+const QUEUED_MAX: usize = ENCODER_DEPTH + 2;
 
 /// The most adapters whose H.265 answers this process keeps.
 const H265_ANSWERS_KEPT: usize = 8;
@@ -46,21 +78,26 @@ impl H265Answers {
         self.0.retain(|(kept, _)| kept != adapter);
     }
 }
-static H265_ANSWERS: parking_lot::Mutex<H265Answers> = parking_lot::Mutex::new(H265Answers::new());
+static H265_ANSWERS: Mutex<H265Answers> = Mutex::new(H265Answers::new());
 
-pub(crate) struct RemoteBackend<T: Transport> {
-    runtime: tokio::runtime::Runtime,
-    pipe: Option<T>,
+pub(crate) struct RemoteBackend {
+    link: Link,
     /// What the worker's backend can do, as its `Start` answer said; what
     /// the connector expects of its worker until then.
     caps: BackendCaps,
     context: Option<DesktopContext>,
-    cursor: Option<crate::CursorPosition>,
-    /// The worker encoder's pending units, from the last response.
-    pending: usize,
     /// Whether the last capture handed the worker's source its tick, as its
     /// answer said (`submitted_video`).
     submitted: bool,
+    /// When the answer to the last capture that left the tick armed came,
+    /// and whether that capture asked for a keyframe, which the worker's
+    /// encoder then keeps; `None` once a capture spent the tick.
+    armed: Option<(Instant, bool)>,
+    /// The keyframe the capture under way asked for.
+    keyframe: bool,
+    /// When the display presented the picture the last capture submitted,
+    /// as its answer dated it.
+    presented: Option<Presented>,
     /// From the `Start` response: the interactive session's values, which
     /// differ from this process's when it is the SYSTEM service in session 0.
     double_click: Option<crate::DoubleClickGuard>,
@@ -70,152 +107,153 @@ pub(crate) struct RemoteBackend<T: Transport> {
     /// This client changed the worker's display mode and has not asked it
     /// back since: a session's end asks only then.
     changed_mode: bool,
-    /// The last capture's codec and rate, repeated by drains.
-    codec: crate::VideoCodec,
-    rate: crate::VideoRate,
+    /// The worker streams (`Request::Stream`): thread C bound this backend
+    /// and is not paused.
+    streaming: bool,
     sequence: u64,
     failed: bool,
     /// Thread C asked for the pointer's shape, so the worker reads it.
     shapes: bool,
-    /// The newest shape's number the worker reported, and the one this
-    /// client last fetched: a newer one is fetched once.
-    shape_serial: u64,
+    /// The newest shape's number this client fetched: a newer one the worker
+    /// reports is fetched once.
     fetched_shape: u64,
 }
-impl<T: Transport> RemoteBackend<T> {
+impl RemoteBackend {
     /// Start the worker on `display_id`, found again by `display_device`
-    /// when that id went stale, over `pipe`, whose calls `runtime` drives.
-    /// `caps` is what the connector expects of the worker, which its
-    /// `Start` answer replaces.
-    pub(crate) fn start(
+    /// when that id went stale, over `pipe`, which `runtime` drives on the
+    /// backend's I/O thread. `caps` is what the connector expects of the
+    /// worker, which its `Start` answer replaces.
+    pub(crate) fn start<T: Transport>(
         runtime: tokio::runtime::Runtime,
         pipe: T,
         display_id: u32,
         display_device: Option<String>,
         caps: BackendCaps,
     ) -> Result<Self> {
-        let mut backend = Self::new(runtime, pipe, caps);
+        let mut backend = Self::new(runtime, pipe, caps)?;
         backend.call(Request::Start {
             display_id,
             display_device,
         })?;
         Ok(backend)
     }
-    fn new(runtime: tokio::runtime::Runtime, pipe: T, caps: BackendCaps) -> Self {
-        Self {
-            runtime,
-            pipe: Some(pipe),
+    fn new<T: Transport>(
+        runtime: tokio::runtime::Runtime,
+        pipe: T,
+        caps: BackendCaps,
+    ) -> Result<Self> {
+        Ok(Self {
+            link: Link::start(runtime, pipe)?,
             caps,
             context: None,
-            cursor: None,
-            pending: 0,
             submitted: true,
+            armed: None,
+            keyframe: false,
+            presented: None,
             double_click: None,
             adapter: None,
             changed_mode: false,
-            codec: crate::VideoCodec::H264,
-            rate: crate::VideoRate {
-                bitrate: 0,
-                pace_fps: 0,
-            },
+            streaming: false,
             sequence: 0,
             failed: false,
             shapes: false,
-            shape_serial: 0,
             fetched_shape: 0,
-        }
+        })
     }
 
-    /// One request and its response. A lost or stalled pipe fails every later
-    /// call with `NotConnected`, which ends the session: a reinstalled or
-    /// crashed helper never leaves a viewer waiting. The desktop and pointer
-    /// the helper last reported stay until a response reports others: Release,
-    /// Close and RestoreDisplayMode report no desktop; Context, Capture and
-    /// Video observe the pointer, and so does an applied input when the
-    /// worker could read it, so the pointer is never older than the last
-    /// input; and an error, of the kind the worker said, answers the
-    /// request, not the desktop. The engine's own context checks notice a
-    /// desktop change.
+    /// One request and its answer. A lost or stalled pipe, or a worker that
+    /// breaks the protocol, fails the call and every later one with
+    /// `NotConnected`, which ends the session: a reinstalled or crashed
+    /// helper never leaves a viewer waiting. The desktop the helper last
+    /// reported stays until an answer reports another: Release, Close,
+    /// Stream and RestoreDisplayMode report none; and an error, of the kind
+    /// the worker said, answers the request, not the desktop. The engine's
+    /// own context checks notice a desktop change.
     fn call(&mut self, request: Request) -> Result<Answer> {
         if self.failed {
             return Err(disconnected("helper disconnected; restart desktop sharing"));
         }
         let bound = request.timeout();
-        let exchanged = self.runtime.block_on(async {
-            tokio::time::timeout(bound, async {
-                let pipe = self
-                    .pipe
-                    .as_mut()
-                    .ok_or_else(|| error("helper disconnected"))?;
-                ipc::write_json(pipe, &request).await?;
-                let response: Response = ipc::read_json(pipe).await?;
-                let image = ipc::read_bytes(pipe, ipc::MAX_FRAME).await?;
-                Ok::<_, std::io::Error>((response, image))
+        let owed = Owed {
+            reports_context: request.reports_context(),
+            observes_cursor: request.observes_cursor(),
+            input: matches!(request, Request::Input { .. }),
+            capture: match &request {
+                Request::Video { expected, .. } => Some(expected.generation),
+                _ => None,
+            },
+            configures_video: matches!(request, Request::ConfigureVideo { .. }),
+        };
+        let (reply, answer) = mpsc::sync_channel(1);
+        if self
+            .link
+            .calls
+            .try_send(Call {
+                request,
+                owed,
+                reply,
             })
-            .await
-        });
-        match exchanged {
-            Ok(Ok((response, image))) => self.absorb(&request, response, image),
-            Ok(Err(failure)) => Err(self.fail(failure)),
-            Err(elapsed) => Err(self.fail(elapsed)),
+            .is_err()
+        {
+            return Err(self.fail("helper link ended"));
+        }
+        match answer.recv_timeout(bound) {
+            Ok(delivered) => self.absorb(owed, delivered),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(self.fail(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "helper call timed out",
+            ))),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(self.fail("helper link ended")),
         }
     }
 
-    /// Keep what `response` to `request` says of the worker, and hand the
-    /// caller the rest.
-    fn absorb(&mut self, request: &Request, response: Response, image: Vec<u8>) -> Result<Answer> {
+    /// Keep what the answer `delivered` says of the worker that the I/O
+    /// thread did not keep already, and hand the caller the rest.
+    fn absorb(&mut self, owed: Owed, delivered: Delivered) -> Result<Answer> {
+        let Delivered {
+            response,
+            image,
+            received,
+        } = delivered;
         let Response {
             context,
             error: reason,
             failure,
-            video,
+            // A capture's unit went to the queue, in its order.
+            video: _,
             submitted,
-            cursor,
-            pending,
+            // The I/O thread keeps the pointer and the units pending.
+            cursor: _,
+            pending: _,
             double_click,
             caps,
             h265,
             adapter,
+            retuned: _,
             modes,
             restored,
             shape_serial,
             shape,
+            presented_ago_us,
+            presented_count,
         } = response;
-        self.pending = pending as usize;
         // Only a capture's answer says whether it left the tick armed (it
         // found nothing new, or an encoder not yet asking for input); absent,
-        // as every failure and every helper before protocol 10 answers, the
-        // tick was spent.
-        if matches!(request, Request::Video { submit: true, .. }) {
+        // as every failure answers, the tick was spent, on the picture the
+        // answer dates if its source could.
+        if owed.capture.is_some() {
             self.submitted = submitted.unwrap_or(true);
+            self.armed = (!self.submitted).then_some((received, self.keyframe));
+            self.presented = self
+                .submitted
+                .then(|| presented_at(presented_ago_us, presented_count, received))
+                .flatten();
         }
         if let Some(reason) = reason {
-            // Thread C turns H.265 off for this process on such a failure; the
-            // answer kept for this GPU goes too, so nothing reuses it.
-            if failure
-                == Some(FailureKind::EncoderFailed {
-                    codec: VideoCodec::H265,
-                })
-                && let Some(adapter) = &self.adapter
-            {
-                H265_ANSWERS.lock().forget(adapter);
-            }
-            return Err(match failure {
-                Some(kind) => BackendError::new(kind, reason).into(),
-                None => error(reason),
-            });
+            return Err(self.failure(reason, failure));
         }
-        if request.reports_context() {
+        if owed.reports_context {
             self.context = context;
-        }
-        let applied = matches!(request, Request::Input { .. }) && cursor.is_some();
-        if request.observes_cursor() || applied {
-            self.cursor = cursor;
-        }
-        if request.observes_cursor()
-            && let Some(serial) = shape_serial
-        {
-            self.shape_serial = serial;
         }
         self.double_click = double_click.or(self.double_click);
         if let Some(caps) = caps {
@@ -223,13 +261,31 @@ impl<T: Transport> RemoteBackend<T> {
         }
         Ok(Answer {
             image,
-            video,
             h265,
             adapter,
             modes,
             restored,
+            shape_serial,
             shape,
         })
+    }
+
+    /// The worker's failure `reason`, of the kind it said. Thread C turns
+    /// H.265 off for this process on an H.265 encoder's; the answer kept for
+    /// this GPU goes too, so nothing reuses it.
+    fn failure(&self, reason: String, failure: Option<FailureKind>) -> std::io::Error {
+        if failure
+            == Some(FailureKind::EncoderFailed {
+                codec: VideoCodec::H265,
+            })
+            && let Some(adapter) = &self.adapter
+        {
+            H265_ANSWERS.lock().forget(adapter);
+        }
+        match failure {
+            Some(kind) => BackendError::new(kind, reason).into(),
+            None => error(reason),
+        }
     }
 
     /// Whether the worker encodes H.265: what a worker on the GPU and driver
@@ -238,7 +294,7 @@ impl<T: Transport> RemoteBackend<T> {
     /// its probe names, and only then. A call that fails says no, and keeps
     /// nothing.
     fn h265(&mut self) -> bool {
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let named = self
             .call(Request::Adapter {})
             .ok()
@@ -273,48 +329,45 @@ impl<T: Transport> RemoteBackend<T> {
         h265
     }
 
+    /// The link is lost: every later call fails, and the I/O thread stops.
     fn fail(
         &mut self,
         failure: impl Into<Box<dyn std::error::Error + Send + Sync>>,
     ) -> std::io::Error {
         self.failed = true;
-        self.cursor = None;
-        self.pending = 0;
-        self.pipe.take();
+        self.link.close();
         disconnected(failure)
     }
 
-    fn video(
-        &mut self,
-        expected: &DesktopContext,
-        submit: bool,
-        keyframe: bool,
-        wait: std::time::Duration,
-    ) -> Result<Option<crate::EncodedFrame>> {
-        let answer = self.call(Request::Video {
-            expected: expected.clone(),
-            codec: self.codec,
-            submit,
-            keyframe,
-            rate: self.rate,
-            wait_ms: u32::try_from(wait.as_millis())
-                .unwrap_or(u32::MAX)
-                .min(DRAIN_WAIT_MAX_MS),
-        })?;
-        Ok(answer.video.map(|format| crate::EncodedFrame {
-            format,
-            bytes: answer.image,
-        }))
+    /// Fail when the I/O thread lost the link, as a call then would.
+    fn check_link(&mut self) -> Result<()> {
+        if self.failed {
+            return Err(disconnected("helper disconnected; restart desktop sharing"));
+        }
+        if self.link.shared.lock().lost {
+            return Err(self.fail("helper link ended"));
+        }
+        Ok(())
+    }
+
+    /// Tell the worker whether thread C wants video, once per change. The
+    /// worker drops the tick its last capture armed when the stream stops,
+    /// and its capture thread stops looking, so the arming goes here too:
+    /// the first tick after a resume captures, as in process.
+    fn stream(&mut self, on: bool) {
+        if on != self.streaming && self.call(Request::Stream { on }).is_ok() {
+            self.streaming = on;
+            self.armed = None;
+        }
     }
 }
 
-/// What one response carried for its caller alone; what the worker holds
-/// across calls, the backend keeps.
+/// What one answer carried for its caller alone; what the worker holds
+/// across calls, the backend or its I/O thread keeps.
 struct Answer {
-    /// The unit or still after the response; empty when it has none.
+    /// The still or the shape's bitmap after the answer; empty when it has
+    /// none.
     image: Vec<u8>,
-    /// In a `Video` response that drained a unit: `image`'s format.
-    video: Option<crate::VideoFormat>,
     /// In the `H265` response.
     h265: Option<bool>,
     /// In the `Adapter` response, and in the `H265` response when its
@@ -324,6 +377,8 @@ struct Answer {
     modes: Option<ModeList>,
     /// In the `RestoreDisplayMode` response.
     restored: Option<bool>,
+    /// The newest shape's number, in an answer that observed the pointer.
+    shape_serial: Option<u64>,
     /// In the `CursorShape` response: `image`'s shape.
     shape: Option<ShapeHeader>,
 }
@@ -332,8 +387,8 @@ fn disconnected(failure: impl Into<Box<dyn std::error::Error + Send + Sync>>) ->
     std::io::Error::new(std::io::ErrorKind::NotConnected, failure)
 }
 #[deny(clippy::missing_trait_methods)]
-impl<T: Transport> Backend for RemoteBackend<T> {
-    fn configure_video(&mut self, limits: crate::VideoLimits, nominal_fps: u32) -> Result<()> {
+impl Backend for RemoteBackend {
+    fn configure_video(&mut self, limits: VideoLimits, nominal_fps: u32) -> Result<()> {
         limits.validate()?;
         self.call(Request::ConfigureVideo {
             limits,
@@ -353,39 +408,48 @@ impl<T: Transport> Backend for RemoteBackend<T> {
     fn capture(&mut self) -> Result<Vec<u8>> {
         Ok(self.call(Request::Capture {})?.image)
     }
+    /// The pointer as the worker last pushed it, or an answer that observed
+    /// it carried it, whichever came last, on the desktop the worker last
+    /// reported.
     fn cursor(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorPosition>> {
-        if self.failed {
-            return Err(disconnected("helper disconnected; restart desktop sharing"));
-        }
+        self.check_link()?;
+        let mut pushed = self.link.shared.lock();
+        pushed.cursor_changed = false;
         if self.context.as_ref() != Some(expected) {
             return Err(error("helper cursor belongs to a different desktop"));
         }
-        Ok(self.cursor)
+        Ok(pushed.cursor)
+    }
+    /// The worker pushed a pointer, or a shape's number, other than the one
+    /// thread C last read; the I/O thread woke thread C for it.
+    fn cursor_changed(&self) -> bool {
+        !self.failed && self.link.shared.lock().cursor_changed
     }
     /// The first call asks the worker to read shapes from then on; later
-    /// ones cross the pipe only when an answer numbered a newer shape. The
+    /// ones cross the pipe only when the worker numbered a newer shape. The
     /// worker's answer is checked here: a shape out of bounds, or a bitmap
     /// of another length, is refused as `InvalidData`, and not asked again.
     fn cursor_shape(&mut self, expected: &DesktopContext) -> Result<Option<crate::CursorShape>> {
-        if self.failed {
-            return Err(disconnected("helper disconnected; restart desktop sharing"));
-        }
+        self.check_link()?;
         if self.context.as_ref() != Some(expected) {
             return Err(error("helper cursor belongs to a different desktop"));
         }
-        if self.shapes && self.shape_serial == self.fetched_shape {
+        if self.shapes && self.link.shared.lock().shape_serial == self.fetched_shape {
             return Ok(None);
         }
         // Until an ask is answered, the worker may not read shapes yet: the
         // next tick asks again.
         let answer = self.call(Request::CursorShape {})?;
         self.shapes = true;
-        self.fetched_shape = self.shape_serial;
+        self.fetched_shape = answer.shape_serial.unwrap_or(0);
         answer
             .shape
             .map(|shape| shape.shape(answer.image))
             .transpose()
     }
+    /// Submit one capture on the worker, then hand thread C the oldest unit
+    /// the worker finished: one it pushed before the answer, or the one the
+    /// answer carried.
     fn capture_video(
         &mut self,
         expected: &DesktopContext,
@@ -393,19 +457,50 @@ impl<T: Transport> Backend for RemoteBackend<T> {
         keyframe: bool,
         rate: crate::VideoRate,
     ) -> Result<Option<crate::EncodedFrame>> {
-        self.codec = codec;
-        self.rate = rate;
-        self.video(expected, true, keyframe, std::time::Duration::ZERO)
+        self.keyframe = keyframe;
+        self.call(Request::Video {
+            expected: expected.clone(),
+            codec,
+            keyframe,
+            rate,
+        })?;
+        self.drain_video(expected, Duration::ZERO)
     }
+    /// The oldest unit the worker pushed, with no pipe call; one of another
+    /// desktop is dropped, and a failure the worker pushed is returned in its
+    /// order. Never waits.
     fn drain_video(
         &mut self,
         expected: &DesktopContext,
-        wait: std::time::Duration,
+        _wait: Duration,
     ) -> Result<Option<crate::EncodedFrame>> {
-        self.video(expected, false, false, wait)
+        self.check_link()?;
+        let taken = {
+            let mut pushed = self.link.shared.lock();
+            loop {
+                match pushed.queue.pop_front() {
+                    Some(Queued::Unit { generation, frame })
+                        if generation == expected.generation =>
+                    {
+                        break Ok(Some(frame));
+                    }
+                    // Captured for a desktop thread C no longer expects.
+                    Some(Queued::Unit { .. }) => {}
+                    Some(Queued::Failed { error, failure }) => break Err((error, failure)),
+                    None => break Ok(None),
+                }
+            }
+        };
+        taken.map_err(|(reason, failure)| self.failure(reason, failure))
     }
+    /// What the worker's encoder holds, as its last answer or push said,
+    /// and what it pushed that thread C has not taken.
     fn pending_video(&self) -> usize {
-        self.pending
+        if self.failed {
+            return 0;
+        }
+        let pushed = self.link.shared.lock();
+        pushed.reported + pushed.queue.len()
     }
     /// The helper's answer carries no bound of its encoder's own: the
     /// Windows encoder it runs has none below `pending_video`'s.
@@ -414,12 +509,38 @@ impl<T: Transport> Backend for RemoteBackend<T> {
     }
     /// What the last capture's answer said: a worker whose source had no new
     /// picture, or whose encoder had not asked for input, leaves the tick
-    /// armed, and thread C polls it.
+    /// armed, and tells this backend once its source wants it.
     fn submitted_video(&self) -> bool {
         self.submitted
     }
-    fn capture_idle_until(&self, _: Option<std::time::Instant>) -> Option<std::time::Instant> {
-        None
+    /// The present the last capture's answer dated, by its age when the
+    /// worker wrote it, taken from this answer's receipt: a little later than
+    /// the present, by the answer's way through the pipe.
+    fn submitted_picture(&self) -> Option<crate::Presented> {
+        self.presented
+    }
+    /// As a source that pushes: none while the tick is spent (the next tick
+    /// captures), once the worker said its source wants the armed tick, or
+    /// once the link is lost (the next call says so); otherwise the
+    /// liveness interval after the answer that armed it, or `keyframe_due`
+    /// if sooner, unless the capture that armed it asked for a keyframe
+    /// already: the worker's encoder keeps that, and says when it can send
+    /// it. The worker's own liveness repeat comes due before the interval
+    /// and tells this backend; the interval is the backstop.
+    fn capture_idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        if self.failed {
+            return None;
+        }
+        let (armed, keyframe) = self.armed?;
+        let pushed = self.link.shared.lock();
+        if pushed.fresh || pushed.lost {
+            return None;
+        }
+        let until = armed + LIVENESS_INTERVAL;
+        Some(match keyframe_due {
+            Some(due) if !keyframe => due.min(until),
+            Some(_) | None => until,
+        })
     }
     /// What the worker said it can do when it started; it probes the GPU of
     /// the display it captures, in the interactive session, which the
@@ -438,29 +559,30 @@ impl<T: Transport> Backend for RemoteBackend<T> {
             },
         })
     }
-    /// The worker wakes nothing here: its output is drained by polling.
-    fn bind(&mut self, _waker: Waker) {}
+    /// The I/O thread wakes thread C for each unit, failure and fresh
+    /// picture the worker pushes, and for a pointer that changed; the
+    /// worker streams from now on.
+    fn bind(&mut self, waker: Waker) {
+        self.link.shared.lock().waker = Some(waker);
+        self.stream(true);
+    }
     fn capture_consistent(&mut self, expected: &DesktopContext) -> Result<Vec<u8>> {
         crate::backend::capture_checked(self, expected, Self::capture)
     }
-    fn drain_poll(&self) -> Option<std::time::Duration> {
-        Some(crate::DRAIN_POLL)
-    }
-    /// The worker's capture is polled as its output is.
-    fn capture_poll(&self) -> Option<std::time::Duration> {
-        self.drain_poll()
-    }
-    /// The helper's answer carries no present time (protocol 10): its
-    /// pictures pace on the grid.
-    fn submitted_picture(&self) -> Option<crate::Presented> {
+    /// The worker pushes each unit as it finishes.
+    fn drain_poll(&self) -> Option<Duration> {
         None
     }
-    /// Nothing to tell the worker, which the protocol has no word for: its
-    /// encoder's capture thread, armed by a request that found nothing new,
-    /// stops looking once no request armed it again for 2 s
-    /// (`present_waiter::ASKED_WITHIN`), and the first request after the
-    /// pause looks past any picture it published meanwhile.
-    fn video_paused(&mut self, _paused: bool) {}
+    /// The worker says when its source wants an armed tick.
+    fn capture_poll(&self) -> Option<Duration> {
+        None
+    }
+    /// The worker stops streaming while every viewer is paused: its capture
+    /// thread stops looking, and it pushes neither the pointer nor fresh
+    /// pictures until thread C resumes.
+    fn video_paused(&mut self, paused: bool) {
+        self.stream(!paused);
+    }
     fn input(&mut self, input: &Input) -> Result<()> {
         let context = self
             .context
@@ -522,7 +644,8 @@ impl<T: Transport> Backend for RemoteBackend<T> {
         Ok(answer.restored.unwrap_or(false))
     }
 }
-impl<T: Transport> Drop for RemoteBackend<T> {
+impl Drop for RemoteBackend {
+    /// Close the worker, then stop the I/O thread (`Link`'s drop).
     fn drop(&mut self) {
         if !self.failed {
             let _ = self.call(Request::Close {});
@@ -530,617 +653,439 @@ impl<T: Transport> Drop for RemoteBackend<T> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{oop::server::NamedAdapter, platform::synthetic::Probe};
-    use tokio::io::DuplexStream;
-
-    /// A `RemoteBackend` over an in-memory pipe whose worker answers each
-    /// request with `answer` and an empty image, until `Close`.
-    fn remote(
-        answer: impl Fn(&Request) -> Response + Send + 'static,
-    ) -> (RemoteBackend<DuplexStream>, std::thread::JoinHandle<()>) {
-        let (pipe, helper) = scripted(answer);
-        (
-            RemoteBackend::new(runtime(), pipe, BackendCaps::default()),
-            helper,
-        )
+/// The I/O thread, and what it shares with thread C.
+struct Link {
+    shared: Arc<Mutex<Pushed>>,
+    calls: tokio::sync::mpsc::Sender<Call>,
+    stop: CancellationToken,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Link {
+    /// Start the I/O thread, which drives `pipe` on `runtime`.
+    fn start<T: Transport>(runtime: tokio::runtime::Runtime, pipe: T) -> Result<Self> {
+        let shared = Arc::new(Mutex::new(Pushed::default()));
+        // One call at a time: thread C waits on each.
+        let (calls, incoming) = tokio::sync::mpsc::channel(1);
+        let stop = CancellationToken::new();
+        let thread = std::thread::Builder::new()
+            .name("pb-mapper-helper-link".into())
+            .spawn({
+                let (shared, stop) = (shared.clone(), stop.clone());
+                move || runtime.block_on(run(pipe, incoming, &shared, &stop))
+            })?;
+        Ok(Self {
+            shared,
+            calls,
+            stop,
+            thread: Some(thread),
+        })
     }
 
-    /// [`remote`], started: its first request is `Start`.
-    fn started(
-        answer: impl Fn(&Request) -> Response + Send + 'static,
-    ) -> (RemoteBackend<DuplexStream>, std::thread::JoinHandle<()>) {
-        let (pipe, helper) = scripted(answer);
-        let backend =
-            RemoteBackend::start(runtime(), pipe, 1, None, BackendCaps::default()).unwrap();
-        (backend, helper)
-    }
-
-    /// The host's end of an in-memory pipe whose worker answers each request
-    /// with `answer` and an empty image, until `Close`.
-    fn scripted(
-        answer: impl Fn(&Request) -> Response + Send + 'static,
-    ) -> (DuplexStream, std::thread::JoinHandle<()>) {
-        let (pipe, mut worker) = tokio::io::duplex(1 << 16);
-        let helper = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            runtime.block_on(async move {
-                loop {
-                    let request: Request = ipc::read_json(&mut worker).await.unwrap();
-                    ipc::write_record(&mut worker, &answer(&request), &[])
-                        .await
-                        .unwrap();
-                    if matches!(request, Request::Close {}) {
-                        return;
-                    }
-                }
-            });
-        });
-        (pipe, helper)
-    }
-
-    fn runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-    }
-
-    fn desktop() -> DesktopContext {
-        DesktopContext {
-            display: crate::Display {
-                id: 1,
-                name: "helper".into(),
-                x: 0,
-                y: 0,
-                width: 64,
-                height: 64,
-            },
-            generation: 1,
-            desktop: crate::DesktopKind::Ordinary,
+    /// Stop the I/O thread and wait for it, which ends at once: nothing it
+    /// waits on outlives the stop.
+    fn close(&mut self) {
+        self.stop.cancel();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
-    }
-
-    /// The desktop kind crosses the pipe as it always did.
-    #[test]
-    fn the_desktop_kind_crosses_the_pipe_as_its_string() {
-        let secure = DesktopContext {
-            desktop: crate::DesktopKind::Secure,
-            ..desktop()
-        };
-        assert_eq!(
-            serde_json::to_string(&secure).unwrap(),
-            r#"{"display":{"id":1,"name":"helper","x":0,"y":0,"width":64,"height":64},"generation":1,"desktop":"secure"}"#
-        );
-        let ordinary: DesktopContext = serde_json::from_str(
-            r#"{"display":{"id":1,"name":"helper","x":0,"y":0,"width":64,"height":64},"generation":1,"desktop":"ordinary"}"#,
-        )
-        .unwrap();
-        assert_eq!(ordinary, desktop());
-    }
-
-    /// A `RemoteBackend` started over an in-memory pipe to a worker that
-    /// serves a synthetic display on `probe` through `server::serve`, as the
-    /// helper's worker does, on the GPU `adapter` names; `seen` is shown
-    /// each request first.
-    fn synthetic(
-        probe: &Probe,
-        journal: std::path::PathBuf,
-        adapter: fn(&crate::Display) -> Option<NamedAdapter>,
-        mut seen: impl FnMut(&Request) + Send + 'static,
-    ) -> (RemoteBackend<DuplexStream>, std::thread::JoinHandle<()>) {
-        use crate::{
-            native::PlatformBackend,
-            platform::{Platform, synthetic::Synthetic},
-        };
-        let (pipe, mut worker) = tokio::io::duplex(1 << 16);
-        let worker_probe = probe.clone();
-        let helper = std::thread::spawn(move || {
-            runtime().block_on(async move {
-                // The service reads the host's `Start`; the worker answers.
-                let Request::Start { display_device, .. } =
-                    ipc::read_json(&mut worker).await.unwrap()
-                else {
-                    panic!("expected Start");
-                };
-                let parts = Synthetic::<false>::open(&worker_probe, &Probe::display()).unwrap();
-                let mut backend = PlatformBackend::from_parts(
-                    std::sync::Arc::new(worker_probe),
-                    parts,
-                    crate::modes::Journal::in_dir(Some(journal)),
-                );
-                let mut state = super::super::server::ServeState::new(adapter);
-                super::super::server::exchange(&mut worker, 1, display_device, |request| {
-                    seen(&request);
-                    let answer = super::super::server::serve(&mut backend, request, &mut state)
-                        .unwrap_or_else(|failure| (Response::failed(&failure, 0), vec![]));
-                    async move { Ok(answer) }
-                })
-                .await
-                .unwrap();
-            });
-        });
-        let backend = RemoteBackend::start(
-            runtime(),
-            pipe,
-            1,
-            Some(Probe::display().name),
-            BackendCaps::default(),
-        )
-        .unwrap();
-        (backend, helper)
-    }
-
-    /// Protocol 8 over a pipe to a worker serving a synthetic display: its
-    /// `Start` answer says what it can do, H.265 is asked only for a viewer
-    /// that decodes it, the pointer's shape crosses once per new shape, its
-    /// modes cross, a change and its restore apply there, and a failure
-    /// reads back as the kind the worker gave it.
-    #[test]
-    fn protocol_8_carries_caps_shapes_modes_and_failure_kinds() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        let (probe, modes) = Probe::with_modes();
-        let journal = pb_mapper_core::test_support::TempPath::new("desktop-oop");
-        let asked_h265 = Arc::new(AtomicUsize::new(0));
-        let asked_shape = Arc::new(AtomicUsize::new(0));
-        let (asked, asked_for_shape) = (asked_h265.clone(), asked_shape.clone());
-        let (mut backend, helper) = synthetic(
-            &probe,
-            journal.to_path_buf(),
-            |_| None,
-            move |request| {
-                if matches!(request, Request::H265 {}) {
-                    asked.fetch_add(1, Ordering::SeqCst);
-                }
-                if matches!(request, Request::CursorShape {}) {
-                    asked_for_shape.fetch_add(1, Ordering::SeqCst);
-                }
-            },
-        );
-        let described = backend.describe(false).unwrap();
-        assert!(described.caps.display_modes && !described.caps.h265);
-        assert_eq!(described.caps.os, Some(crate::HostOs::Linux));
-        assert_eq!(asked_h265.load(Ordering::SeqCst), 0);
-        backend.describe(true).unwrap();
-        assert_eq!(asked_h265.load(Ordering::SeqCst), 1);
-        assert!(described.caps.cursor_shapes);
-
-        // The first ask turns the worker's shape reads on; after it, only a
-        // newer shape crosses again. A pointer on another display is not
-        // read: its shape crosses once it is back on the shared one.
-        let display = Probe::display();
-        probe.point(display.x - 1, 1);
-        let shape = |kind| crate::CursorShape::new(kind, 2, 2, (1, 1), vec![3; 16]).unwrap();
-        probe.set_shape(shape(crate::CursorKind::Ibeam));
-        let context = backend.context().unwrap();
-        assert_eq!(backend.cursor_shape(&context).unwrap(), None);
-        probe.point(display.x + 1, 1);
-        backend.context().unwrap();
-        assert_eq!(
-            backend.cursor_shape(&context).unwrap(),
-            Some(shape(crate::CursorKind::Ibeam))
-        );
-        backend.context().unwrap();
-        assert_eq!(backend.cursor_shape(&context).unwrap(), None);
-        probe.set_shape(shape(crate::CursorKind::Custom));
-        backend.context().unwrap();
-        assert_eq!(
-            backend.cursor_shape(&context).unwrap(),
-            Some(shape(crate::CursorKind::Custom))
-        );
-        assert_eq!(asked_shape.load(Ordering::SeqCst), 3);
-
-        let context = backend.context().unwrap();
-        let listed = backend.display_modes(&context).unwrap().unwrap();
-        assert_eq!(listed.supported, modes);
-        backend.set_display_mode(&context, modes[1]).unwrap();
-        assert_eq!(backend.display().unwrap().width, modes[1].width);
-        assert!(backend.restore_display_mode().unwrap());
-        assert_eq!(backend.display().unwrap().width, Probe::display().width);
-
-        probe.lose(true);
-        let lost = backend.context().unwrap_err();
-        assert_eq!(
-            crate::failure_kind(&lost),
-            Some(crate::FailureKind::DisplayLost)
-        );
-        drop(backend);
-        helper.join().unwrap();
-    }
-
-    /// Protocol 10 over a pipe to a worker serving a synthetic display: a
-    /// capture that found nothing new says so, and leaves thread C's tick
-    /// armed, while still collecting what the encoder finished.
-    #[test]
-    fn protocol_10_says_when_a_capture_found_nothing_new() {
-        let probe = Probe::default();
-        let journal = pb_mapper_core::test_support::TempPath::new("desktop-oop-still");
-        let (mut backend, helper) = synthetic(&probe, journal.to_path_buf(), |_| None, |_| {});
-        let context = backend.context().unwrap();
-        backend
-            .configure_video(crate::VideoLimits::for_viewer(60.0), 60)
-            .unwrap();
-        let rate = crate::VideoRate {
-            bitrate: crate::qos::ENCODER_BITRATE_MIN,
-            pace_fps: 60,
-        };
-        let capture = |backend: &mut RemoteBackend<_>| {
-            let unit = backend
-                .capture_video(&context, crate::VideoCodec::H264, false, rate)
-                .unwrap();
-            (unit, backend.submitted_video())
-        };
-        let (first, submitted) = capture(&mut backend);
-        assert!(first.is_none() && submitted);
-        probe.still(true);
-        let (drained, submitted) = capture(&mut backend);
-        assert!(drained.is_some() && !submitted);
-        // A drain says nothing of a tick.
-        backend
-            .drain_video(&context, std::time::Duration::ZERO)
-            .unwrap();
-        assert!(!backend.submitted_video());
-        probe.still(false);
-        let (_, submitted) = capture(&mut backend);
-        assert!(submitted);
-        drop(backend);
-        helper.join().unwrap();
-    }
-
-    /// `submitted` crosses only when false: a capture whose answer has none,
-    /// as no worker before protocol 10 sent one, spent the tick.
-    #[test]
-    fn an_absent_submitted_means_the_tick_was_spent() {
-        assert!(
-            !serde_json::to_string(&Response::default())
-                .unwrap()
-                .contains("submitted")
-        );
-        let still = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let worker_still = still.clone();
-        let reported = desktop();
-        let (mut backend, helper) = remote(move |request| {
-            let capture = matches!(request, Request::Video { submit: true, .. });
-            let still = worker_still.load(std::sync::atomic::Ordering::SeqCst);
-            Response {
-                context: Some(reported.clone()),
-                submitted: (capture && still).then_some(false),
-                ..Response::default()
-            }
-        });
-        let rate = crate::VideoRate {
-            bitrate: 4_000_000,
-            pace_fps: 60,
-        };
-        let codec = crate::VideoCodec::H264;
-        backend
-            .capture_video(&desktop(), codec, false, rate)
-            .unwrap();
-        assert!(!backend.submitted_video());
-        still.store(false, std::sync::atomic::Ordering::SeqCst);
-        backend
-            .capture_video(&desktop(), codec, false, rate)
-            .unwrap();
-        assert!(backend.submitted_video());
-        drop(backend);
-        helper.join().unwrap();
-    }
-
-    /// Protocol 12 over a pipe to a worker serving a synthetic display: its
-    /// `Start` answer says it scrolls in 1/120 of a notch, which the host
-    /// lists as `wheel_hires`, and a scroll reaches its injector as sent.
-    #[test]
-    fn protocol_12_carries_scrolls_and_the_hires_wheel() {
-        let probe = Probe::default();
-        let journal = pb_mapper_core::test_support::TempPath::new("desktop-oop-scroll");
-        let (mut backend, helper) = synthetic(&probe, journal.to_path_buf(), |_| None, |_| {});
-        let caps = backend.describe(false).unwrap().caps;
-        assert!(caps.hires_wheel);
-        assert!(caps.values().iter().any(|listed| listed == "wheel_hires"));
-        let context = backend.context().unwrap();
-        for (vertical, continuous) in [(-7, true), (120, false)] {
-            let scroll = Input::Scroll {
-                horizontal: 3,
-                vertical,
-                continuous,
-            };
-            backend.input_in_context(&context, &scroll).unwrap();
-        }
-        assert_eq!(probe.scrolls(), [(3, -7, true), (3, 120, false)]);
-        // Both ends hold a scroll to its bound.
-        let too_far = Input::Scroll {
-            horizontal: 0,
-            vertical: 12_001,
-            continuous: true,
-        };
-        assert!(backend.input_in_context(&context, &too_far).is_err());
-        assert_eq!(probe.scrolls().len(), 2);
-        drop(backend);
-        helper.join().unwrap();
-    }
-
-    /// Protocol 11 over a pipe to workers serving a synthetic display, one
-    /// per session as the helper starts them. A worker names its GPU only
-    /// for a viewer that decodes H.265. The first on a GPU is asked about
-    /// H.265; a later one on the same GPU and driver is not, and says what
-    /// the first's probe said. A new driver is asked again, and so is every
-    /// worker that names no GPU, or whose answer was no probe's of it.
-    #[test]
-    fn a_later_worker_on_the_same_gpu_and_driver_is_not_asked_about_h265() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        let probe = Probe::default();
-        let journal = pb_mapper_core::test_support::TempPath::new("desktop-oop-h265-kept");
-        let named = Arc::new(AtomicUsize::new(0));
-        let asked = Arc::new(AtomicUsize::new(0));
-        let session = |adapter: fn(&crate::Display) -> Option<NamedAdapter>| {
-            let (named, asked) = (named.clone(), asked.clone());
-            let (mut backend, helper) =
-                synthetic(&probe, journal.to_path_buf(), adapter, move |request| {
-                    match request {
-                        Request::Adapter {} => named.fetch_add(1, Ordering::SeqCst),
-                        Request::H265 {} => asked.fetch_add(1, Ordering::SeqCst),
-                        _ => 0,
-                    };
-                });
-            // The synthetic display encodes H.264 alone.
-            assert!(!backend.describe(false).unwrap().caps.h265);
-            assert!(!backend.describe(true).unwrap().caps.h265);
-            drop(backend);
-            helper.join().unwrap();
-        };
-        // An AMD GPU, on one driver and then on the next, as the worker's
-        // probe of it answered; then on a third, found after a probe that
-        // had found no GPU for the display.
-        fn gpu(driver: u64) -> Option<AdapterKey> {
-            AdapterKey::new(0x1002, 0x744c, 0x5315_1849, 0xc8, driver)
-        }
-        let first_driver: fn(&crate::Display) -> Option<NamedAdapter> = |_| {
-            Some(NamedAdapter {
-                key: gpu(1)?,
-                h265: Some(false),
-            })
-        };
-        let next_driver: fn(&crate::Display) -> Option<NamedAdapter> = |_| {
-            Some(NamedAdapter {
-                key: gpu(2)?,
-                h265: Some(false),
-            })
-        };
-        let unprobed: fn(&crate::Display) -> Option<NamedAdapter> = |_| {
-            Some(NamedAdapter {
-                key: gpu(3)?,
-                h265: None,
-            })
-        };
-        session(first_driver);
-        assert_eq!(asked.load(Ordering::SeqCst), 1);
-        session(first_driver);
-        assert_eq!(asked.load(Ordering::SeqCst), 1, "the same GPU and driver");
-        session(next_driver);
-        assert_eq!(asked.load(Ordering::SeqCst), 2, "a new driver");
-        session(next_driver);
-        assert_eq!(asked.load(Ordering::SeqCst), 2);
-        session(unprobed);
-        session(unprobed);
-        assert_eq!(asked.load(Ordering::SeqCst), 4, "a no without a probe");
-        session(|_| None);
-        session(|_| None);
-        assert_eq!(asked.load(Ordering::SeqCst), 6, "no GPU named");
-        assert_eq!(named.load(Ordering::SeqCst), 8, "once per H.265 viewer");
-    }
-
-    /// An answer of yes is kept as a no is, until that GPU's H.265 encoder
-    /// fails, as thread C then turns H.265 off: the next worker on it is
-    /// asked again.
-    #[test]
-    fn an_h265_encoder_failure_drops_the_answer_kept_for_its_gpu() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        // An Intel GPU on driver 31.0.101.5333.
-        let adapter = AdapterKey::new(
-            0x8086,
-            0x56a0,
-            0x1020_8086,
-            8,
-            (31 << 48) | (101 << 16) | 5333,
-        );
-        let encoder_failed = FailureKind::EncoderFailed {
-            codec: VideoCodec::H265,
-        };
-        let asked = Arc::new(AtomicUsize::new(0));
-        let session = || {
-            let asked = asked.clone();
-            started(move |request| {
-                let mut response = Response {
-                    context: Some(desktop()),
-                    ..Response::default()
-                };
-                match request {
-                    Request::Adapter {} => response.adapter = adapter,
-                    Request::H265 {} => {
-                        asked.fetch_add(1, Ordering::SeqCst);
-                        response.h265 = Some(true);
-                        response.adapter = adapter;
-                    }
-                    Request::Video { .. } => {
-                        response.error = Some("the HEVC encoder took no input".into());
-                        response.failure = Some(encoder_failed);
-                    }
-                    _ => {}
-                }
-                response
-            })
-        };
-        let rate = crate::VideoRate {
-            bitrate: 4_000_000,
-            pace_fps: 60,
-        };
-        for kept in [false, true] {
-            let (mut backend, helper) = session();
-            assert!(backend.describe(true).unwrap().caps.h265);
-            assert_eq!(asked.load(Ordering::SeqCst), 1, "kept: {kept}");
-            drop(backend);
-            helper.join().unwrap();
-        }
-        let (mut backend, helper) = session();
-        assert!(backend.describe(true).unwrap().caps.h265);
-        let Err(failed) = backend.capture_video(&desktop(), VideoCodec::H265, true, rate) else {
-            panic!("the worker's encoder failed");
-        };
-        assert_eq!(crate::failure_kind(&failed), Some(encoder_failed));
-        drop(backend);
-        helper.join().unwrap();
-        let (mut backend, helper) = session();
-        assert!(backend.describe(true).unwrap().caps.h265);
-        assert_eq!(asked.load(Ordering::SeqCst), 2);
-        drop(backend);
-        helper.join().unwrap();
-    }
-
-    /// The process keeps the answers of at most eight GPUs, dropping the
-    /// oldest; a GPU answered again replaces its answer.
-    #[test]
-    fn the_kept_h265_answers_are_bounded() {
-        let adapter = |device| AdapterKey::new(0x10de, device, 0, 0, 1).unwrap();
-        let mut answers = H265Answers::new();
-        for device in 0..=8 {
-            answers.put(adapter(device), device % 2 == 0);
-        }
-        assert_eq!(answers.0.len(), H265_ANSWERS_KEPT);
-        assert_eq!(answers.get(&adapter(0)), None);
-        for device in 1..=8 {
-            assert_eq!(answers.get(&adapter(device)), Some(device % 2 == 0));
-        }
-        answers.put(adapter(1), true);
-        assert_eq!(answers.0.len(), H265_ANSWERS_KEPT);
-        assert_eq!(answers.get(&adapter(1)), Some(true));
-        assert_eq!(answers.get(&adapter(2)), Some(true));
-        answers.forget(&adapter(1));
-        assert_eq!(answers.get(&adapter(1)), None);
-    }
-
-    /// A lost pipe fails the call that met it and every later one with
-    /// `NotConnected`, which ends the session; nothing is sent again.
-    #[test]
-    fn a_lost_helper_fails_every_later_call_as_not_connected() {
-        let (pipe, worker) = tokio::io::duplex(1 << 16);
-        drop(worker);
-        let mut backend = RemoteBackend::new(runtime(), pipe, BackendCaps::default());
-        let lost = backend.context().unwrap_err();
-        assert_eq!(lost.kind(), std::io::ErrorKind::NotConnected);
-        assert_eq!(crate::failure_kind(&lost), None);
-        for later in [
-            backend.capture().unwrap_err(),
-            backend.cursor(&desktop()).unwrap_err(),
-        ] {
-            assert_eq!(later.kind(), std::io::ErrorKind::NotConnected);
-        }
-    }
-
-    #[test]
-    fn a_helper_error_keeps_the_desktop_and_its_pointer() {
-        let desktop = desktop();
-        let pointer = crate::CursorPosition {
-            x: 3,
-            y: 4,
-            visible: true,
-        };
-        // A helper whose LockWorkStation fails: Input gets an error, Release
-        // and Close report no desktop, Presented reports it without looking
-        // at the pointer, and the rest report both.
-        let reported = desktop.clone();
-        let (mut backend, helper) = remote(move |request| {
-            let mut response = Response::default();
-            match request {
-                Request::Input { .. } => response.error = Some("lock failed".into()),
-                Request::Release {} | Request::Close {} => {}
-                Request::Presented { .. } => response.context = Some(reported.clone()),
-                _ => {
-                    response.context = Some(reported.clone());
-                    response.cursor = Some(pointer);
-                }
-            }
-            response
-        });
-        assert_eq!(backend.context().unwrap(), desktop);
-        assert_eq!(backend.cursor(&desktop).unwrap(), Some(pointer));
-        // Neither a failed lock nor a release says the desktop changed, and
-        // a lease renewal does not observe the pointer.
-        assert!(backend.input_in_context(&desktop, &Input::Lock {}).is_err());
-        assert_eq!(backend.cursor(&desktop).unwrap(), Some(pointer));
-        backend.release();
-        assert_eq!(backend.cursor(&desktop).unwrap(), Some(pointer));
-        backend.presented(&desktop).unwrap();
-        assert_eq!(backend.cursor(&desktop).unwrap(), Some(pointer));
-        drop(backend);
-        helper.join().unwrap();
-    }
-
-    /// A shape whose bitmap is not the size its header gives is refused,
-    /// and not asked for again until the worker numbers a newer one.
-    #[test]
-    fn a_misfit_helper_shape_is_refused() {
-        let desktop = desktop();
-        let reported = desktop.clone();
-        let (mut backend, helper) = remote(move |request| Response {
-            context: Some(reported.clone()),
-            shape_serial: request.observes_cursor().then_some(1),
-            // A pixel's header over the empty record `remote` writes.
-            shape: matches!(request, Request::CursorShape {}).then_some(ShapeHeader {
-                kind: crate::CursorKind::Arrow,
-                width: 1,
-                height: 1,
-                hot_x: 0,
-                hot_y: 0,
-            }),
-            ..Response::default()
-        });
-        backend.context().unwrap();
-        let refused = backend.cursor_shape(&desktop).unwrap_err();
-        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
-        assert_eq!(backend.cursor_shape(&desktop).unwrap(), None);
-        drop(backend);
-        helper.join().unwrap();
-    }
-
-    #[test]
-    fn a_helper_hosted_unit_carries_the_encoder_gop() {
-        // The worker's encoder read back an endless GOP; thread C reports the
-        // GOP of the units it takes from this backend.
-        let (mut backend, helper) = remote(|request| Response {
-            video: matches!(request, Request::Video { .. }).then(|| crate::VideoFormat {
-                codec: crate::VideoCodec::H264,
-                width: 64,
-                height: 64,
-                keyframe: true,
-                gop: u32::MAX,
-                ..crate::VideoFormat::default()
-            }),
-            ..Response::default()
-        });
-        let rate = crate::VideoRate {
-            bitrate: 4_000_000,
-            pace_fps: 60,
-        };
-        let unit = backend
-            .capture_video(&desktop(), crate::VideoCodec::H264, true, rate)
-            .unwrap()
-            .unwrap();
-        assert_eq!(unit.format.gop, u32::MAX);
-        drop(backend);
-        helper.join().unwrap();
     }
 }
+impl Drop for Link {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// One call, handed to the I/O thread.
+struct Call {
+    request: Request,
+    owed: Owed,
+    reply: mpsc::SyncSender<Delivered>,
+}
+/// What the answer to a call changes as the I/O thread receives it, in its
+/// order among the pushes.
+#[derive(Clone, Copy)]
+struct Owed {
+    reports_context: bool,
+    observes_cursor: bool,
+    input: bool,
+    /// A capture of the desktop of this generation: its answer ends the
+    /// arming that a fresh picture answered, and a unit it carries is
+    /// queued for that desktop.
+    capture: Option<u64>,
+    /// `ConfigureVideo`: what the worker pushed before goes unless its
+    /// answer says its encoder stayed open (`retuned: Some(true)`).
+    configures_video: bool,
+}
+/// An answer, as the I/O thread received it.
+struct Delivered {
+    response: Response,
+    image: Vec<u8>,
+    received: Instant,
+}
+
+/// What the worker pushed, kept by the I/O thread for thread C.
+#[derive(Default)]
+struct Pushed {
+    /// Units and failures, in order, until thread C takes them.
+    queue: VecDeque<Queued>,
+    /// The units the worker's encoder holds, as its latest record said.
+    reported: usize,
+    /// The worker's source wants the tick the last capture left armed.
+    fresh: bool,
+    /// The desktop the worker last reported, inside whose display a pushed
+    /// pointer must lie.
+    context: Option<DesktopContext>,
+    cursor: Option<CursorPosition>,
+    /// The newest shape's number the worker reported.
+    shape_serial: u64,
+    /// A pushed pointer changed `cursor` or `shape_serial` since thread C
+    /// last read the pointer.
+    cursor_changed: bool,
+    /// Thread C's wake, once it bound the backend.
+    waker: Option<Waker>,
+    /// The link ended: the pipe closed, or the worker broke the protocol.
+    lost: bool,
+}
+impl Pushed {
+    /// Queue `queued`, which the worker pushed, and wake thread C for it.
+    fn push(&mut self, queued: Queued) -> Result<()> {
+        if self.queue.len() >= QUEUED_MAX {
+            return Err(error("the helper pushed more units than its encoder holds"));
+        }
+        self.queue.push_back(queued);
+        self.wake();
+        Ok(())
+    }
+    fn wake(&self) {
+        if let Some(waker) = &self.waker {
+            waker.wake();
+        }
+    }
+}
+/// A unit or a failure the worker pushed.
+enum Queued {
+    Unit {
+        generation: u64,
+        frame: EncodedFrame,
+    },
+    Failed {
+        error: String,
+        failure: Option<FailureKind>,
+    },
+}
+
+/// The I/O thread: write each call's request, read every record, until
+/// `stop`, the backend's end, a lost pipe or a broken record; then the link
+/// is lost, thread C is woken, and a call still waiting fails.
+async fn run<T: Transport>(
+    pipe: T,
+    mut calls: tokio::sync::mpsc::Receiver<Call>,
+    shared: &Mutex<Pushed>,
+    stop: &CancellationToken,
+) {
+    let (mut reader, mut writer) = tokio::io::split(pipe);
+    // The calls written and not yet answered, oldest first: one at a time.
+    let owed = RefCell::new(VecDeque::new());
+    let requests = async {
+        while let Some(Call {
+            request,
+            owed: effect,
+            reply,
+        }) = calls.recv().await
+        {
+            owed.borrow_mut().push_back((effect, reply));
+            ipc::write_json(&mut writer, &request).await?;
+        }
+        Ok::<_, std::io::Error>(())
+    };
+    let ended: Result<()> = tokio::select! {
+        biased;
+        () = stop.cancelled() => Ok(()),
+        ended = requests => ended,
+        ended = read(&mut reader, &owed, shared) => ended,
+    };
+    let mut pushed = shared.lock();
+    pushed.lost = true;
+    pushed.wake();
+    drop(pushed);
+    if let Err(failure) = ended {
+        tracing::debug!(
+            target: "pb_mapper_desktop::session",
+            event = "desktop_helper_link_lost",
+            detail = %failure,
+        );
+    }
+}
+
+/// Read the worker's records, each checked as it comes, and keep what each
+/// says in `shared`, until one fails.
+async fn read<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    owed: &RefCell<VecDeque<(Owed, mpsc::SyncSender<Delivered>)>>,
+    shared: &Mutex<Pushed>,
+) -> Result<()> {
+    let mut stats = PushStats::new(Instant::now());
+    loop {
+        let record: Record = ipc::read_json(reader).await?;
+        let received = Instant::now();
+        match record {
+            Record::Reply(mut response) => {
+                let mut image = ipc::read_bytes(reader, ipc::MAX_FRAME).await?;
+                let (effect, reply) = owed
+                    .borrow_mut()
+                    .pop_front()
+                    .ok_or_else(|| error("an answer to no request"))?;
+                let pending = checked(response.pending)?;
+                let mut pushed = shared.lock();
+                pushed.reported = pending;
+                if response.error.is_none() {
+                    if effect.reports_context && pushed.context != response.context {
+                        pushed.context.clone_from(&response.context);
+                    }
+                    if effect.observes_cursor || effect.input && response.cursor.is_some() {
+                        pushed.cursor = response.cursor;
+                    }
+                    if effect.observes_cursor
+                        && let Some(serial) = response.shape_serial
+                    {
+                        pushed.shape_serial = serial;
+                    }
+                }
+                if effect.configures_video && response.retuned != Some(true) {
+                    pushed.queue.clear();
+                }
+                if let Some(generation) = effect.capture {
+                    // Any fresh picture told before this answer is the one
+                    // this capture took, or found it had taken.
+                    pushed.fresh = false;
+                    // The unit the worker drained before it submitted: the
+                    // next in order.
+                    if let Some(format) = response.video.take() {
+                        let bytes = std::mem::take(&mut image);
+                        pushed.push(Queued::Unit {
+                            generation,
+                            frame: EncodedFrame { format, bytes },
+                        })?;
+                    }
+                }
+                drop(pushed);
+                stats.replies += 1;
+                // A call that timed out meanwhile no longer listens.
+                let _ = reply.send(Delivered {
+                    response: *response,
+                    image,
+                    received,
+                });
+            }
+            Record::Unit {
+                generation,
+                video,
+                pending,
+                collected_unix_us,
+            } => {
+                let bytes = ipc::read_bytes(reader, ipc::MAX_FRAME).await?;
+                let pending = checked(pending)?;
+                stats.unit(collected_unix_us);
+                let mut pushed = shared.lock();
+                pushed.reported = pending;
+                pushed.push(Queued::Unit {
+                    generation,
+                    frame: EncodedFrame {
+                        format: video,
+                        bytes,
+                    },
+                })?;
+            }
+            Record::Failed {
+                error,
+                failure,
+                pending,
+            } => {
+                let pending = checked(pending)?;
+                let mut pushed = shared.lock();
+                pushed.reported = pending;
+                pushed.push(Queued::Failed { error, failure })?;
+            }
+            Record::Pending { pending } => {
+                let pending = checked(pending)?;
+                let mut pushed = shared.lock();
+                let freed = pending < pushed.reported;
+                pushed.reported = pending;
+                if freed {
+                    pushed.wake();
+                }
+            }
+            Record::Fresh {
+                presented_ago_us,
+                presented_count: _,
+            } => {
+                // Thread C dates what it submits by the capture's answer.
+                stats.fresh(presented_ago_us);
+                let mut pushed = shared.lock();
+                pushed.fresh = true;
+                pushed.wake();
+            }
+            Record::Pointer {
+                cursor,
+                shape_serial,
+            } => {
+                let mut pushed = shared.lock();
+                let fits = cursor.is_none_or(|cursor| {
+                    pushed
+                        .context
+                        .as_ref()
+                        .is_some_and(|context| inside(&cursor, &context.display))
+                });
+                if fits {
+                    let serial = shape_serial.unwrap_or(pushed.shape_serial);
+                    // Thread C samples a change at once, as it would have
+                    // read it in process.
+                    if pushed.cursor != cursor || pushed.shape_serial != serial {
+                        pushed.cursor = cursor;
+                        pushed.shape_serial = serial;
+                        pushed.cursor_changed = true;
+                        pushed.wake();
+                    }
+                    stats.pointers += 1;
+                } else {
+                    // Read for the desktop the worker reported, which
+                    // confines it: a worker that sends one outside is broken,
+                    // and its pointer is not shown.
+                    stats.refused += 1;
+                }
+            }
+        }
+        stats.roll(received);
+    }
+}
+
+/// `pending` as an answer or a push gave it, within `PENDING_MAX`.
+fn checked(pending: u32) -> Result<usize> {
+    if pending > PENDING_MAX {
+        return Err(error(
+            "the helper reported more pending units than it may hold",
+        ));
+    }
+    Ok(pending as usize)
+}
+
+/// Where `desktop_helper_push` goes: with the feedback interval.
+const PUSH_TARGET: &str = "pb_mapper_desktop::feedback";
+/// The samples of each kind `desktop_helper_push` keeps a second: more than a
+/// second of units at the highest pace.
+const PUSH_SAMPLES: usize = 256;
+
+/// What the I/O thread counts for `desktop_helper_push`, a debug event once
+/// a second while records come: never published, and nothing allocated.
+struct PushStats {
+    started: Instant,
+    replies: u32,
+    units: u32,
+    fresh: u32,
+    pointers: u32,
+    /// Pointers outside the display the worker reported.
+    refused: u32,
+    /// From each pushed unit's collection in the worker to its receipt here,
+    /// in microseconds, on the system clock both read.
+    receipts: [u32; PUSH_SAMPLES],
+    receipts_len: usize,
+    /// Each fresh picture's age as the worker wrote its notice, in
+    /// microseconds.
+    ages: [u32; PUSH_SAMPLES],
+    ages_len: usize,
+}
+impl PushStats {
+    fn new(now: Instant) -> Self {
+        Self {
+            started: now,
+            replies: 0,
+            units: 0,
+            fresh: 0,
+            pointers: 0,
+            refused: 0,
+            receipts: [0; PUSH_SAMPLES],
+            receipts_len: 0,
+            ages: [0; PUSH_SAMPLES],
+            ages_len: 0,
+        }
+    }
+
+    /// A unit the worker collected at `collected_unix_us` arrived now.
+    fn unit(&mut self, collected_unix_us: Option<u64>) {
+        self.units += 1;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .ok()
+            .and_then(|since| u64::try_from(since.as_micros()).ok());
+        // A clock stepped back, or one over a second: no sample.
+        let receipt = now
+            .zip(collected_unix_us)
+            .and_then(|(now, collected)| now.checked_sub(collected))
+            .filter(|us| *us <= 1_000_000)
+            .and_then(|us| u32::try_from(us).ok());
+        if let (Some(us), Some(slot)) = (receipt, self.receipts.get_mut(self.receipts_len)) {
+            *slot = us;
+            self.receipts_len += 1;
+        }
+    }
+
+    /// A fresh picture's notice arrived, dating it `ago_us` old as the
+    /// worker wrote it, within `PRESENT_AGE_MAX`.
+    fn fresh(&mut self, ago_us: Option<u32>) {
+        self.fresh += 1;
+        let age = ago_us.filter(|us| Duration::from_micros((*us).into()) <= PRESENT_AGE_MAX);
+        if let (Some(us), Some(slot)) = (age, self.ages.get_mut(self.ages_len)) {
+            *slot = us;
+            self.ages_len += 1;
+        }
+    }
+
+    /// `desktop_helper_push` once a second has passed at `now`, then a new
+    /// window: per second the answers (the pipe's round trips), units, fresh
+    /// pictures and pointers received and the pointers refused, and the
+    /// p50, p95 and maximum of each unit's delay from the worker's
+    /// collection to its receipt here and of each fresh picture's age.
+    fn roll(&mut self, now: Instant) {
+        let elapsed = now.saturating_duration_since(self.started);
+        if elapsed < Duration::from_secs(1) {
+            return;
+        }
+        if tracing::enabled!(target: PUSH_TARGET, tracing::Level::DEBUG) {
+            let receipts = quantiles(self.receipts.get_mut(..self.receipts_len));
+            let ages = quantiles(self.ages.get_mut(..self.ages_len));
+            let seconds = elapsed.as_secs_f64();
+            let per_second = |count: u32| f64::from(count) / seconds;
+            tracing::debug!(
+                target: PUSH_TARGET,
+                event = "desktop_helper_push",
+                replies_per_s = per_second(self.replies),
+                units_per_s = per_second(self.units),
+                fresh_per_s = per_second(self.fresh),
+                pointers_per_s = per_second(self.pointers),
+                refused = self.refused,
+                receipt_p50_us = receipts.0,
+                receipt_p95_us = receipts.1,
+                receipt_max_us = receipts.2,
+                fresh_age_p50_us = ages.0,
+                fresh_age_p95_us = ages.1,
+            );
+        }
+        *self = Self::new(now);
+    }
+}
+
+/// The p50, p95 and maximum of `samples`, which this sorts.
+fn quantiles(samples: Option<&mut [u32]>) -> (Option<u32>, Option<u32>, Option<u32>) {
+    let samples = samples.unwrap_or_default();
+    samples.sort_unstable();
+    let at = |quantile: usize| {
+        samples
+            .get((samples.len() * quantile / 100).min(samples.len().saturating_sub(1)))
+            .copied()
+    };
+    (at(50), at(95), samples.last().copied())
+}
+
+#[cfg(test)]
+pub(crate) mod tests;

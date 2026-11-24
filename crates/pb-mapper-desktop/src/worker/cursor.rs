@@ -9,16 +9,16 @@ use crate::{
 use std::time::{Duration, Instant};
 
 /// The longest wait between two pointer samples while capturing.
-const CURSOR_INTERVAL: Duration = Duration::from_millis(16);
+pub(crate) const CURSOR_INTERVAL: Duration = Duration::from_millis(16);
 /// The shortest: a faster pace samples once a period, down to this.
-const CURSOR_MIN: Duration = Duration::from_millis(8);
+pub(crate) const CURSOR_MIN: Duration = Duration::from_millis(8);
 /// How long after the controller's move thread C looks at the shape the
 /// pointer took for it: the hand over a link, the I-beam over text, the
 /// resize arrow at a border.
-const SHAPE_LOOK: Duration = Duration::from_millis(2);
+pub(crate) const SHAPE_LOOK: Duration = Duration::from_millis(2);
 /// One more look this long after the last move, for a slower app; a later
 /// shape waits for the next sample.
-const SHAPE_LATE: Duration = Duration::from_millis(8);
+pub(crate) const SHAPE_LATE: Duration = Duration::from_millis(8);
 const _: () = assert!(
     CURSOR_MIN.as_nanos() < CURSOR_INTERVAL.as_nanos(),
     "a faster pace samples more often, never less",
@@ -94,6 +94,9 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     /// viewer gets a position sooner than the clock only with a new shape.
     /// A reading that finds a new shape keeps the looks still owed: that
     /// shape may answer an earlier move, and the newest move's come later.
+    /// A backend told of the pointer (`Backend::cursor_changed`, the
+    /// privileged helper's) is sampled as soon as it says it changed, which
+    /// starts the clock again.
     pub(super) fn sample_cursor(&mut self, now: Instant) {
         if self.paused || self.unavailable.is_some() {
             return;
@@ -102,7 +105,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if let Some(look) = look {
             self.shape_due = look.next(now);
         }
-        if now >= self.cursor_due {
+        if now >= self.cursor_due || self.backend.cursor_changed() {
             self.read_cursor(now, false);
         } else if look.is_some() && self.cursor_shapes {
             self.read_cursor(now, true);
@@ -243,8 +246,8 @@ impl<B: Backend, K: Clock> Engine<B, K> {
 /// sample that is not its echo is reported again at the newer sequence, and a
 /// clamp or a pointer that stays hidden is still told. A backend observes the
 /// pointer after every input it applied (see `Backend::cursor`), so the
-/// helper's, observed during a capture call, is never older than the last
-/// injection.
+/// helper's, which its worker reads after each input it applies and pushes
+/// in order with its answers, is never older than the last injection.
 ///
 /// The shape is no position: a new shape is reported even at the echo of the
 /// controller's own move (the viewer takes the shape of every report, the

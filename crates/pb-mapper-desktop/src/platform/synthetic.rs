@@ -526,6 +526,15 @@ impl<const PUSH: bool> VideoSource for SynVideo<PUSH> {
     fn presented(&self) -> Option<Presented> {
         self.presented
     }
+    /// A dated display's newest present while no capture took it, and the
+    /// presents since the last take.
+    fn published(&self) -> Option<Presented> {
+        self.opened?;
+        let state = self.probe.0.lock();
+        let dated = state.dated.as_ref()?;
+        let landed = dated.landed.filter(|_| dated.fresh)?;
+        Some(Presented::new(dated.at(landed), dated.since_take))
+    }
     /// A dated display's source as ScreenCaptureKit's: a new picture at
     /// once, else the last one again for a keyframe or every
     /// `LIVENESS_INTERVAL`; it wakes thread C for a new one.

@@ -1,12 +1,20 @@
-//! The out-of-process backend's protocol: one request, one response and
-//! one byte record (a unit or a still), in order, per call of the
-//! `Backend` it carries. A change to any of it bumps the helper protocol.
+//! The out-of-process backend's protocol. The host sends one request per
+//! call of the `Backend` it carries, and waits for its answer: a
+//! [`Record::Reply`] and its byte record (a unit, a still or a shape's
+//! bitmap; empty when it has none). Between answers the worker pushes what
+//! the host would otherwise have to ask for again and again: each unit its
+//! encoder finished, with its byte record ([`Record::Unit`]), a failure its
+//! encoder met meanwhile ([`Record::Failed`]), that its source wants the
+//! tick the host left armed ([`Record::Fresh`]), and the pointer as it
+//! moves ([`Record::Pointer`]). Every record arrives in the order the
+//! worker wrote it. A change to any of it bumps the helper protocol.
 use crate::{
-    BackendCaps, CursorKind, CursorMode, CursorShape, DesktopContext, FailureKind, HostOs, Input,
-    RateModel,
+    BackendCaps, CursorKind, CursorMode, CursorPosition, CursorShape, DesktopContext, Display,
+    FailureKind, HostOs, Input, Presented, RateModel, VideoFormat,
     modes::{Mode, ModeList},
 };
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 /// The longest one call may take, and a worker may wait to start.
 pub(crate) const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -16,8 +24,12 @@ pub(crate) const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 /// left. A call that outlives it ends the session, and the worker's
 /// backend, dropped with it, puts the mode back or leaves it journalled.
 pub(crate) const MODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
-/// The longest a drain may wait for encoder output.
-pub(crate) const DRAIN_WAIT_MAX_MS: u32 = 4;
+/// The most units a worker's encoder may say it holds, in an answer or a
+/// push: more is a broken worker, whose link the host drops.
+pub(crate) const PENDING_MAX: u32 = 64;
+/// The oldest present a worker dates a picture by, and a host takes a date
+/// of: an older one is left out, and ignored.
+pub(crate) const PRESENT_AGE_MAX: Duration = Duration::from_secs(1);
 
 /// The service attests this login instance before starting a privileged worker.
 /// Session IDs alone are reusable after logoff; lock/unlock keeps this identity.
@@ -54,18 +66,25 @@ pub(crate) enum Request {
         limits: crate::VideoLimits,
         nominal_fps: u32,
     },
-    /// Drain finished output, then submit one capture when `submit` is set;
-    /// the answer's `submitted` says when that capture left the tick armed:
-    /// it found nothing new, or an encoder that had not asked for input.
-    /// A drain alone may wait up to `wait_ms` (at most 4) for encoder output
-    /// while units are pending. The helper never paces.
+    /// Drain one finished unit into the answer, then submit one capture of
+    /// `expected`, which the worker checks around it; the answer's
+    /// `submitted` says when that capture left the tick armed: it found
+    /// nothing new, or an encoder that had not asked for input. The worker
+    /// then pushes `Record::Fresh` once its source wants that tick, and
+    /// every other unit as it finishes. The helper never paces.
     Video {
         expected: DesktopContext,
         codec: crate::VideoCodec,
-        submit: bool,
         keyframe: bool,
         rate: crate::VideoRate,
-        wait_ms: u32,
+    },
+    /// Whether the host's thread C wants video (`Backend::video_paused`).
+    /// While it does, the worker pushes the pointer as it moves and tells
+    /// the host when its source wants the armed tick, and holds fine
+    /// timers; otherwise its capture thread stops looking. Units are pushed
+    /// either way.
+    Stream {
+        on: bool,
     },
     Presented {
         generation: u64,
@@ -121,6 +140,7 @@ impl Request {
             | Self::Capture {}
             | Self::ConfigureVideo { .. }
             | Self::Video { .. }
+            | Self::Stream { .. }
             | Self::Presented { .. }
             | Self::Input { .. }
             | Self::Adapter {}
@@ -133,7 +153,10 @@ impl Request {
     /// Its answer reports the bound desktop, which the host keeps.
     pub(crate) fn reports_context(&self) -> bool {
         match self {
-            Self::Release {} | Self::Close {} | Self::RestoreDisplayMode {} => false,
+            Self::Release {}
+            | Self::Close {}
+            | Self::RestoreDisplayMode {}
+            | Self::Stream { .. } => false,
             Self::Start { .. }
             | Self::Attach { .. }
             | Self::Context {}
@@ -150,13 +173,16 @@ impl Request {
         }
     }
     /// The worker reads the pointer for it. An applied input reads it too,
-    /// but only when it can, so its answer may carry none.
+    /// but only when it can, so its answer may carry none. A capture does
+    /// not: the worker pushes the pointer as it moves (`Record::Pointer`).
     pub(crate) fn observes_cursor(&self) -> bool {
         match self {
-            Self::Context {} | Self::Capture {} | Self::Video { .. } | Self::CursorShape {} => true,
+            Self::Context {} | Self::Capture {} | Self::CursorShape {} => true,
             Self::Start { .. }
             | Self::Attach { .. }
             | Self::ConfigureVideo { .. }
+            | Self::Video { .. }
+            | Self::Stream { .. }
             | Self::Presented { .. }
             | Self::Input { .. }
             | Self::Adapter {}
@@ -208,6 +234,11 @@ pub(crate) struct Response {
     /// for its session alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter: Option<AdapterKey>,
+    /// In the `ConfigureVideo` response: `Some(true)` when the worker kept
+    /// its open encoder for the new limits; absent when it dropped it, so
+    /// what it pushed before goes with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retuned: Option<bool>,
     /// In the `DisplayModes` response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modes: Option<ModeList>,
@@ -223,6 +254,118 @@ pub(crate) struct Response {
     /// shape whose bitmap the byte record holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<ShapeHeader>,
+    /// In the answer to a `Video` request that submitted a new picture its
+    /// source dated: how long before the worker wrote the answer the
+    /// display presented it, in microseconds, at most `PRESENT_AGE_MAX`.
+    /// The host dates the picture by its own receipt of the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presented_ago_us: Option<u32>,
+    /// With `presented_ago_us`: the presents the picture covers, at least
+    /// 1, and 255 for any more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presented_count: Option<u8>,
+}
+
+/// What a worker writes: the answer to the host's request, or a push
+/// between answers, each in the order the worker wrote it. `Reply` and
+/// `Unit` are followed by their byte record, the others by none. The host
+/// checks each: a unit within `ipc::MAX_FRAME`, of the generation it
+/// expects when it takes it; `pending` within `PENDING_MAX`; a pointer
+/// inside the display the worker last reported; an age within
+/// `PRESENT_AGE_MAX`; an unknown kind or field is refused.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Record {
+    /// The answer to the host's request.
+    Reply(Box<Response>),
+    /// A unit the worker's encoder finished, of a capture checked against
+    /// the desktop of `generation`, and the units the encoder still holds;
+    /// its bytes follow.
+    Unit {
+        generation: u64,
+        video: VideoFormat,
+        pending: u32,
+        /// When the worker collected it from its encoder, in microseconds
+        /// since the Unix epoch on the system clock, which the host on the
+        /// same computer reads too: for the host's debug event
+        /// `desktop_helper_push` alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        collected_unix_us: Option<u64>,
+    },
+    /// The worker's encoder failed as the worker collected its output, as
+    /// a drain fails: the host's thread C takes the failure in the units'
+    /// order. The worker's source is gone; the next capture builds another.
+    Failed {
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<FailureKind>,
+        pending: u32,
+    },
+    /// The worker's encoder holds fewer units than the worker reported last,
+    /// with no deliverable unit to send (a late output discarded).
+    Pending { pending: u32 },
+    /// The worker's source wants the tick the host's last capture left
+    /// armed: it published a new picture, dated by `presented_ago_us` and
+    /// `presented_count` when it could date it, or a repeat came due
+    /// (liveness, a keyframe), or its encoder asked for input. Sent once
+    /// per armed tick, and only while the host streams.
+    Fresh {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presented_ago_us: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presented_count: Option<u8>,
+    },
+    /// The pointer on the desktop the worker last reported, as an answer
+    /// that observes the pointer would carry it, and, once the host asked
+    /// for shapes, the newest shape's number: while the host streams, when
+    /// either changed.
+    Pointer {
+        cursor: Option<CursorPosition>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shape_serial: Option<u64>,
+    },
+}
+
+/// `presented_ago_us` and `presented_count` of `presented` as of `now`:
+/// none for a picture presented more than `PRESENT_AGE_MAX` ago. One
+/// presented after `now` is no age.
+pub(crate) fn present_age(presented: Option<Presented>, now: Instant) -> (Option<u32>, Option<u8>) {
+    let Some(presented) = presented else {
+        return (None, None);
+    };
+    let age = now.saturating_duration_since(presented.at);
+    if age > PRESENT_AGE_MAX {
+        return (None, None);
+    }
+    (
+        u32::try_from(age.as_micros()).ok(),
+        Some(u8::try_from(presented.presents.max(1)).unwrap_or(u8::MAX)),
+    )
+}
+
+/// The picture a worker dated `ago_us` before the host's `received`,
+/// covering `count` presents: none without an age, or with one over
+/// `PRESENT_AGE_MAX`.
+pub(crate) fn presented_at(
+    ago_us: Option<u32>,
+    count: Option<u8>,
+    received: Instant,
+) -> Option<Presented> {
+    let age = Duration::from_micros(ago_us?.into());
+    if age > PRESENT_AGE_MAX {
+        return None;
+    }
+    Some(Presented::new(
+        received.checked_sub(age)?,
+        count.map_or(1, u32::from),
+    ))
+}
+
+/// Whether a pushed pointer lies inside `display`, as the worker's own read
+/// confines it: a pointer it does not show is at the origin.
+pub(crate) fn inside(cursor: &CursorPosition, display: &Display) -> bool {
+    u32::try_from(cursor.x).is_ok_and(|x| x < display.width)
+        && u32::try_from(cursor.y).is_ok_and(|y| y < display.height)
 }
 /// A pointer shape but its bitmap, which follows as the byte record. The
 /// host checks it, and the record's length, before it takes the shape.
@@ -519,5 +662,100 @@ mod tests {
             r#","adapter":{"vendor_id":0,"device_id":1,"subsys_id":0,"revision":0,"driver_version":1}}"#,
         );
         assert!(serde_json::from_str::<Response>(&answer).is_err());
+    }
+
+    /// Protocol 12: every record the worker writes names its kind; an answer
+    /// is its response's fields beside `"kind":"reply"`, and the fields a
+    /// push leaves out are absent. A kind, or a field, the host does not know
+    /// is refused, and so is a `Video` request that still asks to wait.
+    #[test]
+    fn a_record_names_its_kind_and_refuses_what_it_does_not_know() {
+        let answer = serde_json::to_string(&Record::Reply(Box::new(Response {
+            pending: 2,
+            submitted: Some(false),
+            ..Response::default()
+        })))
+        .unwrap();
+        assert_eq!(
+            answer,
+            r#"{"kind":"reply","context":null,"error":null,"submitted":false,"pending":2}"#
+        );
+        let Record::Reply(read) = serde_json::from_str(&answer).unwrap() else {
+            panic!("an answer");
+        };
+        assert_eq!((read.pending, read.submitted), (2, Some(false)));
+        let fresh = Record::Fresh {
+            presented_ago_us: None,
+            presented_count: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&fresh).unwrap(),
+            r#"{"kind":"fresh"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Record::Pending { pending: 0 }).unwrap(),
+            r#"{"kind":"pending","pending":0}"#
+        );
+        for refused in [
+            r#"{"kind":"repaint"}"#,
+            r#"{"kind":"fresh","presented_at":1}"#,
+            r#"{"kind":"reply","context":null,"error":null,"pending":0,"luid":7}"#,
+            r#"{"kind":"pointer","cursor":null,"generation":1}"#,
+            r#"{"pending":0}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Record>(refused).is_err(),
+                "{refused}"
+            );
+        }
+        let video = |extra: &str| {
+            format!(
+                r#"{{"op":"video","expected":{{"display":{{"id":1,"name":"d","x":0,"y":0,"width":64,"height":64}},"generation":1,"desktop":"ordinary"}},"codec":"h264","keyframe":false,"rate":{{"bitrate":256000,"pace_fps":60}}{extra}}}"#
+            )
+        };
+        assert!(serde_json::from_str::<Request>(&video("")).is_ok());
+        assert!(serde_json::from_str::<Request>(&video(r#","wait_ms":4"#)).is_err());
+        assert_eq!(
+            serde_json::to_string(&Request::Stream { on: true }).unwrap(),
+            r#"{"op":"stream","on":true}"#
+        );
+    }
+
+    /// An age crosses as microseconds within a second, and is taken back
+    /// against the host's receipt; one over a second is none, either way.
+    /// A pointer is inside a display only on one of its pixels.
+    #[test]
+    fn an_age_crosses_within_a_second_and_a_pointer_within_its_display() {
+        let now = Instant::now();
+        let at = |ago_ms| now.checked_sub(Duration::from_millis(ago_ms)).unwrap();
+        let presented = |ago_ms, presents| Some(Presented::new(at(ago_ms), presents));
+        assert_eq!(present_age(presented(3, 2), now), (Some(3_000), Some(2)));
+        assert_eq!(present_age(presented(3, 300), now).1, Some(u8::MAX));
+        assert_eq!(present_age(presented(1_001, 1), now), (None, None));
+        assert_eq!(present_age(None, now), (None, None));
+        let dated = presented_at(Some(3_000), Some(2), now).unwrap();
+        assert_eq!((dated.at, dated.presents), (at(3), 2));
+        assert_eq!(presented_at(Some(3_000), None, now).unwrap().presents, 1);
+        assert_eq!(presented_at(Some(1_000_001), Some(1), now), None);
+        assert_eq!(presented_at(None, Some(1), now), None);
+
+        let display = Display {
+            id: 1,
+            name: "d".into(),
+            x: -1920,
+            y: 0,
+            width: 64,
+            height: 48,
+        };
+        let cursor = |x, y| CursorPosition {
+            x,
+            y,
+            visible: true,
+        };
+        assert!(inside(&cursor(0, 0), &display));
+        assert!(inside(&cursor(63, 47), &display));
+        assert!(!inside(&cursor(64, 0), &display));
+        assert!(!inside(&cursor(0, 48), &display));
+        assert!(!inside(&cursor(-1, 0), &display));
     }
 }
