@@ -1900,6 +1900,35 @@ mid-session restarts the controller at the preset's start values, without an
 IDR, an encoder reconfiguration or a resolution change. Pausing sets the pace
 to 0.
 
+A session that its transport ended (the viewer closed it, the connection
+failed, or the viewer went silent for 3 s) leaves the host one record: its
+bits per frame relative to 1080p, its preset, and when it ended. A session of
+the same preset that the host accepts within 2 min of that end starts its
+bits per frame at the lower of the preset's start and that record, scaled to
+its own picture; its frame rate starts as above, Balanced's fast start
+included. The record never raises a start, a later such end replaces it, and
+a session the host ended (Disconnect, a stop, a restart, a revoke, a codec
+change, a protocol error or a capture failure) leaves none. The host traces
+`desktop_start_rate_remembered` when a record lowers a start. A viewer that
+reconnects over the link that ended its session so sends its first IDR, and
+its startup second, at about the rate that link last carried rather than
+queueing them behind the link: in the slow-link suite's reconnect on a
+1 Mbit/s link, with that suite's synthetic encoder, the reconnect's first
+picture was presented 98 to 109 ms after `Viewer::connect` instead of 303 to
+311 ms, its IDR was 8 332 bytes instead of 33 332, and the host's ack queue
+was 0 ms at each of its first three once-a-second samples instead of peaking
+at 263 to 266 ms
+([measurements](benchmarks/2026-11-24-reconnect-start-rate/README.md)).
+Any other viewer of that preset within those 2 min starts as low and climbs
+as the receipts raise, 15% a second plus 100 kbit/s a second while its link
+shows no queue (a JPEG session, which has no receipts, only by the 3 s
+window's steps): in the same case a viewer on an unlimited link reached 80% of
+Balanced's start 7.0 s after it connected, where without a record it starts
+above that. A viewer that reconnects before the host saw its old session end
+joins the room that session is still in, and starts from whatever record an
+earlier end left. The record lives as long as the host: a restart, such as a
+display switch, starts without one.
+
 The encoder bitrate depends on how the encoder budgets. A per-frame-budget MFT
 (the `nominal` rate model, the default) gets `bits per frame × nominal fps` and
 spends one frame's budget per frame, so a lower pace sheds bandwidth at once.
@@ -2452,12 +2481,13 @@ The background service writes its host's lines to `service-host.log`, beside
 `service.log` in the protected installation root (SYSTEM and administrators
 write it, users may read it): `pb_mapper_desktop::session`,
 `pb_mapper_desktop::feedback` and `pb_mapper_client::direct` at info, which
-are the session lifecycle above, `desktop_rate_model_latched`, and
-`session_path_selected` with the path, the service and the peer address. No
-other target is written; none of these logs an invitation, a key or a
-credential. The once-a-second `desktop_feedback_interval` is debug and is not
-written; the viewer's statistics carry those numbers. At 1 MiB the file
-becomes `service-host.log.1`, replacing the previous one.
+are the session lifecycle above, `desktop_rate_model_latched`,
+`desktop_start_rate_remembered`, and `session_path_selected` with the path,
+the service and the peer address. No other target is written; none of these
+logs an invitation, a key or a credential. The once-a-second
+`desktop_feedback_interval` is debug and is not written; the viewer's
+statistics carry those numbers. At 1 MiB the file becomes
+`service-host.log.1`, replacing the previous one.
 
 ### The quality panel
 
@@ -3133,6 +3163,17 @@ FPS), `injected_backlog_at_120_recovers` (one second at 20 ms a frame in a
 1 Mbit/s twin (a 2 ms decoder that stalls once for 400 ms). The 67 ms decoder
 case now runs 60 s. [Viewer fps cap measurements](benchmarks/2026-11-24-viewer-fps-cap/README.md)
 has three runs of each before and after the cap measured its decoder.
+`reconnect_on_a_slow_link` stops a viewer after 8 s on a 1 Mbit/s link,
+connects another over it 3 s later for 8 s, and 3 s after that one stops
+connects a third on an unlimited link. It reports, for each session, the time
+from `Viewer::connect` to its first presented picture, that picture's bytes and
+the host's ack queue in its first three trace intervals, and how long the
+third took to reach 80% of Balanced's start; it asserts that each picture
+came, each first picture was an IDR, the reconnect's IDR was smaller than the
+first session's, and the third climbed within 20 s.
+[Reconnect start rate measurements](benchmarks/2026-11-24-reconnect-start-rate/README.md)
+has five runs before and after a reconnect started at the rate its last
+session ended at.
 
 `video_bench 10 60 --animate --max-width 1920 --max-height 1080` still reaches
 59.9 unique capture and encode FPS at a mean 1.9 ms encode with one unit in

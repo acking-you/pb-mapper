@@ -14,7 +14,9 @@
 //! bitrate or preset change rebuilds the encoder: the encoder runs at the
 //! session's nominal fps, and capture skips ticks to the pace published here.
 //! An encoder found to budget per second over the last 2 s of ticks latches
-//! the session to the timestamp rate model.
+//! the session to the timestamp rate model. A session starts at its preset's
+//! bits per frame, or lower where the last session its transport ended, of
+//! the same preset and within `START_MEMORY`, had ended lower (`ClosingRate`).
 //!
 //! This reverses decision D5 and CONTRACT-perf R13 of the overhaul plan, in
 //! which the probe owned fps and bitrate and receipts only clamped the byte
