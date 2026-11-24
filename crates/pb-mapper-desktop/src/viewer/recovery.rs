@@ -1,12 +1,13 @@
 //! The viewer's decoder recovery (D7) and its keyframe limiter. Every keyframe
-//! request (the native decoder's, the sink's own after a drop, the stall
-//! watchdog's, the user's) goes through `Recovery::request`, the only path to
-//! `ViewerMessage::Keyframe`, so the host never sees a request storm. Recovery
-//! never depends on presentation receipts reaching the host: the picture is
-//! back once the sink accepts a presentation of the IDR it handed out.
+//! request (the native decoder's, the sink's own on a backlog or an overflow,
+//! the stall watchdog's, the user's) goes through `Recovery::request`, the only
+//! path to `ViewerMessage::Keyframe`, so the host never sees a request storm.
+//! Recovery never depends on presentation receipts reaching the host: the
+//! picture is back once the sink accepts a presentation of the IDR it handed
+//! out.
 //!
 //! ```text
-//! Live --decoder error | backlog/overflow drop | gap | stall--> AwaitingIdr
+//! Live --decoder error | backlog episode | overflow drop | gap | stall--> AwaitingIdr
 //! AwaitingIdr --an IDR handed out, then it or a later frame presented--> Live
 //! any --pause--> Paused --resume--> AwaitingIdr, held (the host resumes with an IDR)
 //! any --State connecting or capture unavailable--> HostUnavailable
