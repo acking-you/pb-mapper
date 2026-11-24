@@ -29,12 +29,16 @@
 //!
 //! The display the viewer's window is on bounds it all: a frame the display
 //! has no refresh for is superseded unseen, so the host is asked for none
-//! (`set_display`). That rate is the ceiling beneath which backlog lowers
-//! and to which raises return, and removing the backlog cap sends it, not
-//! the session's maximum, which would clear the host's limit. A change of it
-//! goes to the host at the next tick, whatever the hold and spacing of
-//! backlog changes. A frame rate the user chose ignores it: frames that
-//! arrive fresher are what they asked for.
+//! (`set_display`). The host is sent the backlog cap within that rate, and
+//! with no backlog cap the rate itself, not the session's maximum, which
+//! would clear the host's limit. Backlog lowers beneath it and raises stop
+//! at it: a consumer keeping up at the display's rate says nothing of a
+//! faster one, so beneath a slower display the backlog cap is neither raised
+//! past it, probed or removed, and a faster display later gets the cap,
+//! from which raises and probes go on. A change of it goes to the host at
+//! the next tick, whatever the hold and spacing of backlog changes. A frame
+//! rate the user chose ignores it: frames that arrive fresher are what they
+//! asked for.
 use crate::{QualityPreset, qos::ceiling_fps};
 use pb_mapper_core::timeout::RetryBackoff;
 use std::{
@@ -384,7 +388,8 @@ impl FpsCap {
     /// can take, at most halved per change when that is only what it
     /// presented; raised after 3 s without backlog, in steps scaled to the
     /// ceiling up to just below a known capacity and by watched probes above
-    /// it; removed at the ceiling. A new display rate goes at once.
+    /// it; removed at the preset's ceiling, held at a slower display's
+    /// rate. A new display rate goes at once.
     pub fn tick(
         &mut self,
         now: Instant,
@@ -420,11 +425,14 @@ impl FpsCap {
 
     /// Moves the backlog cap for this tick; `send` says what that changes.
     fn judge(&mut self, now: Instant, observed: Observed, direct: bool, quality: QualityPreset) {
-        let ceiling = if self.fps_override {
+        // The preset's ceiling is where the backlog cap goes; the display's
+        // rate, where lower, is where the host's rate stops.
+        let preset = if self.fps_override {
             self.max_fps
         } else {
-            ceiling_fps(quality).min(self.release())
+            ceiling_fps(quality).min(self.max_fps)
         };
+        let ceiling = preset.min(self.release());
         if self
             .quality
             .replace(quality)
@@ -533,7 +541,12 @@ impl FpsCap {
         let Some(cap) = self.cap else {
             return;
         };
+        // A cap the display already holds the host beneath is raised no
+        // further: the consumer keeping up at the display's rate says
+        // nothing of a faster one, so it waits, unprobed, for a faster
+        // display.
         if self.probe.is_some()
+            || (cap >= ceiling && ceiling < preset)
             || !settled
             || self
                 .short_since
@@ -559,9 +572,10 @@ impl FpsCap {
             }
         };
         self.last_change = Some(now);
-        // At the ceiling the cap goes, which sends `release`: never past
-        // the display's rate.
-        self.cap = (raised < ceiling).then_some(raised);
+        // At the preset's ceiling the cap goes, which sends `release`;
+        // beneath a slower display it stops at the display's rate, and a
+        // faster display later raises it from there.
+        self.cap = (raised < preset).then_some(raised.min(ceiling));
     }
 
     fn probe_failed(&mut self, now: Instant) {
@@ -1072,7 +1086,10 @@ mod tests {
 
     /// Recovered from backlog, raises stop at the display's rate and send
     /// it, never the session's maximum, which would clear the host's limit
-    /// and let it send what the display cannot show.
+    /// and let it send what the display cannot show. The cap stays there:
+    /// back on a faster display, raises go on from the display's rate, the
+    /// first at once as the queue stayed short, and only reaching the
+    /// preset's ceiling clears it.
     #[test]
     fn a_backlog_recovery_sends_the_display_rate_not_the_maximum() {
         let mut ticks = Ticks::new(120, false);
@@ -1089,9 +1106,41 @@ mod tests {
             }
         }
         assert_eq!(caps, [(13, 46), (17, 58), (21, 60)]);
-        // Back on a 120 Hz display: the cap is cleared at once.
         ticks.cap.set_display(120);
-        assert_eq!(ticks.tick(60.0, 0, true), Some(120));
+        assert_eq!(ticks.tick(60.0, 0, true), Some(80));
+        ticks.quiet(3, 80.0, 0, true);
+        assert_eq!(ticks.tick(80.0, 0, true), Some(100));
+        ticks.quiet(3, 100.0, 0, true);
+        assert_eq!(ticks.tick(100.0, 0, true), Some(120));
+    }
+
+    /// A backlog cap a measured capacity set outlasts a slower display:
+    /// there it is neither raised past the display's rate, probed nor
+    /// removed, however long the queue stays short, and back on a faster
+    /// display raises go on from it, to 95% of the capacity and then by
+    /// probes, never to the session's maximum at once.
+    #[test]
+    fn a_known_capacity_outlasts_a_slower_display() {
+        let mut ticks = Ticks::new(120, false);
+        ticks.quality = Smooth;
+        // Busy behind a queue at 80 a second on the relay: lowered to 64.
+        ticks.quiet_consumer(1, 20, false, 0);
+        ticks.quiet_consumer(3, 20, true, 2);
+        ticks.quiet_consumer(1, 20, true, 3);
+        ticks.consumer(20, true);
+        assert_eq!(ticks.tick(80.0, 3, false), Some(64));
+        // Ten seconds on a 60 Hz display, keeping up.
+        ticks.cap.set_display(60);
+        ticks.consumer(15, false);
+        assert_eq!(ticks.tick(60.0, 0, false), Some(60));
+        ticks.quiet_consumer(40, 15, false, 0);
+        // Back on 120: 95% of the 80 measured, then a probe above it.
+        ticks.cap.set_display(120);
+        ticks.consumer(15, false);
+        assert_eq!(ticks.tick(60.0, 0, false), Some(76));
+        ticks.quiet_consumer(3, 19, false, 0);
+        ticks.consumer(19, false);
+        assert_eq!(ticks.tick(76.0, 0, false), Some(84));
     }
 
     /// A frame rate the user chose is theirs on any display: a slower one
