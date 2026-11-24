@@ -41,7 +41,8 @@ struct Pacing {
     dated: u32,
     /// The presents the dated pictures covered.
     presents: u64,
-    /// Captures that found nothing new and left the tick armed.
+    /// Captures that left the tick armed: they found nothing new, or an
+    /// encoder that had not asked for input yet.
     empty_polls: u32,
     /// From each dated picture's present to its capture, in microseconds.
     waits: [u32; PACING_SAMPLES],
@@ -105,7 +106,8 @@ impl Window {
         }
     }
 
-    /// A capture call found nothing new and left its tick armed.
+    /// A capture call left its tick armed: it found nothing new, or an
+    /// encoder that had not asked for input yet.
     pub(super) fn empty_poll(&mut self) {
         self.pacing.empty_polls += 1;
     }

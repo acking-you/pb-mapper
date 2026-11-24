@@ -105,6 +105,8 @@ fn probe_h265(adapter: &IDXGIAdapter1) -> Result<()> {
             fps: 60,
             bitrate: 8_000_000,
         },
+        // Nothing waits for the probe's events.
+        None,
     )
     .map(drop)
 }

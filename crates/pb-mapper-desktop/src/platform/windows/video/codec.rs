@@ -1,18 +1,38 @@
 //! The GPU's hardware H.264 or H.265 Media Foundation encoder, as the
 //! pipeline drives it, and the media types and samples it takes.
+//!
+//! The encoder is asynchronous: it asks for each input
+//! (`METransformNeedInput`) and announces each output
+//! (`METransformHaveOutput`) as an event. An encoder that can be shut down
+//! (`IMFShutdown`, which every asynchronous MFT implements) gets a watcher
+//! thread that waits for its events, counts them and wakes thread C, and
+//! whose wait the encoder's shutdown ends; for any other, thread C reads
+//! them each time it drains.
 use super::MAX_IN_FLIGHT;
 use crate::{
-    Result, VideoCodec,
+    Result, VideoCodec, Waker,
     codec::annexb::{AccessUnit, MAX_ACCESS_UNIT, ParameterSets, codec_name},
     error,
 };
-use std::mem::ManuallyDrop;
+use std::{
+    mem::ManuallyDrop,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        mpsc,
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
+};
 use windows::{
     Win32::{
         Foundation::LUID,
         Graphics::{Direct3D11::ID3D11Device, Dxgi::IDXGIDevice},
         Media::MediaFoundation::*,
-        System::{Com::CoTaskMemFree, Variant::VARIANT},
+        System::{
+            Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize},
+            Variant::VARIANT,
+        },
     },
     core::{GUID, Interface, PWSTR},
 };
@@ -20,6 +40,25 @@ use windows::{
 /// GOP sizes to request, longest first: keyframes come only on demand. Never
 /// 0, which asks the encoder for its own default GOP rather than an endless one.
 const GOP_CANDIDATES: [u32; 4] = [u32::MAX, 0x7FFF_FFFF, 65_535, 3_600];
+/// The most input requests an encoder may have outstanding.
+const MAX_INPUT_REQUESTS: u32 = 64;
+/// The announcement times of this many outputs are kept, by sequence number,
+/// for the wait until thread C collects each: more than the outputs an
+/// encoder may announce before one is collected.
+const OUTPUT_TIMES: usize = 8;
+const _: () = assert!(
+    OUTPUT_TIMES > MAX_IN_FLIGHT,
+    "an announced output keeps its time until it is collected"
+);
+/// How long dropping an encoder waits for its event watcher to end. Shutting
+/// the encoder down ends the watcher's wait at once; a watcher that goes on
+/// waiting is left behind rather than holding thread C.
+const WATCHER_EXIT: Duration = Duration::from_millis(100);
+/// An encoder's shutdown once left its watcher waiting: that thread, and
+/// the encoder its wait holds, stay behind. Later encoders, which a desktop
+/// switch, a recovery or a new size builds again, get no watcher and have
+/// their events polled, so that at most one is left behind per process.
+static WATCHER_STUCK: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn luid_value(luid: LUID) -> u64 {
     (u64::from(luid.HighPart as u32) << 32) | u64::from(luid.LowPart)
@@ -52,12 +91,22 @@ pub(super) struct Codec {
     pub(super) kind: VideoCodec,
     pub(super) transform: IMFTransform,
     events: IMFMediaEventGenerator,
+    /// The events counted, by the watcher or by `events`.
+    counts: Arc<Events>,
+    /// Waits for the events and wakes thread C; `None`: thread C polls them.
+    watcher: Option<Watcher>,
+    /// Outputs announced while polled, and outputs collected: the sequence
+    /// numbers of their announcement times.
+    announced: u64,
+    collected: u64,
+    /// From the last output's announcement, as the watcher saw it, to the
+    /// call that collected it, as it began: the wait for thread C, without
+    /// the collection itself.
+    pickup: Option<Duration>,
     api: ICodecAPI,
     pub(super) name: String,
     pub(super) input_id: u32,
     output_id: u32,
-    pub(super) need_input: u32,
-    pub(super) have_output: u32,
     parameter_sets: ParameterSets,
     /// The NAL unit ranges of the unit being sent, kept across units.
     nal_units: Vec<(usize, usize)>,
@@ -66,10 +115,13 @@ pub(super) struct Codec {
 impl Codec {
     /// The first hardware encoder of `settings.kind` on `device`'s adapter
     /// that takes this pipeline's settings. There is no software fallback.
+    /// Given a `waker`, an encoder that can be shut down wakes it with its
+    /// events (`Codec::pushes`).
     pub(super) fn new(
         device: &ID3D11Device,
         manager: &IMFDXGIDeviceManager,
         settings: EncoderSettings,
+        waker: Option<&Waker>,
     ) -> Result<Self> {
         let kind = settings.kind;
         let input = MFT_REGISTER_TYPE_INFO {
@@ -119,7 +171,7 @@ impl Codec {
         let mut failures = vec![];
         for activation in candidates {
             let name = activation_name(&activation);
-            match Self::activate(&activation, name.clone(), manager, settings) {
+            match Self::activate(&activation, name.clone(), manager, settings, waker) {
                 Ok(codec) => return Ok(codec),
                 Err(e) => {
                     unsafe {
@@ -145,6 +197,7 @@ impl Codec {
         name: String,
         manager: &IMFDXGIDeviceManager,
         settings: EncoderSettings,
+        waker: Option<&Waker>,
     ) -> Result<Self> {
         let EncoderSettings {
             kind,
@@ -177,12 +230,15 @@ impl Codec {
             kind,
             transform,
             events,
+            counts: Arc::new(Events::new()),
+            watcher: None,
+            announced: 0,
+            collected: 0,
+            pickup: None,
             api,
             name,
             input_id: 0,
             output_id: 0,
-            need_input: 0,
-            have_output: 0,
             parameter_sets: ParameterSets::new(kind),
             nal_units: Vec::new(),
             gop: 0,
@@ -260,7 +316,43 @@ impl Codec {
                 .map_err(error)?;
         }
         codec.update_header()?;
+        // Its first input requests wait in its queue meanwhile. Only an
+        // encoder that something waits on says how its events come: the
+        // H.265 probe's, which nothing waits on, would read as polled.
+        if let Some(waker) = waker {
+            codec.watch(waker);
+            tracing::debug!(
+                target: "pb_mapper_desktop::session",
+                event = "windows_encoder_events",
+                encoder = %codec.name,
+                pushed = codec.pushes(),
+            );
+        }
         Ok(codec)
+    }
+    /// Wait for the encoder's events on a thread of their own, which wakes
+    /// `waker` for each output and for an input request thread C waits for.
+    /// Only an encoder that can be shut down gets one, since its shutdown
+    /// is what ends the watcher's wait; without one, when the thread cannot
+    /// start, or once an encoder's shutdown left its watcher waiting
+    /// (`WATCHER_STUCK`), thread C polls the events.
+    fn watch(&mut self, waker: &Waker) {
+        if WATCHER_STUCK.load(Ordering::Acquire) || self.transform.cast::<IMFShutdown>().is_err() {
+            return;
+        }
+        let source = Generator(self.events.clone());
+        match Watcher::spawn(source, self.counts.clone(), waker.clone()) {
+            Ok(watcher) => self.watcher = Some(watcher),
+            Err(failure) => tracing::warn!(
+                target: "pb_mapper_desktop::session",
+                event = "windows_encoder_watcher_failed",
+                detail = %failure,
+            ),
+        }
+    }
+    /// Whether the encoder's events wake thread C, rather than being polled.
+    pub(super) fn pushes(&self) -> bool {
+        self.watcher.is_some()
     }
     pub(super) fn property(&self, key: &GUID, value: &VARIANT) -> Result<()> {
         unsafe {
@@ -286,28 +378,68 @@ impl Codec {
             || self.value(&CODECAPI_AVEncMPVGOPSize),
         )
     }
+    /// Count the events that came, when thread C polls them, and return the
+    /// first failure, whoever counted it. A watcher is the only reader of
+    /// the encoder's events: a second one would get
+    /// `MF_E_MULTIPLE_SUBSCRIBERS`.
     pub(super) fn events(&mut self) -> Result<()> {
-        for _ in 0..32 {
-            let event = match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
-                Ok(event) => event,
-                Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => return Ok(()),
-                Err(e) => return Err(error(e)),
-            };
-            unsafe {
-                event.GetStatus().map_err(error)?.ok().map_err(error)?;
-            }
-            match unsafe { event.GetType().map_err(error)? } {
-                n if n == METransformNeedInput.0 as u32 => self.need_input += 1,
-                n if n == METransformHaveOutput.0 as u32 => self.have_output += 1,
-                _ => {}
-            }
-            if self.need_input > 64 || self.have_output > MAX_IN_FLIGHT as u32 {
-                return Err(error("invalid hardware encoder event queue"));
+        if self.watcher.is_none() {
+            for _ in 0..32 {
+                // SAFETY: a COM call on an interface this codec holds; it
+                // returns at once.
+                let event = match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
+                    Ok(event) => event,
+                    Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => break,
+                    Err(e) => {
+                        self.counts.fail(Fault::Failed(e));
+                        break;
+                    }
+                };
+                if let Err(fault) = self.counts.observe(&event, &mut self.announced) {
+                    self.counts.fail(fault);
+                    break;
+                }
             }
         }
-        Ok(())
+        self.counts.check()
+    }
+    /// Whether the encoder asked for input. When it has not, its watcher
+    /// wakes thread C at its next request.
+    pub(super) fn wants_input(&self) -> bool {
+        let counts = &self.counts;
+        if self.watcher.is_some() {
+            // Set before the read, as the watcher counts a request before
+            // it reads this: of the two, one sees the other.
+            counts.awaiting_input.store(true, Ordering::SeqCst);
+        }
+        let wanted = counts.need_input.load(Ordering::SeqCst) > 0;
+        if wanted {
+            counts.awaiting_input.store(false, Ordering::SeqCst);
+        }
+        wanted
+    }
+    /// Whether the encoder has an input request outstanding.
+    pub(super) fn input_requested(&self) -> bool {
+        self.counts.need_input.load(Ordering::SeqCst) > 0
+    }
+    /// `ProcessInput` answered an input request.
+    pub(super) fn input_taken(&self) {
+        take(&self.counts.need_input);
+    }
+    /// The outputs announced and not yet collected.
+    pub(super) fn outputs(&self) -> u32 {
+        // Acquire: an output's announcement time is stored before it counts.
+        self.counts.have_output.load(Ordering::Acquire)
+    }
+    /// The wait of the last output collected, from its announcement to the
+    /// start of the call that collected it, when the watcher saw it.
+    pub(super) fn take_pickup(&mut self) -> Option<Duration> {
+        self.pickup.take()
     }
     pub(super) fn output(&mut self) -> Result<Option<IMFSample>> {
+        // Before the sample and `ProcessOutput`: the wait thread C took to
+        // come for the output, not the time it takes to collect it.
+        let called = self.watcher.is_some().then(|| self.counts.epoch.elapsed());
         let info = unsafe {
             self.transform
                 .GetOutputStreamInfo(self.output_id)
@@ -356,7 +488,14 @@ impl Codec {
         }
         match result {
             Ok(()) => {
-                self.have_output -= 1;
+                take(&self.counts.have_output);
+                let slot = (self.collected % OUTPUT_TIMES as u64) as usize;
+                self.collected += 1;
+                let counts = &self.counts;
+                self.pickup = called.and_then(|called| {
+                    let announced = counts.announced.get(slot)?.load(Ordering::Relaxed);
+                    Some(called.saturating_sub(Duration::from_micros(announced)))
+                });
                 Ok(sample)
             }
             Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
@@ -421,14 +560,232 @@ fn update_header(
     Ok(())
 }
 impl Drop for Codec {
+    /// Flush and shut the encoder down. Its shutdown ends the watcher's
+    /// wait, and the watcher ends before the encoder's interfaces go, and
+    /// with them, after the codec, the COM runtime.
     fn drop(&mut self) {
         unsafe {
             let _ = self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
-            if let Ok(shutdown) = self.transform.cast::<IMFShutdown>() {
+        }
+        self.counts.stopping.store(true, Ordering::Release);
+        if let Ok(shutdown) = self.transform.cast::<IMFShutdown>() {
+            unsafe {
                 let _ = shutdown.Shutdown();
             }
         }
+        if let Some(watcher) = self.watcher.take() {
+            let _ = watcher.join();
+        }
     }
+}
+
+/// Take one from a count only thread C takes from, so that a count it read
+/// above zero stays so until it does.
+fn take(count: &AtomicU32) {
+    let _ = count.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+}
+
+/// Why the encoder's events failed: thread C's next drain returns it, and
+/// every one after.
+#[derive(Debug)]
+enum Fault {
+    /// An event carried a failure, or the wait for one failed.
+    Failed(windows::core::Error),
+    /// The encoder announced more than it may: an input request beyond
+    /// `MAX_INPUT_REQUESTS`, or an output beyond `MAX_IN_FLIGHT`.
+    Overflow,
+}
+impl Fault {
+    fn error(&self) -> std::io::Error {
+        match self {
+            Self::Failed(failure) => error(failure.clone()),
+            Self::Overflow => error("invalid hardware encoder event queue"),
+        }
+    }
+}
+
+/// The encoder's events, counted: by its watcher, or by thread C when it
+/// polls them. Thread C takes a request when it submits and an output when
+/// it collects one.
+struct Events {
+    need_input: AtomicU32,
+    have_output: AtomicU32,
+    /// Thread C found no input request and waits for one: the watcher wakes
+    /// it at the next.
+    awaiting_input: AtomicBool,
+    /// When each output was announced, in microseconds since `epoch`, at
+    /// its sequence number modulo `OUTPUT_TIMES`.
+    announced: [AtomicU64; OUTPUT_TIMES],
+    epoch: Instant,
+    /// The first failure.
+    fault: OnceLock<Fault>,
+    /// Set before the codec shuts the encoder down, so that its watcher
+    /// takes the shutdown for its end rather than for a failure.
+    stopping: AtomicBool,
+}
+impl Events {
+    fn new() -> Self {
+        Self {
+            need_input: AtomicU32::new(0),
+            have_output: AtomicU32::new(0),
+            awaiting_input: AtomicBool::new(false),
+            announced: [const { AtomicU64::new(0) }; OUTPUT_TIMES],
+            epoch: Instant::now(),
+            fault: OnceLock::new(),
+            stopping: AtomicBool::new(false),
+        }
+    }
+
+    /// Count `event`, with the announcement time of the `announced`th
+    /// output. Whether thread C needs waking for it: for an output, and for
+    /// an input request it waits for.
+    fn observe(
+        &self,
+        event: &IMFMediaEvent,
+        announced: &mut u64,
+    ) -> std::result::Result<bool, Fault> {
+        // SAFETY: COM calls on an event this thread holds.
+        unsafe { event.GetStatus() }
+            .and_then(|status| status.ok())
+            .map_err(Fault::Failed)?;
+        // SAFETY: as above.
+        let kind = unsafe { event.GetType() }.map_err(Fault::Failed)?;
+        if kind == METransformNeedInput.0 as u32 {
+            if self.need_input.fetch_add(1, Ordering::SeqCst) >= MAX_INPUT_REQUESTS {
+                return Err(Fault::Overflow);
+            }
+            // After the count, as thread C sets this before it reads the
+            // count.
+            Ok(self.awaiting_input.swap(false, Ordering::SeqCst))
+        } else if kind == METransformHaveOutput.0 as u32 {
+            let slot = (*announced % OUTPUT_TIMES as u64) as usize;
+            if let Some(at) = self.announced.get(slot) {
+                let since = u64::try_from(self.epoch.elapsed().as_micros()).unwrap_or(u64::MAX);
+                at.store(since, Ordering::Relaxed);
+            }
+            *announced += 1;
+            // Release: the time above is stored before the output counts.
+            if self.have_output.fetch_add(1, Ordering::Release) >= MAX_IN_FLIGHT as u32 {
+                return Err(Fault::Overflow);
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn fail(&self, fault: Fault) {
+        let _ = self.fault.set(fault);
+    }
+
+    fn check(&self) -> Result<()> {
+        self.fault.get().map_or(Ok(()), |fault| Err(fault.error()))
+    }
+}
+
+/// Where a watcher waits for events: the encoder's own generator, or a
+/// test's event queue.
+trait EventSource: Send + 'static {
+    /// The next event, waiting for one.
+    fn next_event(&self) -> windows::core::Result<IMFMediaEvent>;
+}
+
+/// The encoder's event generator, moved to its watcher.
+struct Generator(IMFMediaEventGenerator);
+// SAFETY: Media Foundation's objects, its hardware encoders included, are
+// free-threaded, and both threads that call this one, thread C and the
+// watcher, joined the process's multithreaded apartment, where an interface
+// pointer serves every thread without marshaling. An asynchronous MFT's
+// event generator is made to be waited on by a thread other than the one
+// that feeds the MFT.
+unsafe impl Send for Generator {}
+impl EventSource for Generator {
+    fn next_event(&self) -> windows::core::Result<IMFMediaEvent> {
+        // SAFETY: a COM call on an interface this watcher holds; without
+        // `MF_EVENT_FLAG_NO_WAIT` it waits for the next event.
+        unsafe { self.0.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0)) }
+    }
+}
+
+/// The thread that waits for the encoder's events.
+struct Watcher {
+    thread: JoinHandle<()>,
+    /// Disconnects once the thread is done with COM.
+    ended: mpsc::Receiver<()>,
+}
+impl Watcher {
+    fn spawn<S: EventSource>(
+        source: S,
+        counts: Arc<Events>,
+        waker: Waker,
+    ) -> std::io::Result<Self> {
+        let (exit, ended) = mpsc::sync_channel::<()>(0);
+        let thread = std::thread::Builder::new()
+            .name("pb-mapper-mft-events".into())
+            .spawn(move || {
+                watch(source, &counts, &waker);
+                drop(exit);
+            })?;
+        Ok(Self { thread, ended })
+    }
+
+    /// Once the encoder was shut down: wait, at most `WATCHER_EXIT`, for
+    /// the thread to end. Whether it did; one that did not is left behind,
+    /// and later encoders poll their events (`WATCHER_STUCK`).
+    fn join(self) -> bool {
+        match self.ended.recv_timeout(WATCHER_EXIT) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = self.thread.join();
+                true
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                WATCHER_STUCK.store(true, Ordering::Release);
+                tracing::warn!(
+                    target: "pb_mapper_desktop::session",
+                    event = "windows_encoder_watcher_stuck",
+                    "the encoder's shutdown did not end its event wait; later encoders poll theirs",
+                );
+                false
+            }
+        }
+    }
+}
+
+/// The watcher: wait for each event, count it and wake thread C, until the
+/// encoder shuts down, or an event or the wait fails, which wakes thread C
+/// too.
+fn watch<S: EventSource>(source: S, counts: &Events, waker: &Waker) {
+    // SAFETY: balanced below, on this thread, when it succeeded.
+    if let Err(failure) = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok() {
+        counts.fail(Fault::Failed(failure));
+        waker.wake();
+        return;
+    }
+    let mut announced = 0;
+    loop {
+        let fault = match source.next_event() {
+            Ok(event) => match counts.observe(&event, &mut announced) {
+                Ok(wake) => {
+                    if wake {
+                        waker.wake();
+                    }
+                    continue;
+                }
+                Err(fault) => fault,
+            },
+            Err(e) if e.code() == MF_E_SHUTDOWN && counts.stopping.load(Ordering::Acquire) => {
+                break;
+            }
+            Err(e) => Fault::Failed(e),
+        };
+        counts.fail(fault);
+        waker.wake();
+        break;
+    }
+    // Its last interface goes before COM does.
+    drop(source);
+    // SAFETY: balances the `CoInitializeEx` above.
+    unsafe { CoUninitialize() };
 }
 
 pub(super) fn attributes() -> Result<IMFAttributes> {
@@ -538,5 +895,168 @@ mod tests {
         assert_eq!(gop_with(|gop| gop.min(300)), 300);
         // Nothing reads back: unknown, never assumed endless.
         assert_eq!(pick_gop(|_| true, || None), 0);
+    }
+
+    /// A Media Foundation event queue standing in for an encoder's event
+    /// generator: hardware MFTs queue their events on one.
+    struct Queue(IMFMediaEventQueue);
+    // SAFETY: as `Generator`'s: the queue is free-threaded, and the test's
+    // threads joined the multithreaded apartment.
+    unsafe impl Send for Queue {}
+    impl EventSource for Queue {
+        fn next_event(&self) -> windows::core::Result<IMFMediaEvent> {
+            // SAFETY: a COM call on an interface this thread holds; 0 waits.
+            unsafe { self.0.GetEvent(0) }
+        }
+    }
+
+    fn send(events: &IMFMediaEventQueue, kind: MF_EVENT_TYPE, status: windows::core::HRESULT) {
+        // SAFETY: a COM call on an interface this thread holds; the GUID
+        // outlives it.
+        unsafe {
+            events.QueueEventParamUnk(
+                kind.0 as u32,
+                &GUID::zeroed(),
+                status,
+                None::<&windows::core::IUnknown>,
+            )
+        }
+        .unwrap();
+    }
+
+    /// One event as an encoder queues it, taken from a queue of its own.
+    fn event(kind: MF_EVENT_TYPE, status: windows::core::HRESULT) -> IMFMediaEvent {
+        // SAFETY: COM calls on a queue this thread made and holds.
+        let queue = unsafe { MFCreateEventQueue() }.unwrap();
+        send(&queue, kind, status);
+        let event = unsafe { queue.GetEvent(MF_EVENT_FLAG_NO_WAIT.0) }.unwrap();
+        unsafe { queue.Shutdown() }.unwrap();
+        event
+    }
+
+    /// Until `done` holds, for at most 5 s.
+    fn until(done: impl Fn() -> bool) {
+        let end = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < end, "timed out");
+            std::thread::yield_now();
+        }
+    }
+
+    /// Counting decides each wake: every output wakes thread C, and an
+    /// input request only while thread C waits for one, which it then no
+    /// longer does. A failed event, and more than the encoder may announce,
+    /// are its failure.
+    #[test]
+    fn each_output_and_an_awaited_input_request_wake_thread_c() {
+        use windows::Win32::Foundation::{E_FAIL, S_OK};
+        if !crate::platform::windows::mf::media_foundation() {
+            return;
+        }
+        let _runtime = super::super::Runtime::new().unwrap();
+        let counts = Events::new();
+        let mut seq = 0;
+        let need_input = || counts.need_input.load(Ordering::SeqCst);
+        let have_output = || counts.have_output.load(Ordering::Acquire);
+
+        // Nobody waits for the request: counted, and no wake.
+        let observed = counts.observe(&event(METransformNeedInput, S_OK), &mut seq);
+        assert!(!observed.unwrap());
+        assert_eq!(need_input(), 1);
+        // Thread C waits for the next one: it is woken, and waits no more.
+        counts.awaiting_input.store(true, Ordering::SeqCst);
+        let observed = counts.observe(&event(METransformNeedInput, S_OK), &mut seq);
+        assert!(observed.unwrap());
+        assert_eq!(need_input(), 2);
+        assert!(!counts.awaiting_input.load(Ordering::SeqCst));
+        // Every output wakes thread C, and is numbered for its time.
+        let observed = counts.observe(&event(METransformHaveOutput, S_OK), &mut seq);
+        assert!(observed.unwrap());
+        assert_eq!((have_output(), seq), (1, 1));
+        // Any other event is neither counted nor woken for.
+        let observed = counts.observe(&event(METransformDrainComplete, S_OK), &mut seq);
+        assert!(!observed.unwrap());
+        assert_eq!((need_input(), have_output(), seq), (2, 1, 1));
+
+        let observed = counts.observe(&event(METransformHaveOutput, E_FAIL), &mut seq);
+        assert!(matches!(observed, Err(Fault::Failed(_))));
+        assert_eq!(have_output(), 1, "a failed event counts for nothing");
+        for _ in 1..MAX_IN_FLIGHT {
+            let observed = counts.observe(&event(METransformHaveOutput, S_OK), &mut seq);
+            assert!(observed.unwrap());
+        }
+        let observed = counts.observe(&event(METransformHaveOutput, S_OK), &mut seq);
+        assert!(matches!(observed, Err(Fault::Overflow)));
+        for _ in 2..MAX_INPUT_REQUESTS {
+            let observed = counts.observe(&event(METransformNeedInput, S_OK), &mut seq);
+            assert!(!observed.unwrap());
+        }
+        let observed = counts.observe(&event(METransformNeedInput, S_OK), &mut seq);
+        assert!(matches!(observed, Err(Fault::Overflow)));
+    }
+
+    /// The watcher counts what the encoder queues and wakes thread C for
+    /// it, and ends, with its pending wait and without a wake, when the
+    /// encoder shuts down. A failed event, more outputs than may be in
+    /// flight and a shutdown nobody asked for each fail the encoder, wake
+    /// thread C and end the watcher too.
+    #[test]
+    fn the_watcher_wakes_thread_c_and_ends_when_the_encoder_shuts_down() {
+        use windows::Win32::Foundation::{E_FAIL, S_OK};
+        if !crate::platform::windows::mf::media_foundation() {
+            return;
+        }
+        let _runtime = super::super::Runtime::new().unwrap();
+        let soon = || Instant::now() + Duration::from_secs(5);
+        let watch = |events: &IMFMediaEventQueue, wake: &super::super::EncoderWake| {
+            let counts = Arc::new(Events::new());
+            let source = Queue(events.clone());
+            let watcher = Watcher::spawn(source, counts.clone(), wake.waker().clone()).unwrap();
+            (counts, watcher)
+        };
+
+        let wake = super::super::EncoderWake::new().unwrap();
+        let events = unsafe { MFCreateEventQueue() }.unwrap();
+        let (counts, watcher) = watch(&events, &wake);
+        // Thread C waits for a request before the encoder makes any, so the
+        // request's is the only wake there can be.
+        counts.awaiting_input.store(true, Ordering::SeqCst);
+        send(&events, METransformNeedInput, S_OK);
+        assert!(wake.wait(soon()).unwrap());
+        assert_eq!(counts.need_input.load(Ordering::SeqCst), 1);
+        send(&events, METransformHaveOutput, S_OK);
+        assert!(wake.wait(soon()).unwrap());
+        assert_eq!(counts.have_output.load(Ordering::Acquire), 1);
+        // Not needed for the outcome, which is the same either way: give the
+        // watcher time to be waiting again when the encoder shuts down.
+        std::thread::sleep(Duration::from_millis(20));
+        counts.stopping.store(true, Ordering::Release);
+        unsafe { events.Shutdown() }.unwrap();
+        assert!(watcher.join(), "the shutdown ended the wait");
+        counts.check().unwrap();
+        assert!(
+            !wake.wait(Instant::now()).unwrap(),
+            "a shutdown asked for wakes nothing"
+        );
+
+        let failures: [&dyn Fn(&IMFMediaEventQueue); 3] = [
+            &|events: &IMFMediaEventQueue| send(events, METransformHaveOutput, E_FAIL),
+            &|events: &IMFMediaEventQueue| {
+                for _ in 0..=MAX_IN_FLIGHT {
+                    send(events, METransformHaveOutput, S_OK);
+                }
+            },
+            &|events: &IMFMediaEventQueue| unsafe { events.Shutdown() }.unwrap(),
+        ];
+        for fail in failures {
+            // A wake of its own, which no earlier case's wake can satisfy.
+            let wake = super::super::EncoderWake::new().unwrap();
+            let events = unsafe { MFCreateEventQueue() }.unwrap();
+            let (counts, watcher) = watch(&events, &wake);
+            fail(&events);
+            assert!(wake.wait(soon()).unwrap());
+            until(|| counts.check().is_err());
+            assert!(watcher.join());
+        }
     }
 }

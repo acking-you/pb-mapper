@@ -384,7 +384,8 @@ Nothing in the SDK crates knows it exists.
   - `platform/windows/`: the ordinary desktop, `video/` (Desktop
     Duplication → D3D11 → Media Foundation H.265 or H.264, the fused
     `VideoSource`: the `Encoder` in `mod.rs`, the Media Foundation encoder in
-    `codec.rs`, the D3D11 scaler in `converter.rs`, the per-adapter H.265
+    `codec.rs`, whose watcher thread waits for the MFT's events and wakes
+    thread C, the D3D11 scaler in `converter.rs`, the per-adapter H.265
     probe in `probe.rs`; H.265 only for a viewer that lists `h265`, on a GPU
     whose hardware HEVC encoder passes a probe kept per adapter, and one
     encoder failure turns it off for the process), `input` (enigo, and
