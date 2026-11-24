@@ -129,7 +129,10 @@ cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture \
   --exact slow_link::direct_quic_on_lossy_links
 ```
 
-Built at `a32cd5b`, run three times. The real session, with the synthetic
+Run three times on the case as committed in `a32cd5b`, from a tree whose
+`VIDEO_CONGESTION` still read BBR: the rig's own registration is relay-only
+and carries none of the video, so that changes nothing here. The real
+session, with the synthetic
 encoder at 1080p and 60 FPS, Balanced, and the viewer's receipts setting
 the rate (`arrival_time` on), over one QUIC connection with the direct
 transport through the hop: the host's end dials the host's listener for
@@ -161,8 +164,10 @@ against Cubic's 37.9 to 41.4. BBR's P-frame p99 and IDR wait p50 were the
 lower in every run but two: its p99 in run 2 at 120 ms and 0.1% (303.7
 against 280.2 ms), the run whose IDR p95 was 469 ms against 74 and 73 in
 the others, and its IDR wait in run 1 at 120 ms and 1% (261.3 against
-201.2 ms). Behind the
-policer, BBR lost more packets in two runs of three (2.90% and 4.36%
+201.2 ms). Its IDR p95 had the lower median on all four lossy links, but
+was the higher in 3 of the 12 runs (170.6 against 115.9 ms, 469.2 against
+271.2 and 211.2 against 195.6). Behind the policer, BBR lost more packets
+in two runs of three (2.90% and 4.36%
 against 1.26% and 1.96%, and 2.13% against 2.18%), its IDR wait p50 was
 longer in every run (154 to 165 ms against 111 to 112), and its P-frame p99
 was higher in one run (172.0 against 132.6 ms) and lower in two.
@@ -179,12 +184,10 @@ for the next measurement.
 What the runs show of why: BBR's window ended at 14 576 762 bytes or more
 in every closed-loop run and at 1 955 253 or more in every open-loop cell
 without a policer, against Cubic's 15 762 to 73 234 in the closed loop.
-Quinn paces from
-the window (1.25 × window / smoothed RTT), so at that size nothing spaces a
-burst: an IDR leaves at once, and a policer's bucket drops what it cannot
-pay for, which the receipts see only as late frames. A BBR whose window,
-or pacing, follows its delivery-rate estimate would be the variant to
-measure next.
+Quinn paces from the window (1.25 × window / smoothed RTT), so at that
+size nothing spaces a burst: an IDR leaves at once, and a policer's bucket
+drops what it cannot pay for. A BBR whose window, or pacing, follows its
+delivery-rate estimate would be the variant to measure next.
 
 ## What needs a device
 
