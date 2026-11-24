@@ -23,7 +23,10 @@
 
 use crate::{
     DRAIN_POLL, Result, Waker,
-    codec::pipeline::{FIRST_SUBMIT_WAIT, LIVENESS_INTERVAL},
+    codec::{
+        pipeline::{FIRST_SUBMIT_WAIT, LIVENESS_INTERVAL},
+        refine::{Repeat, Repeats},
+    },
     error,
 };
 use parking_lot::{Condvar, Mutex};
@@ -49,8 +52,9 @@ pub(crate) const FRESH_FOR: Duration = DRAIN_POLL;
 /// How long an armed thread that thread C has not asked again goes on
 /// looking: past the slowest pace's period (1 s), at which a privileged
 /// helper's host asks, and past the liveness repeat, by which thread C
-/// asks in process, so that only a caller that stopped asking (every viewer
-/// paused, or the host went) trips it.
+/// asks in process (a refinement repeat, which leaves the thread armed,
+/// asks it again, `PresentWaiter::keep_armed`), so that only a caller that
+/// stopped asking (every viewer paused, or the host went) trips it.
 pub(crate) const ASKED_WITHIN: Duration = Duration::from_secs(2);
 const _: () = assert!(
     ASKED_WITHIN.as_millis() > 1_000 && ASKED_WITHIN.as_millis() > LIVENESS_INTERVAL.as_millis(),
@@ -386,6 +390,17 @@ impl<S: PresentSource> PresentWaiter<S> {
         self.shared.state.lock().disarm();
     }
 
+    /// Thread C sent something that leaves its tick armed (a refinement
+    /// repeat): an armed thread goes on looking as if asked again, so that
+    /// it stops on its own only `ASKED_WITHIN` after thread C last did
+    /// either. An unarmed one stays so.
+    pub(crate) fn keep_armed(&self) {
+        let mut state = self.shared.state.lock();
+        if state.armed.is_some() {
+            state.asked = Instant::now();
+        }
+    }
+
     pub(crate) fn status(&self) -> Status {
         self.shared.state.lock().status(self.held.is_some())
     }
@@ -487,13 +502,28 @@ pub(crate) struct Idle {
     /// How long after arming the thread thread C waits for its look before
     /// it repeats anyway, or sends what it held back.
     pub(crate) look: Duration,
+    /// When the last picture goes again on its own: a refinement burst's
+    /// repeat, or the liveness repeat.
+    pub(crate) repeats: Repeats,
 }
 impl Idle {
     /// Whether the last picture is due again at `now`: a keyframe was asked
-    /// for, or `LIVENESS_INTERVAL` passed since the last submit.
+    /// for, or `repeats` says a repeat is due (a refinement repeat, or
+    /// liveness, `LIVENESS_INTERVAL` after the last submit).
     pub(crate) fn repeat_due(&self, now: Instant) -> bool {
         self.last_submit
-            .is_some_and(|at| self.keyframe || now >= at + LIVENESS_INTERVAL)
+            .is_some_and(|at| self.keyframe || self.repeats.repeat_now(now, at).is_some())
+    }
+
+    /// Whether the repeat due at `now` refines the picture: no keyframe was
+    /// asked for, and a refinement burst's repeat is due. It leaves thread
+    /// C's tick, and the thread, armed, so that a present that comes after
+    /// it goes at once.
+    pub(crate) fn refines(&self, now: Instant) -> bool {
+        !self.keyframe
+            && self
+                .last_submit
+                .is_some_and(|at| self.repeats.repeat_now(now, at) == Some(Repeat::Refine))
     }
 
     /// Whether thread C waits for the armed thread's look: it holds a
@@ -523,8 +553,8 @@ impl Idle {
     ///   before.
     /// - Armed before the first picture: the wake, or the first picture's
     ///   deadline.
-    /// - Otherwise the wake, or the next repeat: liveness, or the keyframe
-    ///   due.
+    /// - Otherwise the wake, or the next repeat: a refinement repeat,
+    ///   liveness, or the keyframe due.
     pub(crate) fn until(&self, now: Instant, keyframe_due: Option<Instant>) -> Option<Instant> {
         if let Some((asked, requested)) = self.waiting {
             return Some(if requested { asked } else { asked + DRAIN_POLL });
@@ -539,8 +569,8 @@ impl Idle {
         let Some(last) = self.last_submit else {
             return Some(self.created + FIRST_SUBMIT_WAIT);
         };
-        let liveness = last + LIVENESS_INTERVAL;
-        Some(keyframe_due.map_or(liveness, |due| due.min(liveness)))
+        let repeat = self.repeats.next_due(last);
+        Some(keyframe_due.map_or(repeat, |due| due.min(repeat)))
     }
 }
 
@@ -865,6 +895,7 @@ mod tests {
             last_submit: Some(armed),
             keyframe: true,
             look,
+            repeats: Repeats::default(),
         };
         assert!(repeat.repeat_due(since) && !repeat.repeat_now(since));
         assert_eq!(repeat.until(since, None), Some(since + look));
@@ -895,6 +926,32 @@ mod tests {
         rig.waiter.arm(false, target(&mut made)).unwrap();
         until(|| rig.looks() > looks);
         assert_eq!(rig.log.lock().looks.get(looks), Some(&Duration::ZERO));
+        assert_eq!(made, 1);
+    }
+
+    /// A thread kept armed after each of its looks (thread C sending a
+    /// burst of refinement repeats) goes on looking well past its source's
+    /// `ASKED_WITHIN`, and stops on its own once nothing asks it again.
+    /// Unarmed, keeping it armed arms nothing.
+    #[test]
+    fn an_armed_thread_kept_armed_goes_on_looking() {
+        let rig = Rig::<32>::new(false);
+        let mut made = 0;
+        until(|| rig.parks() > 0);
+        rig.waiter.keep_armed();
+        assert_eq!(rig.waiter.status(), Status::default());
+        rig.waiter.arm(false, target(&mut made)).unwrap();
+        let armed = rig.waiter.status().armed;
+        assert!(armed.is_some());
+        // Twice the looks that `ASKED_WITHIN` allows unasked.
+        let past = 2 * (2 + Stub::<32>::ASKED_WITHIN.as_millis() / 32) as usize;
+        while rig.looks() < past {
+            let looks = rig.looks();
+            rig.waiter.keep_armed();
+            until(|| rig.looks() > looks);
+            assert_eq!(rig.waiter.status().armed, armed);
+        }
+        until(|| rig.waiter.status().armed.is_none());
         assert_eq!(made, 1);
     }
 
@@ -1027,6 +1084,7 @@ mod tests {
             last_submit: Some(t0 + ms(90)),
             keyframe: false,
             look,
+            repeats: Repeats::default(),
         };
         let at = |idle: Idle, now: Duration| idle.until(t0 + now, None);
 
@@ -1103,32 +1161,100 @@ mod tests {
             assert!(!rule.repeat_now(t0 + ms(330) + look));
         }
         assert_eq!(at(with(Status { idle: true, ..held }), ms(120)), None);
-        // Whatever the state, `None` leaves something to do at the tick,
-        // and an instant already past never comes without it.
+        assert!(!base.refines(t0 + ms(330) + look));
+        // Whatever the state, a refinement burst due or not, `None` leaves
+        // something to do at the tick, and an instant already past never
+        // comes without it.
         let statuses = [Status::default(), armed, published, idle]
             .map(|status| [false, true].map(|held| Status { held, ..status }));
+        let mut refining = Repeats::new(true, 4_000_000, 60, 60);
+        refining.fresh(t0 + ms(80));
+        refining.output(1, false, false, 100_000, None);
         for status in statuses.into_iter().flatten() {
             for last_submit in [None, Some(t0 + ms(90))] {
                 for keyframe in [false, true] {
-                    let rule = Idle {
-                        status,
-                        last_submit,
-                        keyframe,
-                        ..base
-                    };
-                    for now in [ms(95), ms(120), due, ms(330) + look, ms(400)] {
-                        let now = t0 + now;
-                        let something = status.published
-                            || status.armed.is_none()
-                            || rule.repeat_now(now)
-                            || (status.held && status.answered(now, look));
-                        match rule.until(now, None) {
-                            None => assert!(something, "{rule:?} at {now:?}"),
-                            Some(until) => assert!(until > now || something, "{rule:?}"),
+                    for repeats in [Repeats::default(), refining] {
+                        let rule = Idle {
+                            status,
+                            last_submit,
+                            keyframe,
+                            repeats,
+                            ..base
+                        };
+                        for now in [ms(95), ms(120), due, ms(290), ms(330) + look, ms(400)] {
+                            let now = t0 + now;
+                            let something = status.published
+                                || status.armed.is_none()
+                                || rule.repeat_now(now)
+                                || (status.held && status.answered(now, look));
+                            match rule.until(now, None) {
+                                None => assert!(something, "{rule:?} at {now:?}"),
+                                Some(until) => assert!(until > now || something, "{rule:?}"),
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    /// A refinement burst's repeat is due at its own time, before
+    /// liveness: thread C comes back for it, it waits for the thread's
+    /// look as any repeat does, and it refines, leaving the tick armed;
+    /// a keyframe asked for goes instead, and spends the tick.
+    #[test]
+    fn a_refinement_repeat_comes_before_liveness_and_leaves_the_tick_armed() {
+        use crate::codec::refine::REFINE_AFTER;
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let look = ms(32);
+        // A unit that filled its budget, submitted at t0.
+        let mut repeats = Repeats::new(true, 4_000_000, 60, 60);
+        repeats.fresh(t0);
+        repeats.output(1, false, false, 100_000, None);
+        let idle = Status {
+            armed: Some(t0 + ms(17)),
+            idle: true,
+            ..Status::default()
+        };
+        let rule = Idle {
+            waiting: None,
+            status: idle,
+            created: t0,
+            last_submit: Some(t0),
+            keyframe: false,
+            look,
+            repeats,
+        };
+        let refine = t0 + REFINE_AFTER;
+        assert_eq!(rule.until(t0 + ms(20), None), Some(refine));
+        assert!(!rule.repeat_due(refine - ms(1)));
+        assert!(rule.repeat_now(refine) && rule.refines(refine));
+        assert_eq!(rule.until(refine, None), None);
+        // A look under way, since an arming just before, is waited for.
+        let looking = Idle {
+            status: Status {
+                armed: Some(t0 + ms(190)),
+                ..Status::default()
+            },
+            ..rule
+        };
+        assert!(looking.repeat_due(refine) && !looking.repeat_now(refine));
+        assert_eq!(looking.until(refine, None), Some(t0 + ms(190) + look));
+        // A keyframe asked for is due now, and does not refine.
+        let keyframe = Idle {
+            keyframe: true,
+            ..rule
+        };
+        assert!(keyframe.repeat_now(t0 + ms(20)) && !keyframe.refines(refine));
+        // Without the burst, liveness.
+        let liveness = Idle {
+            repeats: Repeats::default(),
+            ..rule
+        };
+        let alive = t0 + LIVENESS_INTERVAL;
+        assert_eq!(liveness.until(t0 + ms(20), None), Some(alive));
+        assert!(!liveness.repeat_due(refine));
+        assert!(liveness.repeat_now(alive) && !liveness.refines(alive));
     }
 }

@@ -18,7 +18,14 @@
 //! for a rotated display, while DXGI holds the frame; where it refuses that
 //! surface, the picture is copied out first, as before. The last submitted
 //! sample is kept, so that a repeat on a still desktop (liveness, a
-//! keyframe) copies its NV12 picture instead of converting again.
+//! keyframe, a refinement) copies its NV12 picture instead of converting
+//! again.
+//!
+//! Where the encoder earned it by a device run (`REFINE_ENCODERS`), a
+//! picture its budget limited is refined once it stands still: a short
+//! burst of repeats at the capture pace (`codec::refine`), each of which
+//! leaves the caller's tick armed (`Submit::Refined`), before the liveness
+//! repeat.
 //!
 //! The duplication takes FP16 first: a Windows HDR desktop arrives as
 //! composed, and each picture is tone mapped to SDR at the display's SDR
@@ -47,6 +54,7 @@ use crate::{
         annexb::codec_name,
         pipeline::{FIRST_SUBMIT_WAIT, OUTPUT_WAIT, codec_error, late},
         present_waiter::{Arm, Idle, PresentWaiter},
+        refine::Repeats,
     },
     error,
     qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN, scaled_size},
@@ -100,6 +108,14 @@ const _: () = assert!(
 /// scales the picture down (`VpUsage::Auto`): none until a device run shows
 /// sharper text there for under 1 ms of processor time.
 const QUALITY_DOWNSCALE_VENDORS: [u32; 0] = [];
+/// The encoders that refine a still picture in a session (`codec::refine`):
+/// a capture adapter's PCI vendor ID, and a fragment of its MFT's friendly
+/// name, empty for any of that vendor's. None until a device run shows,
+/// per encoder, that repeats of a still picture raise its PSNR and come
+/// out under `REFINE_DONE_BYTES` once it converged: one that pads its
+/// constant bitrate, or budgets by the sample times (thread C's rate-model
+/// latch never reaches the encoder), stays off.
+const REFINE_ENCODERS: [(u32, &str); 0] = [];
 /// The largest capture, and the largest encoded size.
 const MAX_SIZE: (u32, u32) = (7680, 4320);
 /// The oldest present that still dates a picture.
@@ -148,6 +164,37 @@ pub struct EncoderOptions {
     /// mapping it (`video_bench --sdr-duplication`, the baseline of that
     /// comparison). A session never does.
     pub sdr_duplication: bool,
+    /// Whether a still picture is refined with a burst of repeats
+    /// (`video_bench --refine`).
+    pub refinement: Refinement,
+}
+
+/// Whether an encoder refines a picture its budget limited once it stands
+/// still, with a short burst of repeats at the capture pace before the
+/// liveness repeat (`codec::refine`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Refinement {
+    /// A session's: where the encoder earned it by a device run, which
+    /// none has yet.
+    #[default]
+    Auto,
+    /// Always.
+    On,
+    /// Never: the liveness repeat only, as before.
+    Off,
+}
+
+/// Whether an encoder named `encoder`, on an adapter of `vendor`, refines
+/// still pictures: as `refinement` says, or for `Auto`, where
+/// `REFINE_ENCODERS` lists it.
+fn refines(refinement: Refinement, vendor: u32, encoder: &str) -> bool {
+    match refinement {
+        Refinement::Auto => REFINE_ENCODERS
+            .iter()
+            .any(|&(id, name)| id == vendor && encoder.contains(name)),
+        Refinement::On => true,
+        Refinement::Off => false,
+    }
 }
 
 /// What the D3D11 video processor that scales and converts each picture is
@@ -245,9 +292,17 @@ pub struct Encoded {
     pub width: u32,
     pub height: u32,
     pub keyframe: bool,
-    /// False only for a new desktop presentation; static liveness repeats do
-    /// not count towards the advertised capture/display performance target.
+    /// False only for a new desktop presentation; a still picture's repeats
+    /// (liveness, refinement, a keyframe) do not count towards the
+    /// advertised capture/display performance target.
     pub duplicate: bool,
+    /// A refinement repeat's unit (`Submit::Refined`).
+    pub refined: bool,
+    /// The QP the encoder says it coded the unit at
+    /// (`MFSampleExtension_VideoEncodeQP`), where it says, and only where
+    /// it is read: a refinement repeat's unit, which its burst judges by
+    /// it, or every unit after `read_qp`.
+    pub qp: Option<u32>,
     /// Monotonic capture timestamp relative to this encoder's creation.
     pub pts_us: u64,
     /// Submit to output, in microseconds.
@@ -291,21 +346,35 @@ pub enum Submit {
     /// keyframe stays requested.
     Waiting,
     /// Room, and nothing worth sending yet: no new picture, and no repeat
-    /// due (a keyframe, or the liveness repeat `LIVENESS_INTERVAL` after
-    /// the last submit) or one held back until the capture thread has said
-    /// that nothing newer waits. The caller's tick stays armed: the capture
-    /// thread wakes it for the next picture or that answer, or it asks
-    /// again at `Encoder::idle_until`.
+    /// due (a keyframe, a refinement repeat, or the liveness repeat
+    /// `LIVENESS_INTERVAL` after the last submit) or one held back until
+    /// the capture thread has said that nothing newer waits. The caller's
+    /// tick stays armed: the capture thread wakes it for the next picture
+    /// or that answer, or it asks again at `Encoder::idle_until`.
     Unchanged,
+    /// A refinement repeat of a still picture went to the encoder
+    /// (`codec::refine`): a sample, which leaves the caller's tick armed,
+    /// and the capture thread with it, so that a present that comes after
+    /// it goes at once rather than a tick later. The next one is due at
+    /// least a period of the pace later (`Encoder::idle_until`).
+    Refined,
 }
 impl Submit {
     /// Whether the caller's tick is spent: by a sample and by backpressure,
     /// while a tick that waits for the encoder's input request or for the
-    /// next present stays armed.
+    /// next present stays armed, and so does one a refinement repeat took.
     pub fn spends_tick(self) -> bool {
         match self {
             Self::Submitted | Self::Full => true,
-            Self::Waiting | Self::Unchanged => false,
+            Self::Waiting | Self::Unchanged | Self::Refined => false,
+        }
+    }
+
+    /// Whether a sample went to the encoder.
+    pub fn submitted(self) -> bool {
+        match self {
+            Self::Submitted | Self::Refined => true,
+            Self::Full | Self::Waiting | Self::Unchanged => false,
         }
     }
 }
@@ -318,10 +387,14 @@ pub struct Statistics {
     pub unique_encoded: u64,
     pub bytes: u64,
     pub max_in_flight: usize,
-    /// Submits that sent the last picture again (a liveness repeat, or a
-    /// keyframe on a still desktop), copied from its sample rather than
-    /// converted.
+    /// Submits that sent the last picture again (a liveness repeat, a
+    /// refinement repeat, or a keyframe on a still desktop), copied from
+    /// its sample rather than converted.
     pub repeats: u64,
+    /// Whether this encoder refines a still picture (`Refinement`).
+    pub refine: bool,
+    /// The refinement repeats among `repeats` (`Submit::Refined`).
+    pub refined: u64,
     /// Whether new pictures are converted straight from the duplication's
     /// surface; false once its video processor refused that surface, after
     /// which each is copied out of it first, and for a desktop that arrives
@@ -490,7 +563,13 @@ pub struct Encoder {
     presented: Option<Presented>,
     /// The last sample time, in microseconds since `created`.
     last_pts_us: Option<u64>,
-    pending: VecDeque<(u64, Instant, bool)>,
+    pending: VecDeque<InFlight>,
+    /// When the last picture goes again on its own: refinement bursts
+    /// where the encoder earned them, and liveness.
+    repeats: Repeats,
+    /// Read every output's QP (`Encoded::qp`), as `read_qp` asked; a
+    /// refinement repeat's is read anyway.
+    read_qp: bool,
     /// When the last output was collected, discarded or not.
     last_output: Option<Instant>,
     width: u32,
@@ -519,6 +598,15 @@ struct Source {
     staging: Option<ID3D11Texture2D>,
 }
 
+/// A sample the encoder holds: its sample time, when it was submitted, and
+/// whether it sent the last picture again, and as a refinement.
+struct InFlight {
+    pts_us: u64,
+    at: Instant,
+    duplicate: bool,
+    refined: bool,
+}
+
 /// A new picture converted into a sample: when the display presented it,
 /// where DXGI dates it, and the presents it covers.
 struct Fresh {
@@ -530,8 +618,9 @@ struct Fresh {
 enum Taken {
     /// A new picture it published.
     Picture(Picture),
-    /// The last picture again, copied into this sample.
-    Repeat(Sample),
+    /// The last picture again, copied into this sample: a refinement repeat
+    /// when `refine`, which leaves the thread armed.
+    Repeat { sample: Sample, refine: bool },
     /// Nothing yet: it is armed, and may hold back a picture that waited
     /// while it looks past it.
     Unchanged,
@@ -755,6 +844,7 @@ impl Encoder {
         )
         .map_err(|failure| codec_error(kind, failure))?;
         let opened = codec.opened.clone();
+        let refine = refines(options.refinement, vendor, &codec.name);
         tracing::info!(
             target: "pb_mapper_desktop::session",
             event = "desktop_video_encoder_opened",
@@ -785,6 +875,7 @@ impl Encoder {
             duplication = if fp16 { "fp16,bgra8" } else { "bgra8" },
             hdr,
             sdr_white_nits = ?white.map(tonemap::SdrWhite::nits),
+            refine,
         );
         let mut allocator = std::ptr::null_mut();
         unsafe {
@@ -819,6 +910,7 @@ impl Encoder {
             direct_capture: true,
             sdr_white_nits: white.map(tonemap::SdrWhite::nits),
             vp_quality: quality,
+            refine,
             opened,
             ..Statistics::default()
         };
@@ -837,6 +929,9 @@ impl Encoder {
             presented: None,
             last_pts_us: None,
             pending: VecDeque::with_capacity(MAX_IN_FLIGHT),
+            // Paced at the nominal rate until the caller sets its pace.
+            repeats: Repeats::new(refine, bitrate, fps, fps),
+            read_qp: false,
             last_output: None,
             width,
             height,
@@ -875,8 +970,8 @@ impl Encoder {
         self.presented
     }
     /// Whether the last `submit` sent the last picture again (a liveness
-    /// repeat, or a keyframe on a still desktop), copied rather than
-    /// converted.
+    /// repeat, a refinement repeat, or a keyframe on a still desktop),
+    /// copied rather than converted.
     pub fn repeated(&self) -> bool {
         self.repeated
     }
@@ -897,10 +992,11 @@ impl Encoder {
     /// poll is answered at once all the same. Otherwise at the tick while a
     /// picture waits to be taken or the capture thread is not armed, which
     /// the tick arms; and while it is armed, as the capture thread wakes
-    /// the caller, at the latest when a repeat is due (the liveness repeat,
-    /// or `keyframe_due`), or `LOOK` after its arming while a due repeat,
-    /// or a picture held back, waits for its look's answer
-    /// (`present_waiter::Idle::until`). The caller never polls DXGI.
+    /// the caller, at the latest when a repeat is due (a refinement
+    /// repeat, the liveness repeat, or `keyframe_due`), or `LOOK` after its
+    /// arming while a due repeat, or a picture held back, waits for its
+    /// look's answer (`present_waiter::Idle::until`). The caller never
+    /// polls DXGI.
     pub fn idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         self.idle().until(Instant::now(), keyframe_due)
     }
@@ -916,6 +1012,7 @@ impl Encoder {
             last_submit: self.last_submit,
             keyframe: self.force_keyframe,
             look: LOOK,
+            repeats: self.repeats,
         }
     }
 
@@ -934,6 +1031,14 @@ impl Encoder {
     /// anyway for a repeat. A session never does.
     pub fn keep_source(&mut self) {
         self.source.get_or_insert_with(Source::default);
+    }
+
+    /// Read the QP the encoder says it coded each unit at into
+    /// `Encoded::qp` (`video_bench`). A session reads it only from a
+    /// refinement repeat's unit, by which its burst is judged, and so never
+    /// on an encoder that does not refine.
+    pub fn read_qp(&mut self) {
+        self.read_qp = true;
     }
 
     /// Time the GPU work of each submitted picture with D3D11 timestamp
@@ -1032,12 +1137,15 @@ impl Encoder {
 
     /// Apply a QoS rate. Only the mean bitrate reaches the encoder, and only
     /// when it changed. The pace is the caller's own: the media type, nominal
-    /// frame rate and GOP never change, so a rate change never rebuilds.
+    /// frame rate and GOP never change, so a rate change never rebuilds. The
+    /// pace spaces refinement repeats, and the bitrate sizes the budget a
+    /// picture's unit is measured against.
     pub fn set_rate(&mut self, rate: crate::VideoRate) -> Result<()> {
         self.check_thread()?;
         if !(ENCODER_BITRATE_MIN..=ENCODER_BITRATE_MAX).contains(&rate.bitrate) {
             return Err(error("video bitrate outside supported bounds"));
         }
+        self.repeats.rate(rate.bitrate, self.fps, rate.pace_fps);
         if self.bitrate == rate.bitrate {
             return Ok(());
         }
@@ -1077,7 +1185,7 @@ impl Encoder {
         if self
             .pending
             .front()
-            .is_some_and(|(_, at, _)| at.elapsed() > OUTPUT_WAIT)
+            .is_some_and(|unit| unit.at.elapsed() > OUTPUT_WAIT)
             || self.idle_without_request()
         {
             return Err(self.codec_failed(error("hardware video encoder stalled")));
@@ -1117,7 +1225,12 @@ impl Encoder {
                 *bucket += 1;
             }
             if let Some(sample) = sample {
-                let (pts_us, at, duplicate) = self
+                let InFlight {
+                    pts_us,
+                    at,
+                    duplicate,
+                    refined,
+                } = self
                     .pending
                     .pop_front()
                     .ok_or_else(|| error("unsolicited video output"))?;
@@ -1167,6 +1280,13 @@ impl Encoder {
                     self.stats.bytes += bytes.len() as u64;
                     let encode_us = now.saturating_duration_since(at).as_micros();
                     self.stats.encode_time_us += encode_us as u64;
+                    // Only a burst's repeats are judged by their QP: a
+                    // session reads no other unit's.
+                    let qp = (self.read_qp || (refined && !keyframe))
+                        .then(|| sample_qp(&sample))
+                        .flatten();
+                    self.repeats
+                        .output(pts_us, duplicate, keyframe, bytes.len(), qp);
                     ready = Some(Encoded {
                         codec: self.codec.kind,
                         bytes,
@@ -1174,6 +1294,8 @@ impl Encoder {
                         height: self.height,
                         keyframe,
                         duplicate,
+                        refined,
+                        qp,
                         pts_us,
                         encode_us: u32::try_from(encode_us).unwrap_or(u32::MAX),
                         gop: self.stats.gop,
@@ -1202,7 +1324,8 @@ impl Encoder {
     /// encoder has no room (`Full`: `MAX_IN_FLIGHT`, or no free sample,
     /// before anything is taken), before it asks for input (`Waiting`), or
     /// when nothing is worth sending yet (`Unchanged`): the capture thread
-    /// is then armed, and wakes the caller for the next picture. A picture
+    /// is then armed, and wakes the caller for the next picture. A
+    /// refinement repeat (`Refined`) leaves it armed too. A picture
     /// the capture thread published that waited (the caller skipped ticks
     /// or paused, or a repeat went first) goes only once the thread, armed
     /// again, found nothing newer behind it. A requested keyframe stays
@@ -1231,9 +1354,9 @@ impl Encoder {
             self.arm(false)?;
             return Ok(Submit::Waiting);
         }
-        let (sample, fresh) = match self.take()? {
-            Taken::Picture(Picture { sample, fresh }) => (sample, Some(fresh)),
-            Taken::Repeat(sample) => (sample, None),
+        let (sample, fresh, refine) = match self.take()? {
+            Taken::Picture(Picture { sample, fresh }) => (sample, Some(fresh), false),
+            Taken::Repeat { sample, refine } => (sample, None, refine),
             Taken::Unchanged => return Ok(Submit::Unchanged),
             Taken::Full => return Ok(Submit::Full),
         };
@@ -1277,10 +1400,25 @@ impl Encoder {
         if let Some(source) = &mut self.source {
             source.unread = true;
         }
+        // A new picture or a keyframe ends a refinement burst, and may need
+        // one once it stands still; a refinement repeat counts towards its
+        // burst; a liveness repeat ends the picture's claim to one.
+        if fresh.is_some() || self.force_keyframe {
+            self.repeats.fresh(now);
+        } else if refine {
+            self.repeats.refined(now, pts_us);
+        } else {
+            self.repeats.liveness();
+        }
         self.force_keyframe = false;
         self.last_submit = Some(now);
         self.last_pts_us = Some(pts_us);
-        self.pending.push_back((pts_us, now, fresh.is_none()));
+        self.pending.push_back(InFlight {
+            pts_us,
+            at: now,
+            duplicate: fresh.is_none(),
+            refined: refine,
+        });
         if let Some(fresh) = fresh {
             self.stats.unique_captures += 1;
             self.presented = fresh.at.map(|at| Presented::new(at, fresh.presents));
@@ -1289,10 +1427,15 @@ impl Encoder {
             }
         } else {
             self.stats.repeats += 1;
+            self.stats.refined += u64::from(refine);
         }
         self.stats.submitted += 1;
         self.stats.max_in_flight = self.stats.max_in_flight.max(self.pending.len());
-        Ok(Submit::Submitted)
+        Ok(if refine {
+            Submit::Refined
+        } else {
+            Submit::Submitted
+        })
     }
 
     /// What a submit with room sends: the picture the capture thread
@@ -1303,9 +1446,9 @@ impl Encoder {
     /// its place. Else, when a repeat is due and the thread found nothing
     /// newer, the last picture again, copied whole from its sample (the
     /// video processor does not run again, and the encoder never writes
-    /// the samples it takes). Else nothing yet, with the thread armed, and
-    /// asked for its look's answer when a repeat is due or a picture is
-    /// held back.
+    /// the samples it takes): a refinement repeat leaves the thread armed.
+    /// Else nothing yet, with the thread armed, and asked for its look's
+    /// answer when a repeat is due or a picture is held back.
     fn take(&mut self) -> Result<Taken> {
         let now = Instant::now();
         if let Some(picture) = self.capture.next_picture(now, LOOK) {
@@ -1315,13 +1458,23 @@ impl Encoder {
         if idle.repeat_now(now)
             && let Some(last) = &self.last
         {
-            // The tick is spent: a present after this waits in DXGI for
-            // the next tick, which takes the newest.
-            self.capture.disarm();
+            let refine = idle.refines(now);
             let Some(sample) = allocate(&self.allocator)? else {
+                // Backpressure, which spends the tick, a refinement's too.
+                self.capture.disarm();
                 self.starved = true;
                 return Ok(Taken::Full);
             };
+            if refine {
+                // A refinement repeat leaves the thread armed, which wakes
+                // the caller for a present at once, and asks it again, as
+                // an arming would: a burst never outlasts its arming.
+                self.capture.keep_armed();
+            } else {
+                // The tick is spent: a present after this waits in DXGI
+                // for the next tick, which takes the newest.
+                self.capture.disarm();
+            }
             let context = &self.context;
             self.shared.work(&self.device, context, true, false, |_| {
                 unsafe {
@@ -1338,7 +1491,7 @@ impl Encoder {
                 }
                 Ok(())
             })?;
-            return Ok(Taken::Repeat(sample));
+            return Ok(Taken::Repeat { sample, refine });
         }
         Ok(match self.arm(idle.wants_answer(now))? {
             Arm::Armed => Taken::Unchanged,
@@ -1383,6 +1536,18 @@ fn allocate(allocator: &IMFVideoSampleAllocatorEx) -> Result<Option<Sample>> {
         Err(e) if e.code() == MF_E_SAMPLEALLOCATOR_EMPTY => Ok(None),
         Err(e) => Err(error(e)),
     }
+}
+
+/// The QP the encoder says it coded `sample` at
+/// (`MFSampleExtension_VideoEncodeQP`), where it sets it: the low 16 bits,
+/// the default QP of the layout `CODECAPI_AVEncVideoEncodeQP` gives. Read
+/// otherwise, a value of 0 (no rate-controlled unit of a still picture's
+/// repeat codes at it) or over 51 (the most an 8-bit H.264 or H.265 unit
+/// takes) is none.
+fn sample_qp(sample: &IMFSample) -> Option<u32> {
+    let value = unsafe { sample.GetUINT64(&MFSampleExtension_VideoEncodeQP) }.ok()?;
+    let qp = u32::try_from(value & 0xffff).ok()?;
+    (1..=51).contains(&qp).then_some(qp)
 }
 
 /// A sample time in microseconds since `created` for a picture of `at`,
@@ -1543,6 +1708,25 @@ mod tests {
         // Nothing new: thread C asks again, so the next present goes out as
         // it appears rather than a tick later.
         assert!(!Submit::Unchanged.spends_tick());
+        // A refinement repeat is a sample that leaves the tick armed, for
+        // the same reason.
+        assert!(!Submit::Refined.spends_tick());
+        assert!(Submit::Refined.submitted() && Submit::Submitted.submitted());
+        for outcome in [Submit::Full, Submit::Waiting, Submit::Unchanged] {
+            assert!(!outcome.submitted());
+        }
+    }
+
+    /// A session refines still pictures only on an encoder a device run
+    /// listed, which none is yet; `video_bench --refine` forces either.
+    #[test]
+    fn a_session_refines_only_on_an_encoder_that_earned_it() {
+        for vendor in [0x10de, 0x8086, 0x1002] {
+            let encoder = "NVIDIA H.264 Encoder MFT";
+            assert!(!refines(Refinement::Auto, vendor, encoder));
+            assert!(refines(Refinement::On, vendor, encoder));
+            assert!(!refines(Refinement::Off, vendor, encoder));
+        }
     }
 
     #[test]
