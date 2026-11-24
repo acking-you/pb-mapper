@@ -1231,9 +1231,11 @@ where that fits. Seven rules carry it:
    units wait for send credit or the encoder holds four. A picture the
    backend dates places the next tick a period after its present, up to a
    quarter period early and at most 1/64 period earlier than a period after
-   the last tick, so the long-run rate stays within 64/63 of the pace; an
-   undated picture, a repeat or a skip keeps an even grid. After a stall two
-   captures are never closer than three quarters of a period.
+   the last tick, and only a picture of a single present moves it earlier:
+   the long-run rate stays within 64/63 of the pace, and a display at least
+   twice as fast as the pace is taken at the pace. An undated picture, a
+   repeat or a skip keeps an even grid. After a stall two captures are never
+   closer than three quarters of a period.
 3. **QoS changes frame rate and bitrate only, from probe delay.** A probe once a
    second, four a second on a short path, is answered by the viewer's network
    task. Resolution never adapts: it changes only with a new session, a display
@@ -1269,12 +1271,15 @@ that picture's present, as airhand's pacer does: the next may be taken up to
 a quarter period before the tick, and the tick is a period after the
 present, but never more than 1/64 period earlier than a period after the
 last one. A display presenting at the pace, or slightly faster or slower,
-is therefore taken as each present lands; a present that had to wait for
-the early window moves the timeline 1/64 period earlier per picture until
-the presents land in it, and the long-run rate stays within 64/63 of the
-pace. Without dates, on an even grid, a display a little faster than the
-pace drifts ahead of its ticks, each picture waiting longer, until one is
-replaced before a capture takes it. A skip, a repeat and an undated
+is therefore taken as each present lands; a picture of a single present that
+had to wait for the early window moves the timeline 1/64 period earlier per
+picture until the presents land in it, so the long-run rate stays within
+64/63 of the pace. A picture covering several presents that waited, from a
+display faster than the pace, moves nothing: a display at least twice as
+fast is taken at the pace itself, and one between once and twice as fast at
+up to 64/63 of it. Without dates, on an even grid, a display a little faster
+than the pace drifts ahead of its ticks, each picture waiting longer, until
+one is replaced before a capture takes it. A skip, a repeat and an undated
 picture keep the even grid, which keeps its long-run rate (120 FPS on a
 165 Hz display is not rounded down). In process, a Windows host dates a
 picture by its present and a Mac host by its arrival from ScreenCaptureKit;
@@ -1288,10 +1293,18 @@ backend's `capture_poll`) for 250 ms (`HOT_WINDOW`) after an input the
 thread injected or a new picture, when the next present is likely, and
 once a period otherwise, so a still desktop costs no more capture calls
 than the grid. An injected input also brings a poll due a period later in to
-2 ms. A change of the viewers' limits that changes only the frame rate keeps
-the capture source where it can serve the new limits as it is (the
-synthetic test platform's can; the Windows and Mac sources are still built
-again), and asks for an IDR either way. A capture that finds
+2 ms. Anchoring adds such polls on an active desktop: after a dated picture
+the next tick opens three quarters of a period later, and DXGI is asked
+every 2 ms from then until the next present lands, where a grid at the
+display's own rate mostly found a present already waiting at its tick.
+`desktop_capture_pacing`'s `empty_polls_per_s` and `video_bench`'s
+`polls_per_s` count them. A change of the viewers' limits that changes only
+the frame rate keeps the capture source where it can serve the new limits as
+it is (the synthetic test platform's can; the Windows and Mac sources are
+still built again), and asks for an IDR either way. Thread C passes each
+change of limits to the backend as it happens, during an outage too, so a
+recovery, which repeats the current limits, always builds a fresh source.
+A capture that finds
 the encoder without room spends its tick. A tick is skipped (and
 counted in `skipped_ticks`) only while two units in the hand-off queue wait for
 send credit, which is transport backpressure, or while the encoder (or the
@@ -1856,7 +1869,7 @@ shapes by content, never by number.
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
 | Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder |
 | Armed tick | a tick with no new picture stays armed; ScreenCaptureKit wakes thread C; DXGI, in process or through the helper, is asked again every 2 ms for 250 ms after an injected input or a new picture (an input brings a pending poll in to 2 ms), and once a period otherwise |
-| Capture pacing | after a dated picture, the next tick a period after its present, up to ¼ period early and at most 1/64 period earlier than a period after the last tick (long-run rate ≤ 64/63 × pace); ¾ period floor after a stall; a present over a period old counts as undated, and DXGI dates no picture presented over 1 s ago |
+| Capture pacing | after a dated picture, the next tick a period after its present, up to ¼ period early and, for a picture of a single present, at most 1/64 period earlier than a period after the last tick (long-run rate ≤ 64/63 × pace); a picture of several presents that waited keeps the tick a period after the last; ¾ period floor after a stall; a present over a period old counts as undated, and DXGI dates no picture presented over 1 s ago |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
 | QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves; Balanced starts at its ceiling after a first probe under 50 ms; tick 250 ms; bits-per-frame window 3 s; latch at 1.3 × over 2 windows at ≤ 0.75 × nominal |
 | Process timers | 1 ms, with power throttling opted out, while a session captures |
@@ -1916,7 +1929,10 @@ and `display_to_arrival_p50_us` and `display_to_arrival_p95_us`, from
 queue. A Windows encoder logs its first acquire as
 `windows_capture_first_acquire` on `pb_mapper_desktop::session` (debug):
 `last_present_time`, `accumulated_frames` and whether a desktop image came
-with it.
+with it, which it also keeps in its statistics for `video_bench`'s
+`first_acquire_*`. The app's own host writes these debug events when
+`RUST_LOG` enables their targets; the background service's log keeps its
+targets at info, and its capture helper logs nothing.
 
 The host traces each second as `desktop_feedback_interval` on
 `pb_mapper_desktop::feedback` (debug): `action`, `fps`, `pace_fps`,
