@@ -1,0 +1,9 @@
+#!/bin/sh
+# A stand-in archiver for a type-check of the Windows target: it writes an
+# empty archive where lib.exe's -out: says.
+for arg in "$@"; do
+  case "$arg" in
+    -out:*) out="${arg#-out:}"; printf '!<arch>\n' > "$out" ;;
+  esac
+done
+exit 0
