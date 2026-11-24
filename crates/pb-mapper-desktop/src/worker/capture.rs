@@ -307,6 +307,8 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         }
         let tick_due = retry || (self.pacer.due(now) && now >= self.capture_at());
         let pending = self.backend.pending_video();
+        // A source with a bound of its own below `ENCODER_DEPTH` is asked
+        // last, so that it is asked only for a tick that would capture.
         if tick_due
             && pending < ENCODER_DEPTH
             && self
@@ -314,6 +316,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 .iter()
                 .flatten()
                 .any(|slot| !slot.paused && slot.shared.outgoing.len() < TRANSPORT_GATE)
+            && !self.backend.video_full()
         {
             let keyframe = self.keyframe
                 || self

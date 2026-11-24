@@ -2,9 +2,13 @@
 //! stream scaled to the encoder's size, and a VideoToolbox session that
 //! reads its pictures in place. Thread C paces: each submit encodes the
 //! newest picture, or the last one again every `LIVENESS_INTERVAL` while
-//! the screen stands still, or at once for a keyframe. The encoder pushes
-//! its output and wakes thread C (`DRAIN = None`). A new picture is dated by
-//! when it reached the stream's queue, which thread C anchors its pacing on.
+//! the screen stands still, or at once for a keyframe. A submit only hands
+//! the picture to the encoder's submit thread, which makes the VideoToolbox
+//! call; at most `VT_IN_FLIGHT` units are in flight, and a submit that finds
+//! the submit thread still busy leaves its tick armed until that thread
+//! wakes thread C. The encoder pushes its output and wakes thread C
+//! (`DRAIN = None`). A new picture is dated by when it reached the stream's
+//! queue, which thread C anchors its pacing on.
 //! A display that sleeps gives the stream nothing: an open, the first
 //! submit after a resume and a stream with no picture light it
 //! (`power.rs`) and fail, and thread C's retry opens a stream once it draws.
@@ -13,7 +17,7 @@
 
 use super::{
     capture::{CaptureState, Counts, Stream},
-    encoder::{self, Encoder},
+    encoder::{self, Admit, Encoder},
     platform::ScreenAccess,
     power,
     wake::{SETTLE, SleepWatch},
@@ -21,13 +25,82 @@ use super::{
 use crate::{
     BackendError, Display, EncodedFrame, FailureKind, Presented, Result, VideoCodec, VideoLimits,
     VideoRate, Waker,
-    codec::pipeline::{FIRST_SUBMIT_WAIT, LIVENESS_INTERVAL},
+    codec::pipeline::{FIRST_SUBMIT_WAIT, LATE_OUTPUT, LIVENESS_INTERVAL},
     error, failure_kind,
     platform::VideoSource,
     qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN, scaled_size},
     worker::ENCODER_DEPTH,
 };
-use std::time::{Duration, Instant};
+use objc2_core_video::{
+    CVPixelBuffer, CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetExtendedPixels,
+    CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetWidth,
+};
+use std::{
+    ffi::c_void,
+    time::{Duration, Instant},
+};
+
+/// Units VideoToolbox may hold at once, the mailbox's among them; thread C
+/// skips a tick that finds this many (`full`). Where a session encodes
+/// asynchronously (a size that is not a multiple of 16, such as a MacBook's
+/// built-in display at its default resolution) and the pace outruns it,
+/// each unit admitted waits behind the others: on an M6 at a pace of 120,
+/// a 3024x1964 session's units took 41 ms (H.264) and 39 ms (H.265) from
+/// submit to output, at a median, with four in flight, and 18 and 17 ms
+/// with two, at the same frame rate (`video_toolbox_in_flight`). Where it
+/// encodes inside the call, one unit is in flight at a time anyway.
+pub(super) const VT_IN_FLIGHT: usize = 2;
+const _: () = assert!(
+    VT_IN_FLIGHT + 1 < ENCODER_DEPTH,
+    "thread C's own gate, which also counts units out and not yet drained, leaves room beside this one"
+);
+
+// The surface behind a pixel buffer (CoreVideo's, not retained), and its
+// size (IOSurface's), for `macos_capture_layout`.
+#[link(name = "CoreVideo", kind = "framework")]
+unsafe extern "C" {
+    fn CVPixelBufferGetIOSurface(pixel_buffer: &CVPixelBuffer) -> *const c_void;
+}
+#[link(name = "IOSurface", kind = "framework")]
+unsafe extern "C" {
+    fn IOSurfaceGetAllocSize(buffer: *const c_void) -> usize;
+}
+
+/// The first picture's layout, as a debug line on
+/// `pb_mapper_desktop::session` (`macos_capture_layout`): its size, the
+/// pixels it says it extends by on each side, each plane's rows and bytes
+/// per row, and its surface's size. They say whether ScreenCaptureKit pads
+/// its pictures to a multiple of 16, which VideoToolbox would read.
+fn trace_layout(picture: &CVPixelBuffer) {
+    if !tracing::enabled!(target: "pb_mapper_desktop::session", tracing::Level::DEBUG) {
+        return;
+    }
+    let (mut left, mut right, mut top, mut bottom) = (0usize, 0usize, 0usize, 0usize);
+    // SAFETY: out pointers to locals; the picture is planar NV12.
+    unsafe {
+        CVPixelBufferGetExtendedPixels(picture, &mut left, &mut right, &mut top, &mut bottom)
+    };
+    // SAFETY: the picture's own surface, null when it has none, alive while
+    // the picture is.
+    let surface = unsafe { CVPixelBufferGetIOSurface(picture) };
+    // SAFETY: a live surface.
+    let surface_bytes = (!surface.is_null()).then(|| unsafe { IOSurfaceGetAllocSize(surface) });
+    tracing::debug!(
+        target: "pb_mapper_desktop::session",
+        event = "macos_capture_layout",
+        width = CVPixelBufferGetWidth(picture),
+        height = CVPixelBufferGetHeight(picture),
+        extended_left = left,
+        extended_right = right,
+        extended_top = top,
+        extended_bottom = bottom,
+        luma_rows = CVPixelBufferGetHeightOfPlane(picture, 0),
+        luma_bytes_per_row = CVPixelBufferGetBytesPerRowOfPlane(picture, 0),
+        chroma_rows = CVPixelBufferGetHeightOfPlane(picture, 1),
+        chroma_bytes_per_row = CVPixelBufferGetBytesPerRowOfPlane(picture, 1),
+        surface_bytes,
+    );
+}
 
 /// The capture stops before the encoder goes.
 pub(crate) struct MacVideo {
@@ -200,15 +273,19 @@ impl VideoSource for MacVideo {
     }
     fn set_rate(&mut self, rate: VideoRate) -> Result<()> {
         rate_bounds(rate.bitrate)?;
-        self.encoder.set_bitrate(rate.bitrate)
+        self.encoder.set_bitrate(rate.bitrate);
+        Ok(())
     }
     /// Never waits: nothing captured yet, a full encoder or a still screen
     /// inside the liveness interval submit nothing; a keyframe asked for
-    /// stays asked for until a submit carries it. A display that slept
-    /// through a pause, that never gave a picture because it sleeps, or
-    /// that turned off under the stream and stayed dark for `SETTLE`, is
-    /// lit, and the submit fails so that thread C opens a new stream once
-    /// it draws.
+    /// stays asked for until a submit carries it. Thread C skips a tick
+    /// while `VT_IN_FLIGHT` units are in flight (`full`), and a submit that
+    /// finds them anyway spends its tick; an encoder whose submit thread is
+    /// still busy leaves it armed, and that thread wakes thread C once it is
+    /// free, so the newest picture goes then. A display that slept through
+    /// a pause, that never gave a picture because it sleeps, or that turned
+    /// off under the stream and stayed dark for `SETTLE`, is lit, and the
+    /// submit fails so that thread C opens a new stream once it draws.
     fn submit(&mut self, keyframe: bool) -> Result<bool> {
         self.presented = None;
         // Thread C checked the session just before, as for `open`.
@@ -216,8 +293,10 @@ impl VideoSource for MacVideo {
             return Err(power::waking());
         }
         self.keyframe |= keyframe | self.encoder.keyframe_due();
-        if self.encoder.pending() >= ENCODER_DEPTH {
-            return Ok(true);
+        match self.encoder.admit(VT_IN_FLIGHT) {
+            Admit::Full => return Ok(true),
+            Admit::Busy => return Ok(false),
+            Admit::Free => {}
         }
         let now = Instant::now();
         let repeat = self.keyframe
@@ -251,6 +330,9 @@ impl VideoSource for MacVideo {
                 return Err(power::waking());
             }
         }
+        if self.last_submit.is_none() {
+            trace_layout(&taken.picture);
+        }
         self.encoder
             .encode(&taken.picture, self.keyframe, taken.fresh.is_none())?;
         self.keyframe = false;
@@ -262,6 +344,12 @@ impl VideoSource for MacVideo {
         self.timing.roll(now, &self.stream);
         Ok(true)
     }
+    /// `VT_IN_FLIGHT` units in flight: thread C skips the tick and counts it
+    /// in `skipped_ticks`, and the encoder in `macos_encoder_load`'s
+    /// `gate_ticks`.
+    fn full(&self) -> bool {
+        self.encoder.full(VT_IN_FLIGHT)
+    }
     /// A new picture, dated by its arrival on the stream's queue.
     fn presented(&self) -> Option<Presented> {
         self.presented
@@ -269,6 +357,13 @@ impl VideoSource for MacVideo {
     fn idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         if self.resumed {
             return None;
+        }
+        // A submit found the encoder's submit thread busy: that thread
+        // wakes thread C once it is free. Nothing is due before then, and
+        // `None`, due now, would spin thread C, which never polls this push
+        // source.
+        if self.encoder.waiting() {
+            return Some(Instant::now() + LATE_OUTPUT);
         }
         match self.stream.state() {
             CaptureState::Ready => None,

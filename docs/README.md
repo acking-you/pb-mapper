@@ -51,6 +51,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [Native pointer shape measurements](benchmarks/2026-11-24-native-cursor/README.md) | `ui/tool/pointer_latency.dart` on the macOS runner: a pointer shape change through a rebuild and the post-frame pass, against the direct system cursor and runner bitmap calls the cursor session makes, and how long a painted pointer took to draw after a mouse move |
 | [Viewer pixel snap measurements](benchmarks/2026-11-24-viewer-pixel-snap/README.md) | the contrast a 1-pixel stroke keeps through the viewer's picture transform, before and after keeping a 1:1 picture on device pixels and showing a near-1 fit at exactly 1:1 |
 | [Mac desktop check reuse](benchmarks/2026-11-24-mac-session-check/README.md) | what the session and geometry check around each Mac capture and pointer read costs thread C and WindowServer, back to back and paced at 60 FPS, before and after reusing a passing one for 16 ms |
+| [Mac VideoToolbox submit thread](benchmarks/2026-11-24-macos-vt-submit/README.md) | what a VideoToolbox submit costs a Mac host's thread C and an input queued meanwhile, and VideoToolbox's dwell with four and two units in flight, before and after the encoder's own submit thread |
 
 ## Security
 

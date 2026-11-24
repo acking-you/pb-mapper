@@ -111,6 +111,9 @@ impl Backend for Guarded {
     fn pending_video(&self) -> usize {
         self.inner.pending_video()
     }
+    fn video_full(&self) -> bool {
+        self.inner.video_full()
+    }
     fn input(&mut self, input: &Input) -> Result<()> {
         let context = self.context()?;
         self.input_in_context(&context, input)

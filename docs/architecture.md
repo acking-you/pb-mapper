@@ -403,7 +403,10 @@ Nothing in the SDK crates knows it exists.
     unit-tested in CI, with capture and streaming verified on an M3 Pro): `mod.rs`
     (`Macos`, its `support()` and the Screen Recording and Accessibility
     permissions), `capture.rs` (ScreenCaptureKit) and `encoder.rs`
-    (`VTCompressionSession`) fused in `video.rs`, which pushes; `desktop.rs`
+    (`VTCompressionSession`, every call on its own submit thread, which
+    thread C hands pictures and bitrates through a one-slot mailbox) fused
+    in `video.rs`, which pushes and holds VideoToolbox to two units in
+    flight; `desktop.rs`
     (displays by UUID, the lock and console check), `geometry.rs` (points
     and pixels), `input.rs` (`CGEvent`), `clicks.rs`, `keys.rs` (`Key` and
     HID usages to `kVK_*`), `cursor.rs` (position, and the shape when the
@@ -419,7 +422,9 @@ Nothing in the SDK crates knows it exists.
     user event for the wake), `keychain.rs`, `cf.rs` (Core Foundation
     glue, symbols looked up at run time). Its pure modules build and are
     tested everywhere; `tests.rs` runs only on macOS, and its ignored
-    `video_toolbox_rate_model_*` measure VideoToolbox's rate model
+    `video_toolbox_rate_model_*` measure VideoToolbox's rate model, and
+    `video_toolbox_submit_blocking` and `video_toolbox_in_flight` what a
+    submit costs thread C and what VideoToolbox's queue costs a unit
   - `platform/windows/helper/`: The opt-in UAC/Winlogon service —
     `service.rs`; the workers it starts (`worker.rs`, `child.rs`) and a
     worker's binding to the input desktop (`binding.rs`); `pipe.rs`, and
