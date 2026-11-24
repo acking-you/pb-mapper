@@ -17,11 +17,16 @@ mod codec;
 mod converter;
 mod probe;
 
+pub use crate::codec::sps::SpsReorder;
 pub use probe::h265_available;
 
+use super::gpu_priority::GpuPriority;
 use crate::{
     BackendError, DRAIN_POLL, Display, FailureKind, Presented, Result, VideoCodec, Waker,
-    codec::pipeline::{FIRST_SUBMIT_WAIT, LIVENESS_INTERVAL, OUTPUT_WAIT, codec_error, late},
+    codec::{
+        annexb::codec_name,
+        pipeline::{FIRST_SUBMIT_WAIT, LIVENESS_INTERVAL, OUTPUT_WAIT, codec_error, late},
+    },
     error,
     qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN, scaled_size},
     scheduler::{Waiter, Wake},
@@ -71,6 +76,62 @@ const PRESENT_MAX_AGE: Duration = Duration::from_secs(1);
 /// but the last, which holds the rest.
 pub const PICKUP_BOUNDS_US: [u32; 7] = [100, 250, 500, 1_000, 2_000, 4_000, 8_000];
 pub const PICKUP_BUCKETS: usize = PICKUP_BOUNDS_US.len() + 1;
+
+/// An H.264 profile family to ask the encoder for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum H264Profile {
+    /// Baseline: CAVLC, no 8x8 transform.
+    Base,
+    /// Constrained High, else High (CABAC and the 8x8 transform), where
+    /// nothing rules it out; else Baseline.
+    #[default]
+    High,
+}
+
+/// How the hardware encoder is set up beyond its codec, size and rates.
+/// A session takes the defaults; `video_bench` varies each, so that a
+/// default changes only by measurement.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EncoderOptions {
+    /// The H.264 profile family to ask for first.
+    pub h264_profile: H264Profile,
+    /// `CODECAPI_AVEncCommonQualityVsSpeed`, 0 (speed) to 100 (quality).
+    pub quality_vs_speed: u32,
+    /// Set `CODECAPI_AVScenarioInfo` to display remoting.
+    pub display_remoting: bool,
+    /// Raise the capture device's GPU thread priority and hold this
+    /// process's GPU scheduling class at `HIGH` while the encoder lives
+    /// (`gpu_priority.rs`).
+    pub gpu_priority: bool,
+}
+
+/// What a hardware encoder took of its settings, read back as it opened:
+/// what `desktop_video_encoder_opened` logs and `Statistics::opened` keeps.
+/// `None` where the encoder reads nothing back.
+#[derive(Clone, Debug, Default)]
+pub struct EncoderOpened {
+    /// The capture adapter's PCI vendor ID: 0x10de NVIDIA, 0x8086 Intel,
+    /// 0x1002 AMD.
+    pub vendor: u32,
+    /// `CODECAPI_AVEncCommonRateControlMode`: 0 is CBR, which is asked for.
+    pub rate_control: Option<u32>,
+    /// `CODECAPI_AVEncCommonQualityVsSpeed`.
+    pub quality_vs_speed: Option<u32>,
+    /// `CODECAPI_AVScenarioInfo`: 1 is display remoting.
+    pub scenario: Option<u32>,
+    /// `CODECAPI_AVEncMPVDefaultBPictureCount`; `None` from an encoder that
+    /// does not implement it.
+    pub b_frames: Option<u32>,
+    /// `CODECAPI_AVEncH264CABACEnable`, for H.264.
+    pub cabac: Option<bool>,
+    /// The output type's `MF_MT_MPEG2_PROFILE`: H.264's 257 (Constrained
+    /// High), 100 (High) or 66 (Baseline); H.265's 1 (Main).
+    pub profile: u32,
+    /// The `profile_idc` of the encoder's H.264 SPS, once it wrote one.
+    pub sps_profile: Option<u8>,
+    /// What that SPS said about output reordering, and what is sent.
+    pub sps_reorder: Option<SpsReorder>,
+}
 
 pub struct Encoded {
     pub codec: VideoCodec,
@@ -171,6 +232,9 @@ pub struct Statistics {
     /// `PICKUP_BOUNDS_US`, the last holding the rest. Nothing while the
     /// events are polled.
     pub pickup: [u64; PICKUP_BUCKETS],
+    /// What the encoder read back as it opened; the SPS's fields from the
+    /// first SPS it wrote, when its media type carried none.
+    pub opened: EncoderOpened,
 }
 
 /// The bucket of `Statistics::pickup` a wait of `wait` falls in.
@@ -266,6 +330,10 @@ pub struct Encoder {
     capture: DxgiDuplicationApi,
     codec: Codec,
     converter: Converter,
+    /// `video_bench --dump-source`'s: the last submitted sample, kept for
+    /// `source_nv12`, and the texture it is read back through. Released
+    /// before the sample allocator.
+    source: Option<Source>,
     allocator: IMFVideoSampleAllocatorEx,
     _manager: IMFDXGIDeviceManager,
     latest: Option<ID3D11Texture2D>,
@@ -294,7 +362,17 @@ pub struct Encoder {
     force_keyframe: bool,
     wait_independent_output: bool,
     stats: Statistics,
+    /// The raised GPU priority (`EncoderOptions::gpu_priority`), given back
+    /// as the encoder goes.
+    _gpu_priority: Option<GpuPriority>,
     runtime: Runtime,
+}
+
+/// The last submitted sample, which `Encoder::source_nv12` reads back.
+#[derive(Default)]
+struct Source {
+    sample: Option<IMFSample>,
+    staging: Option<ID3D11Texture2D>,
 }
 
 /// The encoded size: the capture fitted inside these bounds, keeping its aspect
@@ -311,7 +389,11 @@ impl Encoder {
     /// desktop texture remains at native resolution; no CPU readback. Given a
     /// `waker`, the encoder's events wake it where they can
     /// (`Statistics::events_pushed`, `drain_poll`); without one, `drain`
-    /// polls them.
+    /// polls them. A session takes the default `options`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the public constructor video_bench and the backend call; each is a plain value"
+    )]
     pub fn new_with_size(
         display: &Display,
         codec: VideoCodec,
@@ -320,6 +402,7 @@ impl Encoder {
         max_width: u32,
         max_height: u32,
         waker: Option<&Waker>,
+        options: EncoderOptions,
     ) -> Result<Self> {
         Self::build(
             display,
@@ -328,12 +411,17 @@ impl Encoder {
             bitrate,
             OutputSize::Fit(max_width, max_height),
             waker,
+            options,
         )
     }
 
     /// Encode exactly `width` × `height` (rounded down to even), upscaling a
     /// smaller display: `video_bench` measures a resolution the display does
     /// not have. A session never upscales.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the public constructor video_bench calls; each is a plain value"
+    )]
     pub fn new_exact(
         display: &Display,
         codec: VideoCodec,
@@ -342,6 +430,7 @@ impl Encoder {
         width: u32,
         height: u32,
         waker: Option<&Waker>,
+        options: EncoderOptions,
     ) -> Result<Self> {
         Self::build(
             display,
@@ -350,6 +439,7 @@ impl Encoder {
             bitrate,
             OutputSize::Exact(width, height),
             waker,
+            options,
         )
     }
 
@@ -360,6 +450,7 @@ impl Encoder {
         bitrate: u32,
         size: OutputSize,
         waker: Option<&Waker>,
+        options: EncoderOptions,
     ) -> Result<Self> {
         if kind == VideoCodec::Jpeg {
             return Err(error("the hardware encoder encodes H.264 or H.265"));
@@ -368,6 +459,9 @@ impl Encoder {
             || !(ENCODER_BITRATE_MIN..=ENCODER_BITRATE_MAX).contains(&bitrate)
         {
             return Err(error("video rate outside supported bounds"));
+        }
+        if options.quality_vs_speed > 100 {
+            return Err(error("quality against speed outside 0..=100"));
         }
         let (OutputSize::Fit(max_width, max_height) | OutputSize::Exact(max_width, max_height)) =
             size;
@@ -414,9 +508,35 @@ impl Encoder {
             height,
             fps,
             bitrate,
+            options,
         };
+        // Before the encoder starts, so that its first unit has it too.
+        let gpu_priority = options.gpu_priority.then(|| GpuPriority::hold(device));
         let codec = Codec::new(device, &manager, settings, waker)
             .map_err(|failure| codec_error(kind, failure))?;
+        let opened = codec.opened.clone();
+        tracing::info!(
+            target: "pb_mapper_desktop::session",
+            event = "desktop_video_encoder_opened",
+            encoder = %codec.name,
+            codec = codec_name(kind),
+            vendor = format_args!("{:#06x}", opened.vendor),
+            width,
+            height,
+            fps,
+            gop = codec.gop,
+            rate_control = ?opened.rate_control,
+            quality_vs_speed = ?opened.quality_vs_speed,
+            scenario = ?opened.scenario,
+            b_frames = ?opened.b_frames,
+            cabac = ?opened.cabac,
+            profile = opened.profile,
+            sps_profile = ?opened.sps_profile,
+            sps_reorder = %opened
+                .sps_reorder
+                .map_or_else(|| "unknown".to_owned(), |reorder| reorder.to_string()),
+            gpu_priority = options.gpu_priority,
+        );
         let converter = Converter::new(
             device,
             capture.device_context(),
@@ -451,12 +571,14 @@ impl Encoder {
         let stats = Statistics {
             gop: codec.gop,
             events_pushed: codec.pushes(),
+            opened,
             ..Statistics::default()
         };
         Ok(Self {
             capture,
             codec,
             converter,
+            source: None,
             allocator,
             _manager: manager,
             latest: None,
@@ -478,6 +600,7 @@ impl Encoder {
             force_keyframe: true,
             wait_independent_output: true,
             stats,
+            _gpu_priority: gpu_priority,
             runtime,
         })
     }
@@ -522,6 +645,96 @@ impl Encoder {
                 asked + DRAIN_POLL
             }
         })
+    }
+
+    /// Keep each sample `submit` gives the encoder, for `source_nv12`
+    /// (`video_bench --dump-source`): a reference to one sample of the pool.
+    /// A session never does.
+    pub fn keep_source(&mut self) {
+        self.source.get_or_insert_with(Source::default);
+    }
+
+    /// Read the NV12 picture the last `submit` gave the encoder back from
+    /// the GPU into `out`: `height` rows of `width` luma bytes, then
+    /// `height / 2` rows of `width` interleaved chroma bytes. Once per
+    /// submitted sample: false without `keep_source`, or when no sample was
+    /// submitted since the last read. It waits for the GPU to finish the
+    /// picture.
+    pub fn source_nv12(&mut self, out: &mut Vec<u8>) -> Result<bool> {
+        self.check_thread()?;
+        let (width, height) = (self.width as usize, self.height as usize);
+        let Some(source) = self.source.as_mut() else {
+            return Ok(false);
+        };
+        let Some(sample) = source.sample.take() else {
+            return Ok(false);
+        };
+        let buffer = unsafe { sample.GetBufferByIndex(0).map_err(error)? };
+        let buffer: IMFDXGIBuffer = buffer.cast().map_err(error)?;
+        let mut raw = std::ptr::null_mut();
+        unsafe {
+            buffer
+                .GetResource(&ID3D11Texture2D::IID, &mut raw)
+                .map_err(error)?;
+        }
+        // SAFETY: `GetResource` returned a referenced texture of the IID asked.
+        let texture = unsafe { ID3D11Texture2D::from_raw(raw) };
+        let subresource = unsafe { buffer.GetSubresourceIndex().map_err(error)? };
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut desc) };
+        // The pool's textures may be taller than the picture: the staging
+        // copy takes a whole slice of one, and its chroma starts below all
+        // of its rows.
+        if source.staging.is_none() {
+            let staging = D3D11_TEXTURE2D_DESC {
+                MipLevels: 1,
+                ArraySize: 1,
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+                ..desc
+            };
+            let mut created = None;
+            unsafe {
+                self.capture
+                    .device()
+                    .CreateTexture2D(&staging, None, Some(&mut created))
+                    .map_err(error)?;
+            }
+            source.staging = created;
+        }
+        let staging = source
+            .staging
+            .as_ref()
+            .ok_or_else(|| error("missing staging texture"))?;
+        let context = self.capture.device_context();
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {
+            context.CopySubresourceRegion(staging, 0, 0, 0, 0, &texture, subresource, None);
+            context
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .map_err(error)?;
+        }
+        let pitch = mapped.RowPitch as usize;
+        let rows = desc.Height as usize;
+        // SAFETY: a mapped NV12 staging texture holds `rows` luma rows, then
+        // `rows / 2` chroma rows, each `pitch` bytes apart, until `Unmap`.
+        let data =
+            unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), pitch * rows * 3 / 2) };
+        out.clear();
+        let (luma, chroma) = data.split_at(pitch * rows);
+        let copied = luma
+            .chunks(pitch)
+            .take(height)
+            .chain(chroma.chunks(pitch).take(height / 2))
+            .try_for_each(|row| {
+                out.extend_from_slice(row.get(..width)?);
+                Some(())
+            });
+        unsafe { context.Unmap(staging, 0) };
+        copied.ok_or_else(|| error("NV12 picture larger than its texture"))?;
+        Ok(true)
     }
 
     /// Apply a QoS rate. Only the mean bitrate reaches the encoder, and only
@@ -608,12 +821,21 @@ impl Encoder {
                     .pop_front()
                     .ok_or_else(|| error("unsolicited video output"))?;
                 if unsafe { sample.GetSampleTime().map_err(error)? } != (pts_us * 10) as i64 {
+                    // Before the failure, so that the capture's retry
+                    // builds H.264 in Baseline.
+                    self.codec.reordered();
                     return Err(error(
                         "hardware encoder reordered input despite B-frames being off",
                     ));
                 }
                 let bytes = sample_bytes(&sample)?;
                 let (bytes, keyframe) = self.codec.annex_b(bytes)?;
+                if self.stats.opened.sps_reorder.is_none() {
+                    // An encoder whose media type carried no SPS writes
+                    // its first in band.
+                    self.stats.opened.sps_reorder = self.codec.sps_reorder();
+                    self.stats.opened.sps_profile = self.codec.sps_profile();
+                }
                 let now = Instant::now();
                 let previous = self.last_output.replace(now);
                 // A genuinely late codec output is not a newly captured picture.
@@ -733,6 +955,9 @@ impl Encoder {
                 .map_err(|failure| codec_error(kind, error(failure)))?;
         }
         self.codec.input_taken();
+        if let Some(source) = &mut self.source {
+            source.sample = Some(sample);
+        }
         self.force_keyframe = false;
         self.last_submit = Some(now);
         self.last_pts_us = Some(pts_us);

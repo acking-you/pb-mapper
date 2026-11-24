@@ -8,10 +8,20 @@
 //! thread that waits for its events, counts them and wakes thread C, and
 //! whose wait the encoder's shutdown ends; for any other, thread C reads
 //! them each time it drains.
-use super::MAX_IN_FLIGHT;
+//!
+//! H.264 is asked for in a High profile with CABAC, which codes the same
+//! picture in fewer bits than Baseline's CAVLC, where nothing rules it out:
+//! an encoder that implements the B-frame count and does not take 0, an
+//! earlier High encoder of this process that reordered its output
+//! (`H264_HIGH_FAILED`), or an output type that refuses it. Baseline is
+//! the fallback.
+use super::{EncoderOpened, EncoderOptions, H264Profile, MAX_IN_FLIGHT};
 use crate::{
     Result, VideoCodec, Waker,
-    codec::annexb::{AccessUnit, MAX_ACCESS_UNIT, ParameterSets, codec_name},
+    codec::{
+        annexb::{AccessUnit, MAX_ACCESS_UNIT, ParameterSets, codec_name},
+        sps::SpsReorder,
+    },
     error,
 };
 use std::{
@@ -59,9 +69,66 @@ const WATCHER_EXIT: Duration = Duration::from_millis(100);
 /// switch, a recovery or a new size builds again, get no watcher and have
 /// their events polled, so that at most one is left behind per process.
 static WATCHER_STUCK: AtomicBool = AtomicBool::new(false);
+/// An H.264 encoder built in a High profile reordered its output in this
+/// process: later H.264 encoders, which the capture's retry builds at once,
+/// are built in Baseline, which has no B-frames.
+static H264_HIGH_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// The H.264 output profiles a High build tries, in order: Constrained High
+/// (Media Foundation's unified-communications variant), High, then
+/// Baseline, which every encoder takes.
+const H264_HIGH: [eAVEncH264VProfile; 3] = [
+    eAVEncH264VProfile_UCConstrainedHigh,
+    eAVEncH264VProfile_High,
+    eAVEncH264VProfile_Base,
+];
+const H264_BASE: [eAVEncH264VProfile; 1] = [eAVEncH264VProfile_Base];
 
 pub(super) fn luid_value(luid: LUID) -> u64 {
     (u64::from(luid.HighPart as u32) << 32) | u64::from(luid.LowPart)
+}
+
+/// What an encoder does with `CODECAPI_AVEncMPVDefaultBPictureCount` set to
+/// 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BFrames {
+    /// It does not implement the property (NVIDIA's HEVC MFT answers
+    /// `E_NOTIMPL`): only the required low-latency mode keeps B-frames out,
+    /// and every output's check against reordering.
+    Unsupported,
+    /// It took 0 and reads 0 back.
+    Off,
+    /// It implements the property and did not take 0, or reads back more.
+    On,
+}
+
+/// The H.264 output profiles to try, in order. Baseline alone when it was
+/// asked for, when a High encoder of this process reordered its output, or
+/// when the encoder may make B-frames, which Baseline forbids and High
+/// allows; else Constrained High, High, then Baseline.
+fn pick_h264_profile(
+    requested: H264Profile,
+    high_failed: bool,
+    b_frames: BFrames,
+) -> &'static [eAVEncH264VProfile] {
+    match (requested, b_frames) {
+        (H264Profile::High, BFrames::Unsupported | BFrames::Off) if !high_failed => &H264_HIGH,
+        (H264Profile::High | H264Profile::Base, BFrames::Unsupported | BFrames::Off)
+        | (H264Profile::High | H264Profile::Base, BFrames::On) => &H264_BASE,
+    }
+}
+
+/// An H.264 encoder built in a High profile reordered its output: later
+/// H.264 encoders of this process are built in Baseline.
+fn h264_high_reordered(encoder: &str) {
+    if !H264_HIGH_FAILED.swap(true, Ordering::AcqRel) {
+        tracing::warn!(
+            target: "pb_mapper_desktop::session",
+            event = "desktop_h264_high_failed",
+            encoder,
+            "the encoder reordered its output in a High profile; H.264 is Baseline for the rest of this process",
+        );
+    }
 }
 
 /// Keep the first GOP candidate the encoder accepts and reads back unchanged.
@@ -77,7 +144,8 @@ fn pick_gop(mut set: impl FnMut(u32) -> bool, mut read: impl FnMut() -> Option<u
 }
 
 /// What the encoder is set up for: a codec, the encoded size, the nominal
-/// frame rate and the mean bitrate.
+/// frame rate, the mean bitrate, and the options a session leaves at their
+/// defaults.
 #[derive(Clone, Copy)]
 pub(super) struct EncoderSettings {
     pub(super) kind: VideoCodec,
@@ -85,6 +153,7 @@ pub(super) struct EncoderSettings {
     pub(super) height: u32,
     pub(super) fps: u32,
     pub(super) bitrate: u32,
+    pub(super) options: EncoderOptions,
 }
 
 pub(super) struct Codec {
@@ -111,6 +180,11 @@ pub(super) struct Codec {
     /// The NAL unit ranges of the unit being sent, kept across units.
     nal_units: Vec<(usize, usize)>,
     pub(super) gop: u32,
+    /// An H.264 encoder built in a High profile: a reordered output turns
+    /// High off for the process.
+    high: bool,
+    /// What it read back as it opened.
+    pub(super) opened: EncoderOpened,
 }
 impl Codec {
     /// The first hardware encoder of `settings.kind` on `device`'s adapter
@@ -172,7 +246,10 @@ impl Codec {
         for activation in candidates {
             let name = activation_name(&activation);
             match Self::activate(&activation, name.clone(), manager, settings, waker) {
-                Ok(codec) => return Ok(codec),
+                Ok(mut codec) => {
+                    codec.opened.vendor = adapter.VendorId;
+                    return Ok(codec);
+                }
                 Err(e) => {
                     unsafe {
                         let _ = activation.ShutdownObject();
@@ -205,6 +282,14 @@ impl Codec {
             height,
             fps,
             bitrate,
+            options:
+                EncoderOptions {
+                    h264_profile,
+                    quality_vs_speed,
+                    display_remoting,
+                    // The device's and process's, which `Encoder` holds.
+                    gpu_priority: _,
+                },
         } = settings;
         let transform: IMFTransform = unsafe {
             activation
@@ -242,6 +327,8 @@ impl Codec {
             parameter_sets: ParameterSets::new(kind),
             nal_units: Vec::new(),
             gop: 0,
+            high: false,
+            opened: EncoderOpened::default(),
         };
         let mut input_ids = [0];
         let mut output_ids = [0];
@@ -256,56 +343,97 @@ impl Codec {
             codec.output_id = output_ids[0];
         }
         codec.property(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true))?;
-        let b_frames = codec.property(&CODECAPI_AVEncMPVDefaultBPictureCount, &VARIANT::from(0u32));
         // B-frames would reorder output. H.264's Baseline profile forbids them
         // even on drivers that reject this optional property. H.265's Main
-        // profile allows them: an encoder that implements the property must
-        // turn them off and read back 0. One that does not (NVIDIA's HEVC MFT
-        // answers E_NOTIMPL) has only the low-latency mode, which is required
-        // above, and every output's check against reordering in `collect`.
-        if kind == VideoCodec::H265
-            && unsafe {
-                codec
-                    .api
-                    .IsSupported(&CODECAPI_AVEncMPVDefaultBPictureCount)
-            }
-            .is_ok()
-        {
-            b_frames?;
-            if codec.value(&CODECAPI_AVEncMPVDefaultBPictureCount) != Some(0) {
-                return Err(error("B-frames could not be turned off"));
-            }
+        // profile and H.264's High allow them: an encoder that implements the
+        // property must turn them off and read back 0, or it is not used for
+        // H.265 and builds H.264 in Baseline. One that does not (NVIDIA's HEVC
+        // MFT answers E_NOTIMPL) has only the low-latency mode, which is
+        // required above, and every output's check against reordering in
+        // `collect`.
+        let b_frames = codec.b_frames();
+        if kind == VideoCodec::H265 && b_frames == BFrames::On {
+            return Err(error("B-frames could not be turned off"));
         }
         let _ = codec.property(
             &CODECAPI_AVEncCommonRateControlMode,
             &VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32),
         );
-        let _ = codec.property(&CODECAPI_AVEncCommonQualityVsSpeed, &VARIANT::from(0u32));
+        let _ = codec.property(
+            &CODECAPI_AVEncCommonQualityVsSpeed,
+            &VARIANT::from(quality_vs_speed),
+        );
+        if display_remoting {
+            let _ = codec.property(
+                &CODECAPI_AVScenarioInfo,
+                &VARIANT::from(eAVScenarioInfo_DisplayRemoting.0 as u32),
+            );
+        }
         // Before the media types: once streaming starts, the NVIDIA MFT still
         // accepts a GOP SetValue but keeps its default of one IDR per fps frames.
         codec.gop = codec.set_infinite_gop();
-        tracing::info!(encoder = %codec.name, gop = codec.gop, "desktop video encoder GOP");
-        let output = media_type(&subtype(kind), width, height, fps)?;
+        let profiles: Vec<i32> = match kind {
+            VideoCodec::H265 => vec![eAVEncH265VProfile_Main_420_8.0],
+            VideoCodec::H264 | VideoCodec::Jpeg => pick_h264_profile(
+                h264_profile,
+                H264_HIGH_FAILED.load(Ordering::Acquire),
+                b_frames,
+            )
+            .iter()
+            .map(|profile| profile.0)
+            .collect(),
+        };
+        // The first profile whose output type, and then the NV12 input type,
+        // the encoder takes. CABAC, which a High profile has and Baseline
+        // does not, is asked for before a High type and taken back before
+        // Baseline follows one.
         let input = media_type(&MFVideoFormat_NV12, width, height, fps)?;
-        let profile = match kind {
-            VideoCodec::H265 => eAVEncH265VProfile_Main_420_8.0,
-            VideoCodec::H264 | VideoCodec::Jpeg => eAVEncH264VProfile_Base.0,
+        let mut cabac = false;
+        let mut refused = None;
+        let mut profile = None;
+        for candidate in profiles {
+            let high = kind == VideoCodec::H264 && candidate != eAVEncH264VProfile_Base.0;
+            if high || cabac {
+                let _ = codec.property(&CODECAPI_AVEncH264CABACEnable, &VARIANT::from(high));
+                cabac = high;
+            }
+            let output = media_type(&subtype(kind), width, height, fps)?;
+            unsafe {
+                output
+                    .SetUINT32(&MF_MT_AVG_BITRATE, bitrate)
+                    .map_err(error)?;
+                output
+                    .SetUINT32(&MF_MT_MPEG2_PROFILE, candidate as u32)
+                    .map_err(error)?;
+            }
+            // SAFETY: COM calls on interfaces this codec holds; a refused
+            // type sets nothing, and the next output type replaces one the
+            // input type was refused with.
+            let set = unsafe {
+                codec
+                    .transform
+                    .SetOutputType(codec.output_id, &output, 0)
+                    .map_err(|e| error(format!("output media type: {e}")))
+                    .and_then(|()| {
+                        codec
+                            .transform
+                            .SetInputType(codec.input_id, &input, 0)
+                            .map_err(|e| error(format!("input media type: {e}")))
+                    })
+            };
+            match set {
+                Ok(()) => {
+                    profile = Some(candidate);
+                    codec.high = high;
+                    break;
+                }
+                Err(failure) => refused = Some(failure),
+            }
+        }
+        let Some(profile) = profile else {
+            return Err(refused.unwrap_or_else(|| error("no output profile to try")));
         };
         unsafe {
-            output
-                .SetUINT32(&MF_MT_AVG_BITRATE, bitrate)
-                .map_err(error)?;
-            output
-                .SetUINT32(&MF_MT_MPEG2_PROFILE, profile as u32)
-                .map_err(error)?;
-            codec
-                .transform
-                .SetOutputType(codec.output_id, &output, 0)
-                .map_err(|e| error(format!("output media type: {e}")))?;
-            codec
-                .transform
-                .SetInputType(codec.input_id, &input, 0)
-                .map_err(|e| error(format!("input media type: {e}")))?;
             codec
                 .transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
@@ -316,6 +444,7 @@ impl Codec {
                 .map_err(error)?;
         }
         codec.update_header()?;
+        codec.opened = codec.read_back(profile, b_frames);
         // Its first input requests wait in its queue meanwhile. Only an
         // encoder that something waits on says how its events come: the
         // H.265 probe's, which nothing waits on, would read as polled.
@@ -366,6 +495,66 @@ impl Codec {
         unsafe { self.api.GetValue(key) }
             .ok()
             .and_then(|value| u32::try_from(&value).ok())
+    }
+    /// What the encoder reports for `key`, when it reads it back as a
+    /// boolean.
+    fn flag(&self, key: &GUID) -> Option<bool> {
+        unsafe { self.api.GetValue(key) }
+            .ok()
+            .and_then(|value| bool::try_from(&value).ok())
+    }
+    /// Ask for no B-frames, and say what the encoder did with it.
+    fn b_frames(&self) -> BFrames {
+        let set = self.property(&CODECAPI_AVEncMPVDefaultBPictureCount, &VARIANT::from(0u32));
+        if unsafe { self.api.IsSupported(&CODECAPI_AVEncMPVDefaultBPictureCount) }.is_err() {
+            BFrames::Unsupported
+        } else if set.is_ok() && self.value(&CODECAPI_AVEncMPVDefaultBPictureCount) == Some(0) {
+            BFrames::Off
+        } else {
+            BFrames::On
+        }
+    }
+    /// What the encoder took of its settings, read back once it streams in
+    /// the output `profile` it took: what `desktop_video_encoder_opened`
+    /// logs. The adapter's vendor is `Codec::new`'s to fill.
+    fn read_back(&self, profile: i32, b_frames: BFrames) -> EncoderOpened {
+        // SAFETY: COM calls on interfaces this codec holds.
+        let profile = unsafe { self.transform.GetOutputCurrentType(self.output_id) }
+            .and_then(|current| unsafe { current.GetUINT32(&MF_MT_MPEG2_PROFILE) })
+            .unwrap_or(profile as u32);
+        EncoderOpened {
+            vendor: 0,
+            rate_control: self.value(&CODECAPI_AVEncCommonRateControlMode),
+            quality_vs_speed: self.value(&CODECAPI_AVEncCommonQualityVsSpeed),
+            scenario: self.value(&CODECAPI_AVScenarioInfo),
+            b_frames: match b_frames {
+                BFrames::Unsupported => None,
+                BFrames::Off | BFrames::On => self.value(&CODECAPI_AVEncMPVDefaultBPictureCount),
+            },
+            cabac: match self.kind {
+                VideoCodec::H264 => self.flag(&CODECAPI_AVEncH264CABACEnable),
+                VideoCodec::H265 | VideoCodec::Jpeg => None,
+            },
+            profile,
+            sps_profile: self.parameter_sets.sps_profile(),
+            sps_reorder: self.parameter_sets.sps_reorder(),
+        }
+    }
+    /// What the encoder's H.264 SPS said about reordering, once it wrote
+    /// one.
+    pub(super) fn sps_reorder(&self) -> Option<SpsReorder> {
+        self.parameter_sets.sps_reorder()
+    }
+    /// The `profile_idc` of the encoder's H.264 SPS, once it wrote one.
+    pub(super) fn sps_profile(&self) -> Option<u8> {
+        self.parameter_sets.sps_profile()
+    }
+    /// The encoder reordered an output: an H.264 build in a High profile
+    /// turns High off for the rest of the process.
+    pub(super) fn reordered(&self) {
+        if self.high {
+            h264_high_reordered(&self.name);
+        }
     }
     /// Vendors accept a GOP setting and then clamp or ignore it, so only a
     /// value read back unchanged counts. Returns the GOP the encoder reports.
@@ -522,13 +711,15 @@ impl Codec {
     /// H.264 and H.265 types produce Annex B; refuse an unexpected format
     /// instead of shipping undecodable length-prefixed data to phones. A
     /// keyframe that comes without its parameter sets gets the last ones,
-    /// in-band or from the media type, in front.
+    /// in-band or from the media type, in front. An H.264 SPS that leaves
+    /// reordering open goes out rewritten to say none (`ParameterSets`).
     pub(super) fn annex_b(&mut self, bytes: Vec<u8>) -> Result<(Vec<u8>, bool)> {
         let unit = AccessUnit::parse(&bytes, &mut self.nal_units)?;
         self.parameter_sets.observe(&unit)?;
         let keyframe = unit.keyframe(self.kind);
         if !keyframe || self.parameter_sets.carried(&unit) {
-            return Ok((bytes, keyframe));
+            let restated = self.parameter_sets.restate(&unit)?;
+            return Ok((restated.unwrap_or(bytes), keyframe));
         }
         if !self.parameter_sets.complete() {
             update_header(&self.transform, self.output_id, &mut self.parameter_sets)?;
@@ -895,6 +1086,38 @@ mod tests {
         assert_eq!(gop_with(|gop| gop.min(300)), 300);
         // Nothing reads back: unknown, never assumed endless.
         assert_eq!(pick_gop(|_| true, || None), 0);
+    }
+
+    /// High comes first only where nothing rules it out: Baseline asked
+    /// for, a High encoder of this process that reordered, or an encoder
+    /// that implements the B-frame count and did not take 0. One that does
+    /// not implement it relies on the low-latency mode and the per-output
+    /// check, as H.265 does. Baseline always ends the list.
+    #[test]
+    fn h264_is_high_only_where_nothing_rules_it_out() {
+        use BFrames::{Off, On, Unsupported};
+        use H264Profile::{Base, High};
+        let cases = [
+            (High, false, Off, &H264_HIGH[..]),
+            (High, false, Unsupported, &H264_HIGH),
+            (High, false, On, &H264_BASE),
+            (High, true, Off, &H264_BASE),
+            (High, true, Unsupported, &H264_BASE),
+            (High, true, On, &H264_BASE),
+            (Base, false, Off, &H264_BASE),
+            (Base, false, Unsupported, &H264_BASE),
+            (Base, true, On, &H264_BASE),
+        ];
+        for (requested, high_failed, b_frames, expected) in cases {
+            let picked = pick_h264_profile(requested, high_failed, b_frames);
+            assert_eq!(picked, expected, "{requested:?} {high_failed} {b_frames:?}");
+            assert_eq!(picked.last(), Some(&eAVEncH264VProfile_Base));
+        }
+        assert_eq!(
+            H264_HIGH.map(|profile| profile.0),
+            [257, 100, 66],
+            "Constrained High, High, Baseline"
+        );
     }
 
     /// A Media Foundation event queue standing in for an encoder's event
