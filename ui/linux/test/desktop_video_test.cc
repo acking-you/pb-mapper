@@ -980,10 +980,17 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  // The GL context first: the GPU it renders on is the presenting one the
+  // probe and the decoders go by, as the runner reads Flutter's.
+  GlContext gl;
+  std::string why;
+  const bool has_gl = gl.Create(&why);
+  const std::string device = has_gl ? pb_video::PresentingDevice(gl.display()) : "";
+
   PbVideoProbe probe{};
   char error[256] = "";
   const auto probe_started = Clock::now();
-  const int32_t probed = module->probe(&probe, error, sizeof(error));
+  const int32_t probed = module->probe(device.c_str(), &probe, error, sizeof(error));
   printf("probe (%lld ms): H.264 %s %ux%u%s; H.265 %s %ux%u%s %s\n",
          static_cast<long long>(std::chrono::duration_cast<milliseconds>(Clock::now() - probe_started).count()),
          probe.h264.decoder, probe.h264.max_width, probe.h264.max_height, probe.h264.hardware ? " hardware" : "",
@@ -992,20 +999,18 @@ int main(int argc, char** argv) {
   Check(probed == 0 && probe.h264.max_width > 0, "the probe finds an H.264 decoder");
   if (broken) Check(probe.h264.hardware != 0, "the registry offers a hardware H.264 decoder to break");
 
-  GlContext gl;
-  std::string why;
-  const bool has_gl = gl.Create(&why);
   Check(has_gl, has_gl ? "a GL ES context with no surface stands in for Flutter's" : why.c_str());
   if (!has_gl) return 1;
 
   // What this display samples in place, as the runner reads Flutter's.
   PbVideoPresenter presenter{};
   pb_video::ReadPresenter(gl.display(), &presenter);
-  printf("the GL context: %s; dma-buf import %s (%u layouts)\n", Renderer(&gl).c_str(),
-         presenter.dmabuf ? "yes" : "no", presenter.modifier_count);
+  printf("the GL context: %s, on %s; dma-buf import %s (%u layouts)\n", Renderer(&gl).c_str(),
+         device.empty() ? "no DRM device EGL names" : device.c_str(), presenter.dmabuf ? "yes" : "no",
+         presenter.modifier_count);
 
   Raster raster(module, &gl);
-  PbVideoDecoder* decoder = module->create(&shims, &presenter, Raster::Ready, &raster);
+  PbVideoDecoder* decoder = module->create(&shims, &presenter, device.c_str(), Raster::Ready, &raster);
   Check(decoder != nullptr, "a decoder is created");
   if (!decoder) return 1;
   raster.Start(decoder);
@@ -1272,7 +1277,7 @@ int main(int argc, char** argv) {
     Raster reference(module, &reference_gl);
     const PbVideoPresenter system_memory{};
     PbVideoDecoder* second =
-        reference_ready ? module->create(&shims, &system_memory, Raster::Ready, &reference) : nullptr;
+        reference_ready ? module->create(&shims, &system_memory, device.c_str(), Raster::Ready, &reference) : nullptr;
     if (second) {
       reference.Start(second);
       raster.Record(true);
@@ -1323,7 +1328,7 @@ int main(int argc, char** argv) {
 
   if (broken) {
     PbVideoProbe after{};
-    module->probe(&after, error, sizeof(error));
+    module->probe(device.c_str(), &after, error, sizeof(error));
     Check(after.h264.hardware == 0 && after.h264.max_width == 1920 && after.h265.max_width == 0,
           "the probe stops offering what failed: software H.264 at 1080p, no H.265");
   }
