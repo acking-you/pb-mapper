@@ -12,7 +12,8 @@ compare, only whether the new figures read true. The cost it adds runs only
 while timings are on (the quality panel is open, or the acceptance tool
 reads them): per decoded unit, two monotonic clock reads around
 `VTDecompressionSessionDecodeFrame`, one thread-CPU clock read and one
-uncontended lock. It was not measured separately.
+uncontended lock, and one more thread-CPU clock read when a decoder thread
+ends. It was not measured separately.
 
 ## Setup
 
@@ -67,9 +68,14 @@ The harness, run twice on each clip (720 decodes a run):
 | 1080p | 3.050, 2.596 | 3.217, 2.774 | 3.912, 3.616 | 15.4, 15.7 |
 | 4K | 5.632, 5.099 | 5.662, 4.736 | 6.198, 6.582 | 31.5, 31.8 |
 
-- The app's per-second decode means sit in the harness's range for the same
-  clip: run medians of 1.8 to 3.0 ms against a harness mean of 2.6 to
-  3.1 ms at 1080p, and 5.0 to 5.6 ms against 5.1 to 5.6 ms at 4K.
+- At 4K the app's per-second decode means agree with the harness: run
+  medians of 5.0 and 5.6 ms against harness means of 5.1 and 5.6 ms
+  (medians 4.7 and 5.7 ms). At 1080p they are at or below it: run medians
+  of 2.9 and 3.0 ms (runs a and c) fall between the harness's means of 2.6
+  and 3.1 ms and its medians of 2.8 and 3.2 ms, while 1.8 and 2.1 ms (runs
+  b and d) are lower than any harness figure recorded here. The harness
+  prints no minimum or low percentile, and this record does not say why
+  those two runs read lower.
 - The decoder thread spent a median 4.5 to 8.4 ms of CPU a second, under 1%
   of a core and far below its decode time, as a thread that waits for the
   hardware decoder during a synchronous decode would.
@@ -83,6 +89,12 @@ The harness, run twice on each clip (720 decodes a run):
   the decoder, where before only the frame rate fell.
 - The baseline's release-to-display medians (3.74 and 3.95 ms) and
   decoded rates (59.9 and 59.8 a second, medians) match the new runs'.
+
+These runs were made at the change's first revision, where `decoderCpuMs`
+was the running decoder thread's own CPU time and a reconnect's new thread
+started it over. Now a new thread adds to the ended ones' time. Every run
+here kept one decoder thread (its `decoderCpuMs` never went back and its
+decoder was configured once), so its figures are the same under either.
 
 ## Left for a device
 
