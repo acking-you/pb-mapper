@@ -2,17 +2,19 @@
 //! (`receipt_rate`, after airhand's `flow.rs`): a standing queue cuts bits
 //! per frame within a round trip and keeps the frame rate, which falls only
 //! once bits per frame reach the preset's floor, and then to what the
-//! delivery rate carries at that floor; the QoS tick raises them again while
-//! the receipts show no queue. A probe written in stream order and echoed by
-//! the viewer's network task measures downstream queueing, after RustDesk's
-//! `video_qos.rs`: fps follows each sample, yielding to the receipts below
-//! `SEVERE_DELAY` while they own the queue, and bits per frame follow each
-//! 3 s window in which no receipt came (a JPEG session, a still picture).
-//! Resolution never adapts, and no fps, bitrate or preset change rebuilds
-//! the encoder: the encoder runs at the session's nominal fps, and capture
-//! skips ticks to the pace published here. An encoder found to budget per
-//! second over the last 2 s of ticks latches the session to the timestamp
-//! rate model.
+//! delivery rate carries at what a frame costs there: the floor, or what the
+//! host measured the encoder spending on its frames, which is less for a
+//! light picture and more at an encoder's content floor; the QoS tick raises
+//! them again while the receipts show no queue. A probe written in stream
+//! order and echoed by the viewer's network task measures downstream
+//! queueing, after RustDesk's `video_qos.rs`: fps follows each sample,
+//! yielding to the receipts below `SEVERE_DELAY` while they own the queue,
+//! and bits per frame follow each 3 s window in which no receipt came (a
+//! JPEG session, a still picture). Resolution never adapts, and no fps,
+//! bitrate or preset change rebuilds the encoder: the encoder runs at the
+//! session's nominal fps, and capture skips ticks to the pace published here.
+//! An encoder found to budget per second over the last 2 s of ticks latches
+//! the session to the timestamp rate model.
 //!
 //! This reverses decision D5 and CONTRACT-perf R13 of the overhaul plan, in
 //! which the probe owned fps and bitrate and receipts only clamped the byte
@@ -41,7 +43,7 @@ mod receipt_rate;
 #[cfg(test)]
 mod sim;
 
-use self::receipt_rate::{Inputs, ReceiptRate, ReceiptRateView, Verdict};
+use self::receipt_rate::{Inputs, Lift, ReceiptRate, ReceiptRateView, Verdict};
 use crate::{
     QualityPreset, VideoCodec, VideoLimits,
     credit::{ACK_QUEUE_LIMIT, CreditView, Receipt},
@@ -108,6 +110,16 @@ pub(crate) const LATCH_FLOOR_MAX: f64 = 2.0;
 pub(crate) const MEASURED_CONTENT_FLOOR: f64 = 1.79;
 /// The latch looks only at ticks paced at most this share of nominal.
 pub(crate) const LATCH_PACE_RATIO: f64 = 0.75;
+/// What the encoder spends per frame is read from the newest this many
+/// ticks at the budget in force, each with at least `SPENDING_FRAMES`
+/// non-IDR frames ...
+const SPENDING_TICKS: usize = 2;
+const SPENDING_FRAMES: u64 = 2;
+/// ... and it outspends its budget above this multiple of it in each, unless
+/// its excess fell to this share of the tick before's or less: a VBV that
+/// still follows a cut.
+const OUTSPEND: f64 = 1.25;
+const CONVERGING: f64 = 0.8;
 /// The startup pace cap after `Accepted` and after `Resume`.
 pub(crate) const STARTUP_HOLD: Duration = Duration::from_secs(1);
 pub(crate) const JPEG_MAX_FPS: u32 = 8;
@@ -148,6 +160,14 @@ const _: () = assert!(
 const _: () = assert!(
     LATCH_TICKS >= 1 && LATCH_TICKS as u128 * QOS_TICK.as_nanos() == LATCH_SPAN.as_nanos(),
     "the latch's span is whole ticks"
+);
+const _: () = assert!(
+    SPENDING_TICKS == 2 && SPENDING_TICKS <= LATCH_TICKS && SPENDING_FRAMES >= 1,
+    "spending compares the newest tick with the one before, both in the span"
+);
+const _: () = assert!(
+    OUTSPEND > 1.0 && CONVERGING < 1.0,
+    "an encoder outspends above its budget, and a falling excess converges"
 );
 const _: () = assert!(
     LATCH_PACE_SHARE < 1.0,
@@ -341,6 +361,9 @@ struct TickBucket {
     /// was given during the tick: a cut never makes the frames encoded before
     /// it look like an overshoot.
     expected_bits: f64,
+    /// The tick's time × the encoder bitrate at its end, × the non-IDR share
+    /// of its frames: what an encoder that budgets per second spends on them.
+    rate_bits: f64,
     /// The pace at both ends of the tick was at most `LATCH_PACE_RATIO` ×
     /// nominal. A slot no tick has filled yet is not.
     paced_low: bool,
@@ -354,6 +377,7 @@ impl TickBucket {
             non_idr_frames,
             non_idr_bits,
             expected_bits,
+            rate_bits,
             paced_low,
         } = *other;
         self.elapsed += elapsed;
@@ -362,6 +386,7 @@ impl TickBucket {
         self.non_idr_frames += non_idr_frames;
         self.non_idr_bits = self.non_idr_bits.saturating_add(non_idr_bits);
         self.expected_bits += expected_bits;
+        self.rate_bits += rate_bits;
         self.paced_low &= paced_low;
         self
     }
@@ -399,6 +424,13 @@ impl LatchSpan {
         self.next = (self.next + 1) % LATCH_TICKS;
     }
 
+    /// The buckets, newest first.
+    fn newest(&self) -> impl Iterator<Item = &TickBucket> {
+        // The slots before `next` were filled last, those from it before them.
+        let (recent, earlier) = self.buckets.split_at(self.next.min(LATCH_TICKS));
+        earlier.iter().chain(recent).rev()
+    }
+
     /// The span's totals.
     fn total(&self) -> TickBucket {
         let start = TickBucket {
@@ -406,6 +438,37 @@ impl LatchSpan {
             ..TickBucket::default()
         };
         self.buckets.iter().fold(start, TickBucket::add)
+    }
+}
+
+/// What the encoder spent per non-IDR frame over the newest ticks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Spending {
+    bits: f64,
+    /// Above its budget and not falling toward it: an encoder at its content
+    /// floor, or one that budgets per second at a reduced pace.
+    outspends: bool,
+}
+
+/// What a frame costs on the wire at a budget: the budget, unless the
+/// encoder was measured spending less (a light picture), or outspending it,
+/// which a lower budget does not change.
+#[derive(Clone, Copy, Debug)]
+struct FrameCost(Option<Spending>);
+impl FrameCost {
+    fn at(self, budget: f64) -> f64 {
+        let cost = match self.0 {
+            Some(Spending {
+                bits,
+                outspends: true,
+            }) => bits.max(budget),
+            Some(Spending {
+                bits,
+                outspends: false,
+            }) => bits.min(budget),
+            None => budget,
+        };
+        cost.max(1.0)
     }
 }
 
@@ -432,7 +495,8 @@ pub(crate) struct Qos {
     /// Bits per frame at the encoded size.
     bpf: f64,
     rate_model: RateModel,
-    /// What the rate-model latch reads, while the model is `Nominal`.
+    /// The newest ticks' production: what the rate-model latch reads while
+    /// the model is `Nominal`, and what the encoder spends (`spending`).
     span: LatchSpan,
     window: RatioWindow,
     /// An untainted sample was seen this session.
@@ -463,6 +527,9 @@ pub(crate) struct Qos {
     rate_fps: Option<u32>,
     /// What a receipt rebase added to the probes' baseline.
     rebase: Option<Rebase>,
+    /// Counts the changes of `rebase`'s offset, so the credit ledger takes
+    /// only the newest (`CreditLedger::set_rebase`).
+    rebase_generation: u64,
 }
 impl Qos {
     /// Bits per frame start at the viewer's bounds, until `set_video_size`
@@ -515,6 +582,7 @@ impl Qos {
             receipts: ReceiptRate::new(),
             rate_fps: None,
             rebase: None,
+            rebase_generation: 0,
         };
         qos.apply_preset(quality);
         qos.span = LatchSpan::new(now, qos.pace(now), qos.nominal_budget());
@@ -550,7 +618,7 @@ impl Qos {
         self.window = RatioWindow::new(now, produced);
         self.receipts.reset();
         self.rate_fps = None;
-        self.rebase = None;
+        self.set_rebase(None);
     }
 
     /// The viewer's runtime fps cap; a cap at or above `limits.max_fps` clears it.
@@ -572,7 +640,7 @@ impl Qos {
         self.history.clear();
         self.last_raw = None;
         self.receipts.restart();
-        self.rebase = None;
+        self.set_rebase(None);
     }
 
     /// A new viewer path: the old baseline, the receipts, their capacity and
@@ -582,7 +650,7 @@ impl Qos {
         self.history.clear();
         self.last_raw = None;
         self.receipts.reset();
-        self.rebase = None;
+        self.set_rebase(None);
     }
 
     /// The viewer stamps arrival times: from now on the delay, the witness
@@ -593,7 +661,7 @@ impl Qos {
         self.history.clear();
         self.last_raw = None;
         self.receipts.use_one_way();
-        self.rebase = None;
+        self.set_rebase(None);
     }
 
     /// A new encoded size: bits per frame keep their 1080p-relative level.
@@ -626,14 +694,74 @@ impl Qos {
         }
     }
 
+    /// What the receipts' controller is told: the pace and expected rate,
+    /// and what the encoder sends at that pace and at the preset's floor, as
+    /// the host measured its frames (`spending`).
     fn receipt_inputs(&self, blocked: bool, now: Instant) -> Inputs {
+        let pace = f64::from(self.pace(now));
+        let cost = FrameCost(self.spending());
+        let floor = preset(self.preset).bpf_floor * self.pixel_scale;
+        let least_pace = self.min_fps.min(self.steady_pace());
         Inputs {
             base: self.base_rtt(),
             pace: self.pace(now),
-            expected_bps: self.bpf * f64::from(self.pace(now)),
+            expected_bps: self.bpf * pace,
+            sent_bps: cost.at(self.bpf) * pace,
+            floor_bps: cost.at(floor) * f64::from(least_pace),
             rtt: self.last_rtt,
             blocked,
+            capped: self.rate_fps.is_some(),
         }
+    }
+
+    /// What the encoder spent per non-IDR frame over the newest
+    /// `SPENDING_TICKS` ticks, each with `SPENDING_FRAMES` or more, and
+    /// whether it outspends its budget; `None` when one of them had too few
+    /// frames, or was encoded at a higher budget than now and spent more than
+    /// the budget now: the frames from before a cut, which the encoder no
+    /// longer makes. A light picture's frames, under either budget, stand.
+    ///
+    /// An encoder outspends when, in both ticks, its frames cost more than
+    /// `OUTSPEND` × their budget, and its excess is not falling as a VBV's
+    /// does. An encoder that budgets per second makes larger frames whenever
+    /// fewer are captured than the pace (the window holding captures back),
+    /// though its bits per second are what it is asked for: under the
+    /// timestamp model, which the latch chose for such an encoder, one
+    /// outspends only if its bits also exceed `OUTSPEND` × what its bitrate
+    /// gives the ticks' time. The nominal model takes the encoder to budget
+    /// per frame; one that budgets per second instead sheds none of its bits
+    /// through the pace until the latch finds it.
+    fn spending(&self) -> Option<Spending> {
+        let budget = self.nominal_budget();
+        let mut excess = [0.0; SPENDING_TICKS];
+        let mut per_second = false;
+        let (mut bits, mut frames) = (0u64, 0u64);
+        let mut ticks = 0;
+        for (slot, bucket) in excess.iter_mut().zip(self.span.newest()) {
+            let at_budget = budget * bucket.non_idr_frames as f64;
+            let stale =
+                bucket.expected_bits > at_budget * 1.001 && bucket.non_idr_bits as f64 > at_budget;
+            if bucket.non_idr_frames < SPENDING_FRAMES || stale {
+                return None;
+            }
+            *slot = bucket.non_idr_bits as f64 / at_budget - 1.0;
+            per_second |= (bucket.non_idr_bits as f64) < OUTSPEND * bucket.rate_bits;
+            bits = bits.saturating_add(bucket.non_idr_bits);
+            frames += bucket.non_idr_frames;
+            ticks += 1;
+        }
+        if ticks < SPENDING_TICKS {
+            return None;
+        }
+        let [newest, before] = excess;
+        let outspends = newest >= OUTSPEND - 1.0
+            && before >= OUTSPEND - 1.0
+            && newest > CONVERGING * before
+            && !(per_second && self.rate_model == RateModel::Timestamp);
+        Some(Spending {
+            bits: bits as f64 / frames as f64,
+            outspends,
+        })
     }
 
     /// The receipts' controller's values for the once-a-second trace.
@@ -650,23 +778,31 @@ impl Qos {
     }
 
     /// A receipt cut to `target` bit/s at the pace before the startup cap:
-    /// bits per frame first, down to the preset's cut floor; below it the
-    /// pace, from the delivery rate at that floor, down to the preset's
-    /// minimum; below that bits per frame again, down to the preset's floor.
-    /// For every preset but Quality the two floors are one. A cut never raises
-    /// either.
+    /// bits per frame first, down to the preset's cut floor; then the pace,
+    /// from the delivery rate at what a frame then costs, down to the
+    /// preset's minimum; below that bits per frame again, down to the
+    /// preset's floor. For every preset but Quality the two floors are one.
+    /// A frame costs its budget, unless the host measured the encoder
+    /// spending less (a light picture) or outspending it (a content floor,
+    /// where a lower budget sheds nothing): the pace then carries what it
+    /// costs. A cut never raises either.
     fn cut_to(&mut self, target: f64, now: Instant) {
         let pace = self.steady_pace();
         let cut_floor = preset(self.preset).cut_floor * self.pixel_scale;
         let floor = preset(self.preset).bpf_floor * self.pixel_scale;
         let min_fps = self.min_fps.min(pace);
-        let mut bpf = self.bpf;
+        let cost = FrameCost(self.spending());
+        let mut bpf = self.bpf.min((target / f64::from(pace)).max(cut_floor));
         let mut fps = pace;
-        if target / f64::from(pace) >= cut_floor {
-            bpf = bpf.min(target / f64::from(pace));
-        } else {
-            bpf = bpf.min(cut_floor);
-            let carried = (target / bpf) as u32;
+        // A hair over, so a budget of exactly `target / pace` carries the pace.
+        let mut carried = (target / cost.at(bpf) * (1.0 + 1e-9)) as u32;
+        // Frames that cost more than their budget at most halve the pace a
+        // cut: one that budgets per second makes them too while the window
+        // holds captures back, and a lower pace sheds none of its bits.
+        if cost.at(bpf) > bpf {
+            carried = carried.max(pace.div_ceil(2));
+        }
+        if carried < pace {
             if carried >= min_fps {
                 fps = carried;
             } else {
@@ -689,22 +825,23 @@ impl Qos {
         }
     }
 
-    /// A receipt raise to `next` bit/s from `expected`: the receipts' pace
-    /// cap first, so the frame rate comes back before bits per frame (for
-    /// Quality, bits per frame below its cut floor before that), then bits per
-    /// frame, up to the preset's maximum.
-    fn raise_to(&mut self, next: f64, expected: f64, now: Instant) {
-        let factor = next / expected.max(1.0);
+    /// A receipt raise from `expected`: the receipts' pace cap first, so the
+    /// frame rate comes back before bits per frame (for Quality, bits per
+    /// frame below its cut floor before that), then bits per frame, up to the
+    /// preset's maximum. A light picture's raise lifts the pace cap alone.
+    fn raise_to(&mut self, lift: Lift, expected: f64, now: Instant) {
+        let factor = lift.to / expected.max(1.0);
         let (bpf, rate_fps) = (self.bpf, self.rate_fps);
         let cut_floor = preset(self.preset).cut_floor * self.pixel_scale;
         match self.rate_fps {
-            Some(_) if self.bpf < cut_floor => {
+            Some(_) if self.bpf < cut_floor && !lift.pace_only => {
                 self.set_bpf((self.bpf * factor).min(cut_floor));
             }
             Some(cap) => {
                 let fps = (f64::from(cap) * factor).ceil() as u32;
                 self.rate_fps = (fps < self.natural_pace()).then_some(fps.max(cap));
             }
+            None if lift.pace_only => {}
             None => self.set_bpf(self.clamp_bpf(self.bpf * factor).max(self.bpf)),
         }
         if self.bpf > bpf || self.rate_fps != rate_fps {
@@ -722,16 +859,32 @@ impl Qos {
             self.base_rtt().unwrap_or(Duration::ZERO)
         };
         let offset = least.saturating_sub(base).min(REBASE_MAX);
-        self.rebase = (offset >= REBASE_MIN).then_some(Rebase {
+        self.set_rebase((offset >= REBASE_MIN).then_some(Rebase {
             offset,
             level: base + offset,
-        });
+        }));
     }
 
-    /// What a rebase adds to the probes' baseline, which the credit ledger
-    /// reads too (`CreditLedger::set_rebase`).
+    /// Every change of the rebase goes through here, so a change of its
+    /// offset counts a generation.
+    fn set_rebase(&mut self, rebase: Option<Rebase>) {
+        let offset = |rebase: Option<Rebase>| rebase.map(|rebase| rebase.offset);
+        if offset(rebase) != offset(self.rebase) {
+            self.rebase_generation += 1;
+        }
+        self.rebase = rebase;
+    }
+
+    /// What a rebase adds to the probes' baseline.
     pub fn rebase_offset(&self) -> Duration {
         self.rebase.map_or(Duration::ZERO, |rebase| rebase.offset)
+    }
+
+    /// The rebase's offset and the count of its changes, which the credit
+    /// ledger reads too (`CreditLedger::set_rebase`): of two writes that race
+    /// there, the older generation is ignored.
+    pub fn rebase_state(&self) -> (u64, Duration) {
+        (self.rebase_generation, self.rebase_offset())
     }
 
     /// Report `adaptation`; a probe or window that changes nothing reports
@@ -860,7 +1013,7 @@ impl Qos {
         if self.rebase.is_some_and(|rebase| {
             above < rebase.offset / 2 || (!self.one_way && base >= rebase.level)
         }) {
-            self.rebase = None;
+            self.set_rebase(None);
         }
         let raw = millis(above.saturating_sub(self.rebase_offset()));
         if probe.tainted {
@@ -893,8 +1046,8 @@ impl Qos {
     /// The rate-model latch, unresponsiveness, the bits-per-frame window when
     /// it is due, and the receipts' raise.
     pub fn tick(&mut self, now: Instant, credit: &CreditView, produced: ProducedSnapshot) {
-        if self.rate_model == RateModel::Nominal {
-            self.latch_tick(now, produced);
+        if self.record_tick(now, produced) && self.rate_model == RateModel::Nominal {
+            self.latch();
         }
         if !self.paused {
             let probe_late = self.outstanding.as_ref().is_some_and(|probe| {
@@ -912,8 +1065,8 @@ impl Qos {
         }
         if !self.paused && self.codec != VideoCodec::Jpeg {
             let inputs = self.receipt_inputs(false, now);
-            if let Some(next) = self.receipts.raise(now, inputs) {
-                self.raise_to(next, inputs.expected_bps, now);
+            if let Some(lift) = self.receipts.raise(now, inputs) {
+                self.raise_to(lift, inputs.expected_bps, now);
             }
         }
     }
@@ -1132,28 +1285,25 @@ impl Qos {
         self.adapt(adaptation, now);
     }
 
-    /// Close the tick's bucket, then latch the timestamp model for good when
-    /// the last `LATCH_SPAN` shows an encoder that budgets per second: every
-    /// tick paced at most `LATCH_PACE_RATIO` × nominal at both its ends,
-    /// moving content, and non-IDR bits above `max(LATCH_OVERSHOOT,
-    /// min(LATCH_PACE_SHARE × nominal / mean pace, LATCH_FLOOR_MAX))` × the
-    /// bits expected for them, where the mean pace is the frames produced over
-    /// the span's time. The expected bits are integrated tick by tick at the
-    /// highest per-frame budget the encoder was given during each, so a cut
-    /// never compares the frames encoded before it with the budget after it.
-    fn latch_tick(&mut self, now: Instant, produced: ProducedSnapshot) {
+    /// Close the tick's bucket, whatever the rate model; `false` when the
+    /// tick was too short to read a pace from, which the next takes in. The
+    /// expected bits are integrated tick by tick at the highest per-frame
+    /// budget the encoder was given during each, so a cut never compares the
+    /// frames encoded before it with the budget after it.
+    fn record_tick(&mut self, now: Instant, produced: ProducedSnapshot) -> bool {
         let elapsed = now.saturating_duration_since(self.span.since);
         if elapsed < QOS_TICK / 2 {
-            // Too short to read a pace from: the next tick takes it in.
-            return;
+            return false;
         }
         let nominal = f64::from(self.limits.max_fps);
         let low = |pace: u32| f64::from(pace) <= LATCH_PACE_RATIO * nominal;
         let (pace, start) = (self.pace(now), self.span.produced);
         let non_idr_frames = produced.non_idr_frames.saturating_sub(start.non_idr_frames);
+        let frames = produced.frames.saturating_sub(start.frames);
+        let non_idr_share = non_idr_frames as f64 / frames.max(1) as f64;
         self.span.push(TickBucket {
             elapsed,
-            frames: produced.frames.saturating_sub(start.frames),
+            frames,
             unique: produced.unique.saturating_sub(start.unique),
             non_idr_frames,
             non_idr_bits: produced
@@ -1161,6 +1311,9 @@ impl Qos {
                 .saturating_sub(start.non_idr_bytes)
                 .saturating_mul(8),
             expected_bits: self.span.peak_budget * non_idr_frames as f64,
+            rate_bits: elapsed.as_secs_f64()
+                * f64::from(self.targets(now).encoder_bps)
+                * non_idr_share,
             paced_low: low(self.span.pace) && low(pace),
         });
         self.span.since = now;
@@ -1171,7 +1324,17 @@ impl Qos {
         // and after a cut it keeps the budget frames still in the encoder were
         // given.
         self.span.peak_budget = self.nominal_budget();
+        true
+    }
 
+    /// Latch the timestamp model for good when the last `LATCH_SPAN` shows
+    /// an encoder that budgets per second: every tick paced at most
+    /// `LATCH_PACE_RATIO` × nominal at both its ends, moving content, and
+    /// non-IDR bits above `max(LATCH_OVERSHOOT, min(LATCH_PACE_SHARE ×
+    /// nominal / mean pace, LATCH_FLOOR_MAX))` × the bits expected for them,
+    /// where the mean pace is the frames produced over the span's time.
+    fn latch(&mut self) {
+        let nominal = f64::from(self.limits.max_fps);
         let span = self.span.total();
         if !span.paced_low || span.unique < DYNAMIC_UNIQUE_FRAMES || span.frames == 0 {
             return;
@@ -1712,6 +1875,14 @@ mod tests {
         );
     }
 
+    /// A receipt raise to `to` bit/s, of bits per frame too.
+    fn lift(to: f64) -> Lift {
+        Lift {
+            to,
+            pace_only: false,
+        }
+    }
+
     /// Balanced on a 20 ms path at its ceiling of 60, past the startup cap.
     fn settled(t0: Instant) -> Qos {
         let mut qos = balanced(t0);
@@ -1740,17 +1911,17 @@ mod tests {
         qos.cut_to(900_000.0, at(2200));
         assert_eq!((qos.bpf, qos.rate_fps), (16_667.0, Some(10)));
         // Raises lift the pace first: 20% of 10 FPS is 12 ...
-        qos.raise_to(1.2 * qos.bpf * 10.0, qos.bpf * 10.0, at(2300));
+        qos.raise_to(lift(1.2 * qos.bpf * 10.0), qos.bpf * 10.0, at(2300));
         assert_eq!((qos.bpf, qos.rate_fps), (16_667.0, Some(12)));
         assert_eq!(qos.adaptation, Adaptation::Raising);
         // ... until it reaches the probes' fps, which clears the cap ...
-        qos.raise_to(6.0 * 12.0 * qos.bpf, 12.0 * qos.bpf, at(2400));
+        qos.raise_to(lift(6.0 * 12.0 * qos.bpf), 12.0 * qos.bpf, at(2400));
         assert_eq!(qos.rate_fps, None);
         assert_eq!(qos.bpf, 16_667.0);
         // ... and only then bits per frame, up to the preset's maximum.
-        qos.raise_to(2.0 * 60.0 * qos.bpf, 60.0 * qos.bpf, at(2500));
+        qos.raise_to(lift(2.0 * 60.0 * qos.bpf), 60.0 * qos.bpf, at(2500));
         assert!((qos.bpf - 33_334.0).abs() < 1.0, "{}", qos.bpf);
-        qos.raise_to(1e9, 60.0 * qos.bpf, at(2600));
+        qos.raise_to(lift(1e9), 60.0 * qos.bpf, at(2600));
         assert_eq!(qos.bpf, 133_333.0);
         // A new preset starts again without the cap.
         qos.cut_to(750_000.0, at(2700));
@@ -1785,10 +1956,10 @@ mod tests {
         assert_eq!((qos.bpf, qos.rate_fps), (50_000.0, Some(8)));
         // Raises take the same steps back: bits per frame to half the start
         // first, at the minimum pace ...
-        qos.raise_to(1e9, 8.0 * qos.bpf, at(2400));
+        qos.raise_to(lift(1e9), 8.0 * qos.bpf, at(2400));
         assert_eq!((qos.bpf, qos.rate_fps), (100_000.0, Some(8)));
         // ... then the pace.
-        qos.raise_to(2.0 * 8.0 * qos.bpf, 8.0 * qos.bpf, at(2500));
+        qos.raise_to(lift(2.0 * 8.0 * qos.bpf), 8.0 * qos.bpf, at(2500));
         assert_eq!((qos.bpf, qos.rate_fps), (100_000.0, Some(16)));
     }
 
@@ -1882,6 +2053,117 @@ mod tests {
         qos.control_fps(250, 250, true, false, s(5));
         qos.tick(s(6), &idle(), produced(200));
         assert!((qos.bpf - 0.9 * before).abs() < 1.0, "{}", qos.bpf);
+    }
+
+    /// Balanced settled at the full pace and its floor of 16 667 bits a
+    /// frame, after three ticks in which the encoder made frames of `bits`
+    /// each: the first, which began at the budget before the cut, and two at
+    /// the floor.
+    fn at_the_floor(t0: Instant, bits: [f64; 3]) -> Qos {
+        let mut qos = settled(t0);
+        let now = t0 + Duration::from_millis(2000);
+        qos.cut_to(60.0 * 16_667.0, now);
+        assert_eq!((qos.bpf, qos.rate_fps), (16_667.0, None));
+        let mut ticks = Ticks::new(now);
+        for bits in bits {
+            ticks.produce(15, 15, bits);
+            ticks.advance(&mut qos);
+        }
+        qos
+    }
+
+    #[test]
+    fn a_cut_sizes_the_pace_by_what_the_host_measured_its_frames_cost() {
+        let t0 = Instant::now();
+        let now = t0 + Duration::from_secs(3);
+        // An encoder that follows its budget: the pace carries the cut at
+        // the floor, as without a measure.
+        let mut qos = at_the_floor(t0, [16_667.0; 3]);
+        qos.cut_to(30.0 * 16_667.0, now);
+        assert_eq!(qos.rate_fps, Some(30));
+        // One at its content floor, 1.8 × the budget in each tick: a lower
+        // budget sheds nothing, so the pace carries what its frames cost, and
+        // the receipts are told what it sends.
+        let mut qos = at_the_floor(t0, [30_000.0; 3]);
+        let inputs = qos.receipt_inputs(false, now);
+        assert_eq!(inputs.sent_bps, 60.0 * 30_000.0);
+        assert_eq!(inputs.floor_bps, 10.0 * 30_000.0);
+        qos.cut_to(1_000_000.0, now);
+        assert_eq!((qos.bpf, qos.rate_fps), (16_667.0, Some(33)));
+        // Such a measure at most halves the pace a cut: frames three times
+        // their budget would carry 20 FPS of 1 Mbit/s.
+        let mut qos = at_the_floor(t0, [50_000.0; 3]);
+        qos.cut_to(1_000_000.0, now);
+        assert_eq!(qos.rate_fps, Some(30));
+        // A VBV whose excess falls toward its budget is still following it:
+        // its frames are taken at the budget.
+        let mut qos = at_the_floor(t0, [60_000.0, 50_000.0, 33_000.0]);
+        assert_eq!(qos.receipt_inputs(false, now).sent_bps, 60.0 * 16_667.0);
+        qos.cut_to(30.0 * 16_667.0, now);
+        assert_eq!(qos.rate_fps, Some(30));
+        // A light picture's frames cost far less than the budget: a cut of
+        // 15% of what it sends takes 15% of its pace, not most of it.
+        let mut qos = at_the_floor(t0, [2400.0; 3]);
+        assert_eq!(qos.receipt_inputs(false, now).sent_bps, 60.0 * 2400.0);
+        qos.cut_to(0.85 * 60.0 * 2400.0, now);
+        assert_eq!(qos.rate_fps, Some(51));
+        // Frames from before a cut, above the budget now, are no measure.
+        let mut qos = settled(t0);
+        let mut ticks = Ticks::new(t0 + Duration::from_millis(2000));
+        for _ in 0..2 {
+            ticks.produce(15, 15, 66_667.0);
+            ticks.advance(&mut qos);
+        }
+        qos.cut_to(60.0 * 16_667.0, ticks.now);
+        assert_eq!(qos.spending(), None);
+        qos.cut_to(30.0 * 16_667.0, ticks.now);
+        assert_eq!(qos.rate_fps, Some(30));
+    }
+
+    #[test]
+    fn a_light_pictures_raise_lifts_only_the_pace_cap() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let light = |to: f64| Lift {
+            to,
+            pace_only: true,
+        };
+        let mut qos = settled(t0);
+        qos.cut_to(30.0 * 16_667.0, at(2000));
+        assert_eq!((qos.bpf, qos.rate_fps), (16_667.0, Some(30)));
+        qos.raise_to(light(2.0 * 30.0 * qos.bpf), 30.0 * qos.bpf, at(2100));
+        assert_eq!((qos.bpf, qos.rate_fps), (16_667.0, None));
+        qos.raise_to(light(1e9), 60.0 * qos.bpf, at(2200));
+        assert_eq!(qos.bpf, 16_667.0);
+        // Quality below its cut floor lifts the cap before bits per frame.
+        let mut qos = Qos::new(
+            limits(60),
+            VideoCodec::H264,
+            QualityPreset::Quality,
+            false,
+            RateModel::Nominal,
+            t0,
+        );
+        probes(&mut qos, t0, &[(20, 0); 8]);
+        qos.cut_to(100_000.0, at(2000));
+        assert_eq!((qos.bpf, qos.rate_fps), (50_000.0, Some(8)));
+        qos.raise_to(light(2.0 * 8.0 * qos.bpf), 8.0 * qos.bpf, at(2100));
+        assert_eq!((qos.bpf, qos.rate_fps), (50_000.0, Some(16)));
+    }
+
+    #[test]
+    fn a_rebase_counts_a_generation_only_when_its_offset_changes() {
+        let t0 = Instant::now();
+        let mut qos = settled(t0);
+        assert_eq!(qos.rebase_state(), (0, Duration::ZERO));
+        qos.rebase_to(Duration::from_millis(140));
+        assert_eq!(qos.rebase_state(), (1, Duration::from_millis(120)));
+        qos.rebase_to(Duration::from_millis(140));
+        assert_eq!(qos.rebase_state().0, 1);
+        qos.reset_baseline();
+        assert_eq!(qos.rebase_state(), (2, Duration::ZERO));
+        qos.reset_baseline();
+        assert_eq!(qos.rebase_state().0, 2);
     }
 
     #[test]

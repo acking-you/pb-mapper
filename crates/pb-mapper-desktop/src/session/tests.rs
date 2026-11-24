@@ -444,6 +444,85 @@ fn a_clamped_window_that_refuses_a_unit_blocks_until_the_next_receipt() {
     assert!(!session.blocked.load(Ordering::Acquire));
     assert!(idr > seq);
 }
+/// B-recv hands `blocked` to the receipts' controller with each receipt: a
+/// standing queue of about 20 ms, under `QUEUE_HIGH`, cuts only when a
+/// clamped window refused a unit since the last receipt.
+#[test]
+fn a_blocked_window_makes_a_small_queue_cut() {
+    let cuts = |blocked: bool| {
+        let session = session_listing(&[]);
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        // A 20 ms base, past the startup cap: Balanced at 60.
+        session.qos.lock().probe_sent(1, at(1100), false);
+        session
+            .handle(
+                ViewerMessage::ProbeEcho {
+                    nonce: 1,
+                    at_us: None,
+                },
+                at(1120),
+            )
+            .unwrap();
+        // 4250 bytes every 17 ms, each 57 ms from its write to its receipt:
+        // 2 Mbit/s, and 20 ms of queue once its own transfer is taken off.
+        let mut last = at(1200);
+        for n in 0..40 {
+            let sent = 1200 + 17 * n;
+            let seq = session.credit.lock().book(4250, false, at(sent));
+            session.blocked.store(blocked, Ordering::Release);
+            last = at(sent + 57);
+            session
+                .handle(ViewerMessage::Received { seq, at_us: None }, last)
+                .unwrap();
+        }
+        session.qos.lock().receipt_view(last).cuts
+    };
+    assert_eq!(cuts(false), 0);
+    assert_eq!(cuts(true), 1);
+}
+
+/// A rebase the receipts made reaches the credit ledger through B-recv: the
+/// longer route is no ack queue, and the window's time covers it.
+#[test]
+fn a_rebase_reaches_the_credit_ledger() {
+    let session = session_listing(&[]);
+    let t0 = Instant::now();
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    let base = Duration::from_millis(20);
+    session.qos.lock().probe_sent(1, at(1100), false);
+    session
+        .handle(
+            ViewerMessage::ProbeEcho {
+                nonce: 1,
+                at_us: None,
+            },
+            at(1120),
+        )
+        .unwrap();
+    // Every unit 120 ms later than the base, sized as the controller asks:
+    // the cuts change nothing, and the receipts rebase.
+    let mut last = at(1200);
+    for n in 0..400 {
+        let sent = at(1200 + 17 * n);
+        let bytes = (session.qos.lock().expected_bps(sent) / 60 / 8) as usize;
+        let seq = session.credit.lock().book(bytes, false, sent);
+        last = sent + Duration::from_millis(140);
+        session
+            .handle(ViewerMessage::Received { seq, at_us: None }, last)
+            .unwrap();
+        if session.qos.lock().rebase_offset() > Duration::ZERO {
+            break;
+        }
+    }
+    let rebase = session.qos.lock().rebase_offset();
+    assert!(rebase >= Duration::from_millis(80), "{rebase:?}");
+    assert_eq!(
+        session.credit.lock().ack_queue(base, last),
+        Duration::from_millis(120) - rebase
+    );
+}
+
 /// B-recv hands a viewer's arrival times to the controller and the ledger
 /// when both ends listed `arrival_time`: 300 ms held on the viewer's uplink
 /// lengthens every round trip, which a session without them reads as a

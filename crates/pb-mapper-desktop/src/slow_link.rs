@@ -1623,6 +1623,11 @@ fn added_route_delay() {
         );
         assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
         assert!(cuts <= 2, "a longer route is no congestion: {cuts} cuts");
+        // Cuts that leave the route's queue where it was end in a rebase.
+        assert!(
+            cuts == 0 || rebased,
+            "{cuts} cuts and no rebase onto the longer route"
+        );
         assert!(
             back.is_some_and(|back| back <= BACK_WITHIN),
             "the encoder bitrate must be back at {} within {BACK_WITHIN:?}: {back:?}",

@@ -44,6 +44,9 @@ pub(super) enum Encoder {
     PerSecond { idr: f64 },
     /// A still picture: a few hundred bytes a frame, whatever the bitrate.
     Still,
+    /// Per frame, as `PerFrame`, but never below this many bytes: an encoder
+    /// at the moving picture's content floor.
+    Floor { bytes: u64 },
 }
 
 /// What the link does from an instant on.
@@ -55,6 +58,8 @@ pub(super) enum Change {
     Delay { forward: Us, reverse: Us },
     /// Nothing crosses either way for this long, then all of it at once.
     Stall(Us),
+    /// The picture changes: the encoder sizes it so from now on.
+    Picture(Encoder),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -271,6 +276,7 @@ impl Sim {
                     self.reverse = reverse * MS;
                 }
                 Change::Stall(length) => self.stalls.push((when, when + length)),
+                Change::Picture(encoder) => self.encoder = encoder,
             }
         }
     }
@@ -393,7 +399,8 @@ impl Sim {
             Event::Wake => {}
         }
         // As `Session::update_qos` does after every change.
-        self.credit.set_rebase(self.qos.rebase_offset());
+        let (generation, rebase) = self.qos.rebase_state();
+        self.credit.set_rebase(generation, rebase);
     }
 
     /// Thread C: one picture a period, unless units wait for credit.
@@ -427,6 +434,7 @@ impl Sim {
             }
             Encoder::PerSecond { idr } => (encoder_bps * gap as f64 / S as f64 / 8.0, idr),
             Encoder::Still => (300.0, 1.0),
+            Encoder::Floor { bytes } => (per_frame(encoder_bps).max(bytes as f64), 4.0),
         };
         let bytes = if idr { bytes * idr_factor } else { bytes }.max(256.0) as u64;
         let still = matches!(self.encoder, Encoder::Still);
@@ -572,8 +580,7 @@ fn a_clear_path_reaches_the_ceiling_and_the_presets_maximum() {
     sim.dump("clear");
     // The pace is at the ceiling once the startup cap's second is over ...
     assert!(sim.span(0, 20).iter().all(|second| second.pace == 60));
-    // ... and bits per frame raise to the preset's maximum within seconds,
-    // where the 3 s windows took a minute of moving content.
+    // ... and bits per frame raise to the preset's maximum within seconds.
     let max = sim.first(0, |second| second.bpf >= MAX - 1.0);
     assert!(max.is_some_and(|max| max <= 8), "{max:?}");
     let last = sim.seconds.last().copied().unwrap_or_default();
@@ -792,12 +799,12 @@ fn a_longer_route_rebases_after_at_most_two_cuts() {
         // ... and the bitrate is back within 15 s.
         let back = sim.first(13, |second| second.expected_bps >= before.expected_bps);
         assert!(back.is_some_and(|back| back <= 12 + 15), "{after:?}");
-        if !one_way {
-            assert!(
-                after.iter().any(|second| second.rebase.is_some()),
-                "{after:?}"
-            );
-        }
+        // The cuts end in a rebase, on the queue toward the viewer that
+        // arrival times read as on the round trip.
+        assert!(
+            after.iter().any(|second| second.rebase.is_some()),
+            "{after:?}"
+        );
     }
 }
 
@@ -892,4 +899,107 @@ fn quality_cuts_to_half_its_start_then_the_pace_then_its_floor() {
         mean(floor.iter().map(|second| second.bpf)) < 70_000.0,
         "{floor:?}"
     );
+}
+
+#[test]
+fn an_encoder_at_its_content_floor_sheds_through_the_pace_and_recovers() {
+    // Frames never below 3750 bytes, 1.8 × Balanced's floor: lower bits per
+    // frame shed nothing on a 1.2 Mbit/s link, so the pace carries what the
+    // frames the host measured cost.
+    let mut sim = Sim::new(Encoder::Floor { bytes: 3750 }, 20, true);
+    sim.change(6 * S, Change::Rate(1_200_000));
+    sim.change(20 * S, Change::Rate(0));
+    sim.run(40);
+    sim.dump("floor");
+    let limited = sim.span(10, 20);
+    assert!(
+        limited
+            .iter()
+            .all(|second| second.queue_max < ms(100) && second.rate_fps.is_some()),
+        "{limited:?}"
+    );
+    let received = mean(limited.iter().map(|second| f64::from(second.received)));
+    assert!(received >= 33.0, "{limited:?}");
+    // Once the link is clear, raises lift the cap and then bits per frame,
+    // though the encoder sends more than it is asked for.
+    let back = sim.first(20, |second| {
+        second.rate_fps.is_none() && second.expected_bps >= START_BPS
+    });
+    assert!(
+        back.is_some_and(|back| back <= 20 + 6),
+        "{:?}",
+        sim.span(20, 40)
+    );
+    let last = sim.seconds.last().copied().unwrap_or_default();
+    assert!(last.bpf >= MAX - 1.0, "{last:?}");
+}
+
+#[test]
+fn a_light_picture_lifts_the_pace_cap_once_the_link_clears() {
+    // The picture turns still during a 500 kbit/s limit, which capped the
+    // pace: a light picture never raises bits per frame, but lifts the cap.
+    let mut sim = Sim::new(typical(), 20, true);
+    sim.change(6 * S, Change::Rate(500_000));
+    sim.change(10 * S, Change::Picture(Encoder::Still));
+    sim.change(14 * S, Change::Rate(0));
+    sim.run(30);
+    sim.dump("light_limit");
+    assert!(
+        sim.span(7, 10)
+            .iter()
+            .any(|second| second.rate_fps.is_some()),
+        "{:?}",
+        sim.span(6, 14)
+    );
+    let clear = sim.span(15, 30);
+    assert!(
+        clear
+            .iter()
+            .all(|second| second.pace_min >= 55 && second.rate_fps.is_none()),
+        "{clear:?}"
+    );
+    assert!(clear.iter().all(|second| second.bpf <= FLOOR + 1.0));
+}
+
+#[test]
+fn a_light_picture_behind_a_queue_it_did_not_cause_keeps_its_pace() {
+    for one_way in [true, false] {
+        // A still picture, 144 kbit/s, behind 60 ms more toward the viewer:
+        // the busy rate is its own. Cuts sized by what its frames cost lower
+        // the pace a step each, the queue stays, and the baseline moves.
+        let mut sim = Sim::new(Encoder::Still, 20, one_way);
+        sim.change(
+            8 * S,
+            Change::Delay {
+                forward: 70,
+                reverse: 10,
+            },
+        );
+        sim.change(
+            20 * S,
+            Change::Delay {
+                forward: 10,
+                reverse: 10,
+            },
+        );
+        sim.run(40);
+        sim.dump(if one_way {
+            "light_queue"
+        } else {
+            "light_route"
+        });
+        let queued = sim.span(8, 20);
+        assert!(
+            queued.iter().all(|second| second.pace_min >= 40),
+            "{queued:?}"
+        );
+        assert!(queued.iter().any(|second| second.rebase.is_some()));
+        assert!(
+            sim.span(12, 40)
+                .iter()
+                .all(|second| second.pace_min >= 55 && second.cuts <= 2),
+            "{:?}",
+            sim.span(8, 40)
+        );
+    }
 }

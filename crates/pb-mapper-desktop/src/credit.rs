@@ -176,9 +176,10 @@ pub(crate) struct CreditLedger {
     /// which the one-way ack queue hides too.
     floor_gap: Duration,
     /// What a receipt rebase added to the QoS controller's baseline
-    /// (`Qos::rebase_offset`): a longer route, which the window's time
-    /// covers and the ack queue does not count.
+    /// (`Qos::rebase_state`): a longer route, which the window's time
+    /// covers and the ack queue does not count; and its generation.
     rebase: Duration,
+    rebase_generation: u64,
     /// The newest IDR booked.
     last_keyframe: Option<u64>,
     /// While set, B-send drops predicted units until an IDR is booked, and
@@ -203,6 +204,7 @@ impl CreditLedger {
             one_way: arrival_time.then(|| OneWay::new(now)),
             floor_gap: Duration::ZERO,
             rebase: Duration::ZERO,
+            rebase_generation: 0,
             last_keyframe: None,
             skip_ask_at: None,
         }
@@ -472,10 +474,14 @@ impl CreditLedger {
         self.floor_gap = gap;
     }
 
-    /// What a receipt rebase added to the QoS controller's baseline, as it
-    /// last stood.
-    pub fn set_rebase(&mut self, rebase: Duration) {
-        self.rebase = rebase;
+    /// What a receipt rebase added to the QoS controller's baseline, as of
+    /// its `generation`: a write of an older generation than the ledger has,
+    /// which lost a race with a newer one, is ignored.
+    pub fn set_rebase(&mut self, generation: u64, rebase: Duration) {
+        if generation > self.rebase_generation {
+            self.rebase_generation = generation;
+            self.rebase = rebase;
+        }
     }
 
     /// The queues of a viewer that stamps arrival times, for the stats: the
@@ -692,13 +698,19 @@ mod tests {
         // ... unless 120 ms of it is a longer route the QoS controller
         // rebased onto: 30 ms of queue, and a window whose time covers the
         // route: 60 FPS over 20 + 120 + 100 ms is 15 frames.
-        credit.set_rebase(Duration::from_millis(120));
+        credit.set_rebase(2, Duration::from_millis(120));
         assert_eq!(
             credit.ack_queue(Duration::from_millis(20), now),
             Duration::from_millis(30)
         );
         let rebased = credit.window(VideoCodec::H264, 60, 4_000_000, base, None, now);
         assert_eq!((rebased.frames, rebased.clamped), (15, false));
+        // A write of an older generation, which lost a race, changes nothing.
+        credit.set_rebase(1, Duration::ZERO);
+        assert_eq!(
+            credit.ack_queue(Duration::from_millis(20), now),
+            Duration::from_millis(30)
+        );
         assert_eq!(seq, 30);
     }
     #[test]

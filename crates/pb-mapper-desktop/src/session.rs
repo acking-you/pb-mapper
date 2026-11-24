@@ -38,7 +38,7 @@ use std::{
     future::Future,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -144,6 +144,8 @@ pub(crate) struct Session {
     /// A clamped window refused a unit, with no IDR in flight, since the last
     /// receipt: congestion the receipts' controller reads with a small queue.
     blocked: AtomicBool,
+    /// The newest rebase generation handed to the credit ledger.
+    rebase_generation: AtomicU64,
     /// B-recv refused a control request at the edge; B-send reports it.
     control_denied: AtomicBool,
     ending: Mutex<Option<End>>,
@@ -244,6 +246,7 @@ impl Session {
             qos: Mutex::new(qos),
             credit_changed: Notify::new(),
             blocked: AtomicBool::new(false),
+            rebase_generation: AtomicU64::new(0),
             control_denied: AtomicBool::new(false),
             ending: Mutex::new(None),
             changes,
@@ -309,15 +312,22 @@ impl Session {
 
     /// Change the controller and publish its targets to C. The targets are
     /// stored under the `qos` lock, so the newest decision is the one C reads.
-    /// The baseline a rebase moved then reaches the credit ledger, once the
-    /// `qos` lock is released.
+    /// A baseline a rebase moved then reaches the credit ledger, once the
+    /// `qos` lock is released; the ledger keeps the newest generation, so of
+    /// B-send's and B-recv's writes the older never lands last.
     fn update_qos(&self, now: Instant, change: impl FnOnce(&mut Qos)) {
-        let (changed, rebase) = {
+        let (changed, (generation, rebase)) = {
             let mut qos = self.qos.lock();
             change(&mut qos);
-            (self.store_targets(qos.targets(now)), qos.rebase_offset())
+            (self.store_targets(qos.targets(now)), qos.rebase_state())
         };
-        self.credit.lock().set_rebase(rebase);
+        if self
+            .rebase_generation
+            .fetch_max(generation, Ordering::AcqRel)
+            < generation
+        {
+            self.credit.lock().set_rebase(generation, rebase);
+        }
         if changed {
             self.shared.wake.notify();
         }
