@@ -52,6 +52,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [Viewer pixel snap measurements](benchmarks/2026-11-24-viewer-pixel-snap/README.md) | the contrast a 1-pixel stroke keeps through the viewer's picture transform, before and after keeping a 1:1 picture on device pixels and showing a near-1 fit at exactly 1:1 |
 | [Mac desktop check reuse](benchmarks/2026-11-24-mac-session-check/README.md) | what the session and geometry check around each Mac capture and pointer read costs thread C and WindowServer, back to back and paced at 60 FPS, before and after reusing a passing one for 16 ms |
 | [Mac VideoToolbox submit thread](benchmarks/2026-11-24-macos-vt-submit/README.md) | what a VideoToolbox submit costs a Mac host's thread C and an input queued meanwhile, and VideoToolbox's dwell with four and two units in flight, before and after the encoder's own submit thread |
+| [Mac VideoToolbox rate control](benchmarks/2026-11-24-macos-rate-model/README.md) | what low-latency VideoToolbox drops with and without a QP bound of 51, how soon a dropped last picture after an IDR arrives with and without sending it again, its rate model under a pace that follows QoS, low latency against standard rate control at 120 FPS, and a bitrate cut |
 
 ## Security
 

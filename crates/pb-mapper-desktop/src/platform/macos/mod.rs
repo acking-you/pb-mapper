@@ -63,6 +63,8 @@ mod tests;
 pub(crate) mod timer;
 #[cfg(target_os = "macos")]
 mod video;
+#[cfg(test)]
+mod vt_measure;
 #[cfg(target_os = "macos")]
 pub(crate) mod waiter;
 

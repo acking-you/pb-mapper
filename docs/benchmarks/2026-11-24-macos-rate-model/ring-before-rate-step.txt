@@ -1,0 +1,11 @@
+# 2026-11-24 13:48:10 start, load averages: 4.23 2.98 2.91
+running 1 test
+test platform::macos::vt_measure::video_toolbox_rate_step ... codec=H264 size=1920x1080 content=Busy pace=60 from_picture=0 bitrate=8000000 budget_bits=133333 pictures_until_within_1.2=1 dropped=0 smallest_over_budget=0.02 largest_over_budget=27.01 mean_over_budget=1.17 first_20=[27.01 0.41 0.06 0.05 0.04 0.03 0.02 0.06 0.07 0.07 0.05 0.03 0.13 0.13 0.17 0.17 0.24 2.09 0.07 1.55]
+codec=H264 size=1920x1080 content=Busy pace=60 from_picture=60 bitrate=2000000 budget_bits=33333 pictures_until_within_1.2=1 dropped=0 smallest_over_budget=0.10 largest_over_budget=3.62 mean_over_budget=0.69 first_20=[2.63 0.19 0.20 0.16 0.12 0.10 0.11 0.25 0.28 0.28 0.21 0.11 0.52 0.17 0.16 0.14 0.15 0.12 0.11 0.26]
+codec=H264 size=1920x1080 content=Busy pace=60 from_picture=180 bitrate=8000000 budget_bits=133333 pictures_until_within_1.2=1 dropped=0 smallest_over_budget=0.08 largest_over_budget=3.20 mean_over_budget=1.10 first_20=[2.66 1.10 0.85 2.00 0.12 1.92 0.08 2.00 0.28 2.13 0.24 1.95 0.84 0.42 1.72 0.12 1.73 0.10 1.67 0.22]
+codec=H265 size=1920x1080 content=Busy pace=60 from_picture=0 bitrate=8000000 budget_bits=133333 pictures_until_within_1.2=1 dropped=0 smallest_over_budget=0.02 largest_over_budget=24.47 mean_over_budget=1.20 first_20=[24.47 0.05 0.04 0.04 0.04 0.03 0.02 0.06 0.06 0.06 0.04 0.06 0.34 0.11 0.13 0.16 1.46 0.54 0.26 1.44]
+codec=H265 size=1920x1080 content=Busy pace=60 from_picture=60 bitrate=2000000 budget_bits=33333 pictures_until_within_1.2=1 dropped=0 smallest_over_budget=0.07 largest_over_budget=22.51 mean_over_budget=0.70 first_20=[1.91 0.12 0.13 0.12 0.11 0.09 0.07 0.23 0.24 0.24 0.17 0.07 0.48 0.08 0.10 0.12 0.11 0.09 0.07 0.23]
+codec=H265 size=1920x1080 content=Busy pace=60 from_picture=180 bitrate=8000000 budget_bits=133333 pictures_until_within_1.2=0 dropped=0 smallest_over_budget=0.02 largest_over_budget=14.48 mean_over_budget=1.01 first_20=[0.24 0.12 0.14 0.12 0.13 0.20 1.14 10.33 1.13 0.22 0.16 0.05 0.68 0.05 0.06 0.09 0.09 0.27 11.49 0.90]
+ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 258 filtered out; finished in 10.81s
+# 2026-11-24 13:48:21 end, load averages: 3.89 2.95 2.90
