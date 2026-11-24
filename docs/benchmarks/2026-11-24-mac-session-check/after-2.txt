@@ -1,0 +1,16 @@
+# after run 2, 2026-11-24T02:43:21Z
+# load: 2.85 5.18 4.18
+
+running 1 test
+test platform::macos::tests::session_check_cost ... the session check fails here: the screen is locked; the picture resumes when the owner unlocks the Mac
+display 4096x2304 at (0, 0) verifies=reads_as_passing
+back_to_back recent=false verifies=20000 wall_us_per_verify=51.908 thread_cpu_us_per_verify=18.154 window_server_cpu_us_per_verify=20.500 reads_per_verify=2.000
+back_to_back recent=true verifies=20000 wall_us_per_verify=0.038 thread_cpu_us_per_verify=0.033 window_server_cpu_us_per_verify=0.000 reads_per_verify=0.000
+back_to_back mac_desktop_failing recent=true verifies=20000 wall_us_per_verify=37.240 thread_cpu_us_per_verify=12.033 window_server_cpu_us_per_verify=11.500 reads_per_verify=uncounted
+paced idle seconds=10.00 verifies_per_s=0.0 over_10us_per_s=0.0 reads_per_s=0.000 verify_wall_ms_per_s=0.000 thread_cpu_ms_per_s=1.250 window_server_cpu_ms_per_s=5.000
+paced recent=false seconds=10.00 verifies_per_s=245.0 over_10us_per_s=245.0 reads_per_s=489.999 verify_wall_ms_per_s=74.759 thread_cpu_ms_per_s=27.802 window_server_cpu_ms_per_s=33.000
+paced recent=true seconds=10.00 verifies_per_s=245.0 over_10us_per_s=60.6 reads_per_s=119.600 verify_wall_ms_per_s=24.873 thread_cpu_ms_per_s=9.873 window_server_cpu_ms_per_s=18.000
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 238 filtered out; finished in 32.03s
+
