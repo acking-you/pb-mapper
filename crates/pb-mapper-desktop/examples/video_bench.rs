@@ -33,6 +33,46 @@
 //!   holds units, as thread C drained every encoder before the watcher and
 //!   still drains one that cannot be shut down: the baseline arm of an
 //!   event comparison. Not with `--backend`.
+//! - `--text`: cover the whole display with a still page of GDI text in
+//!   several fonts, sizes and colours, painted once (and again only when
+//!   Windows asks the window to repaint): a desktop of text, the content
+//!   whose sharpness at a given bitrate the encoder settings below decide.
+//!   After its first picture the encoder sees only the 250 ms repeats.
+//! - `--h264-profile base|high`: the H.264 profile asked for first (High by
+//!   default, as a session: Constrained High, High, then Baseline where the
+//!   encoder refuses them).
+//! - `--qvs <0..100>`: `CODECAPI_AVEncCommonQualityVsSpeed` (0 by default,
+//!   as a session).
+//! - `--scenario display-remoting`: set `CODECAPI_AVScenarioInfo` to
+//!   display remoting, which a session does not.
+//! - `--gpu-priority`: raise the capture device's GPU thread priority and
+//!   the process's GPU scheduling class to `HIGH` while the encoder lives,
+//!   which a session does not. Run it beside a GPU-saturating 3D load, from
+//!   an elevated prompt for the device priority, with
+//!   `RUST_LOG=pb_mapper_desktop::session=info` to see what each call did
+//!   (`desktop_gpu_priority`).
+//! - `--dump-source <path>`: write the NV12 picture each submit gave the
+//!   encoder, read back from the GPU (`height` luma rows, then `height / 2`
+//!   rows of interleaved chroma, `width` bytes each, at the encoded size
+//!   the `first_access_unit` line's `size` shows), one per submitted unit
+//!   (`source_pictures`), so that frame n of `--output` decodes to frame n
+//!   of this file unless the encoder discarded a late unit; the last few
+//!   may still be in the encoder when the run ends. The reference for
+//!   ffmpeg's PSNR and SSIM. Reading a picture back waits for the GPU, so
+//!   time the encoder in a run without it. Not with `--backend`.
+//!
+//! The encoder's read-back of its settings is printed as an
+//! `encoder_opened` line (`desktop_video_encoder_opened`'s fields, and the
+//! encoder's own H.264 SPS in hex as `encoder_sps`, to compare with the SPS
+//! `--output` holds, which is the one sent), and each
+//! unit's dwell in the encoder, submit to output, as `dwell_p50_ms` and
+//! `dwell_p95_ms`; driving the encoder, so is the time from each dated
+//! present to the drain that collected its unit (`present_to_output_*`,
+//! which pairs units in order, so a run that discards a late unit, as
+//! `--pause-ms` does, pairs the later ones wrongly). With `RUST_LOG` set,
+//! as `pb_mapper_desktop::session=info`, the host's own events go to
+//! stderr: `desktop_video_encoder_opened`, `desktop_h264_high_failed`,
+//! `desktop_gpu_priority` and the rest.
 //!
 //! The loop waits as thread C does: until the next tick, the next poll of an
 //! armed tick or of a polled encoder holding units (or of one with an
@@ -141,12 +181,17 @@ mod counting {
 /// The benchmark: its options, the paced loop and the report.
 #[cfg(windows)]
 mod bench {
-    use crate::{pacer::Pacer, pattern::Pattern, probe_support::option};
+    use crate::{
+        pacer::Pacer,
+        pattern::{Fill, Pattern},
+        probe_support::option,
+    };
     use pb_mapper_desktop::{
         Backend, DRAIN_POLL, Display, DisplaySelection, NativeBackend, VideoCodec, VideoLimits,
         VideoRate, displays, native_backend,
         windows::video::{
-            Encoded, Encoder, EncoderWake, PICKUP_BOUNDS_US, Statistics, Submit, h265_available,
+            Encoded, Encoder, EncoderOptions, EncoderWake, H264Profile, PICKUP_BOUNDS_US,
+            Statistics, Submit, h265_available,
         },
     };
     use std::{
@@ -158,7 +203,7 @@ mod bench {
     type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
     /// The options that take a value, which is then no positional argument.
-    const VALUED: [&str; 10] = [
+    const VALUED: [&str; 14] = [
         "--max-width",
         "--max-height",
         "--bitrate",
@@ -169,6 +214,10 @@ mod bench {
         "--dump",
         "--frames",
         "--codec",
+        "--h264-profile",
+        "--qvs",
+        "--scenario",
+        "--dump-source",
     ];
     /// A step's bitrate is measured after this long, once the rate controller
     /// has settled.
@@ -181,18 +230,37 @@ mod bench {
     const CONTEXT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
     pub fn run() -> Result {
+        // The host's own events on stderr, as `RUST_LOG` selects them;
+        // errors only without it.
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .init();
         let args: Vec<String> = std::env::args().skip(1).collect();
         let rates = Rates::parse(&args)?;
         let display = displays()?.into_iter().next().ok_or("no display")?;
         let pattern_only = flag(&args, "--pattern-only");
         let noise = flag(&args, "--noise");
-        let _animation = if option(&args, "--dump").is_some() || noise {
+        let text = flag(&args, "--text");
+        if text && (noise || option(&args, "--dump").is_some()) {
+            return Err(
+                "--text covers the display with a still page: not with --noise or --dump".into(),
+            );
+        }
+        let _animation = if option(&args, "--dump").is_some() || noise || text {
             Some(Pattern::new(
                 display.x,
                 display.y,
                 display.width,
                 display.height,
-                noise,
+                if noise {
+                    Fill::Noise
+                } else if text {
+                    Fill::Text
+                } else {
+                    Fill::Colour
+                },
             )?)
         } else if pattern_only || flag(&args, "--animate") || rates.paces.is_some() {
             Some(Pattern::new(
@@ -200,7 +268,7 @@ mod bench {
                 display.y + 32,
                 960,
                 540,
-                false,
+                Fill::Colour,
             )?)
         } else {
             None
@@ -236,19 +304,25 @@ mod bench {
         // What the encoder's event watcher wakes, and the loop waits on.
         let wake = EncoderWake::new()?;
         let waker = (!limits.poll_events).then_some(wake.waker());
+        let options = limits.options;
         let building = Instant::now();
-        let encoder = if limits.backend {
+        let mut encoder = if limits.backend {
             None
         } else if exact {
             Some(Encoder::new_exact(
-                &display, codec, fps, bitrate, max_width, max_height, waker,
+                &display, codec, fps, bitrate, max_width, max_height, waker, options,
             )?)
         } else {
             Some(Encoder::new_with_size(
-                &display, codec, fps, bitrate, max_width, max_height, waker,
+                &display, codec, fps, bitrate, max_width, max_height, waker, options,
             )?)
         };
         let build_ms = building.elapsed().as_secs_f64() * 1000.0;
+        if let Some(encoder) = &mut encoder
+            && sinks.source.is_some()
+        {
+            encoder.keep_source();
+        }
         let mut coder = match encoder {
             Some(encoder) => Coder::Encoder(encoder),
             None => {
@@ -266,11 +340,19 @@ mod bench {
             }
         };
         println!(
-            "encoder={} codec={codec:?} build_ms={build_ms:.1} display={}x{} nominal_fps={fps} max_size={max_width}x{max_height}{} target_bitrate={bitrate}",
+            "encoder={} codec={codec:?} build_ms={build_ms:.1} display={}x{} nominal_fps={fps} max_size={max_width}x{max_height}{} target_bitrate={bitrate} h264_profile={:?} qvs={} scenario={} gpu_priority={}",
             coder.name(),
             display.width,
             display.height,
             if exact { " exact" } else { "" },
+            options.h264_profile,
+            options.quality_vs_speed,
+            if options.display_remoting {
+                "display-remoting"
+            } else {
+                "none"
+            },
+            options.gpu_priority,
         );
 
         let steps = rates.steps();
@@ -290,6 +372,10 @@ mod bench {
         if let Some(file) = &mut sinks.dump {
             file.flush()?;
             println!("dumped_units={}", tally.written);
+        }
+        if let Some(file) = &mut sinks.source {
+            file.flush()?;
+            println!("source_pictures={}", tally.sources);
         }
         let stats = match &coder {
             Coder::Encoder(encoder) => encoder.statistics(),
@@ -377,6 +463,11 @@ mod bench {
         args.iter().any(|arg| arg == name)
     }
 
+    /// `value`, or `none` for a setting the encoder read nothing back for.
+    fn or_none<T: std::fmt::Display>(value: Option<T>) -> String {
+        value.map_or_else(|| "none".to_owned(), |value| value.to_string())
+    }
+
     /// What the run asks for that needs no display: how long, at which paces
     /// and nominal rate, in which codec.
     struct Rates {
@@ -455,6 +546,9 @@ mod bench {
         poll: Duration,
         pause_ms: u64,
         exact: bool,
+        /// The encoder's profile, quality against speed, scenario and GPU
+        /// priority.
+        options: EncoderOptions,
     }
     impl Limits {
         /// The limits, and the files they name, created as they are read.
@@ -507,6 +601,49 @@ mod bench {
             if exact && backend {
                 return Err("--exact drives the encoder; a backend never upscales".into());
             }
+            let options = EncoderOptions {
+                h264_profile: match option(args, "--h264-profile").unwrap_or("high") {
+                    "high" => H264Profile::High,
+                    "base" => H264Profile::Base,
+                    other => {
+                        return Err(format!("unknown H.264 profile {other}: base or high").into());
+                    }
+                },
+                quality_vs_speed: option(args, "--qvs")
+                    .map(str::parse)
+                    .transpose()?
+                    .unwrap_or(0),
+                display_remoting: match option(args, "--scenario") {
+                    None => false,
+                    Some("display-remoting") => true,
+                    Some(other) => {
+                        return Err(format!("unknown scenario {other}: display-remoting").into());
+                    }
+                },
+                gpu_priority: flag(args, "--gpu-priority"),
+            };
+            if options.quality_vs_speed > 100 {
+                return Err("--qvs must be 0..100".into());
+            }
+            let changes_encoder = option(args, "--h264-profile").is_some()
+                || option(args, "--qvs").is_some()
+                || options.display_remoting
+                || options.gpu_priority;
+            if backend && changes_encoder {
+                return Err(
+                    "--h264-profile, --qvs, --scenario and --gpu-priority build the encoder; a backend takes a session's settings"
+                        .into(),
+                );
+            }
+            let source = option(args, "--dump-source")
+                .map(File::create)
+                .transpose()?
+                .map(BufWriter::new);
+            if source.is_some() && backend {
+                return Err(
+                    "--dump-source reads the encoder's input back; not with --backend".into(),
+                );
+            }
             let limits = Self {
                 backend,
                 grid,
@@ -518,16 +655,25 @@ mod bench {
                 poll,
                 pause_ms,
                 exact,
+                options,
             };
-            Ok((limits, Sinks { output, dump }))
+            Ok((
+                limits,
+                Sinks {
+                    output,
+                    dump,
+                    source,
+                },
+            ))
         }
     }
 
     /// The files the access units are written to: raw Annex B, and the
-    /// length-prefixed clip.
+    /// length-prefixed clip; and the NV12 pictures the encoder was given.
     struct Sinks {
         output: Option<File>,
         dump: Option<BufWriter<File>>,
+        source: Option<BufWriter<File>>,
     }
 
     /// What makes the access units: the encoder alone, or the whole SDK
@@ -633,6 +779,18 @@ mod bench {
         drain_us: Vec<f64>,
         submit_kcycles: Vec<f64>,
         drain_kcycles: Vec<f64>,
+        /// `--dump-source`'s NV12 pictures written, and the buffer each is
+        /// read back into.
+        sources: u64,
+        source: Vec<u8>,
+        /// Each unit's dwell in the encoder, submit to output, in
+        /// milliseconds (`Encoded::encode_us`).
+        dwell_ms: Vec<f64>,
+        /// When the display presented each unit in the encoder, in order
+        /// (`None`: undated), and from each dated present to the drain that
+        /// collected its unit, in milliseconds. Driving the encoder only.
+        in_encoder: std::collections::VecDeque<Option<Instant>>,
+        present_to_output: Vec<f64>,
         /// The pause probe stalled the encoder, and its next unit must be a
         /// keyframe.
         paused: bool,
@@ -667,6 +825,7 @@ mod bench {
                 println!("pause_recovery_keyframe=true pause_ms={pause_ms}");
                 self.awaiting_recovery = false;
             }
+            self.dwell_ms.push(f64::from(frame.encode_us) / 1e3);
             self.backend_stats.encoded += 1;
             self.backend_stats.unique_encoded += u64::from(!frame.duplicate);
             self.backend_stats.bytes += frame.bytes.len() as u64;
@@ -790,6 +949,11 @@ mod bench {
                             };
                             tally.drain_us.push(took.as_secs_f64() * 1e6);
                             tally.drain_kcycles.push(ran as f64 / 1e3);
+                            // Units come out in the order they went in.
+                            if let Some(Some(presented)) = tally.in_encoder.pop_front() {
+                                let waited = Instant::now().saturating_duration_since(presented);
+                                tally.present_to_output.push(waited.as_secs_f64() * 1e3);
+                            }
                             ready.push(frame);
                         }
                         if tick {
@@ -801,6 +965,17 @@ mod bench {
                             if outcome == Submit::Submitted {
                                 tally.submit_us.push(took.as_secs_f64() * 1e6);
                                 tally.submit_kcycles.push(ran as f64 / 1e3);
+                                tally
+                                    .in_encoder
+                                    .push_back(encoder.presented().map(|presented| presented.at));
+                                // After the timed call: the read-back waits
+                                // for the GPU.
+                                if let Some(file) = &mut sinks.source
+                                    && encoder.source_nv12(&mut tally.source)?
+                                {
+                                    file.write_all(&tally.source)?;
+                                    tally.sources += 1;
+                                }
                             }
                             (outcome.spends_tick(), encoder.presented())
                         } else {
@@ -948,6 +1123,28 @@ mod bench {
                 pickup_buckets(&stats.pickup),
                 pickup_median(&stats.pickup),
             );
+            let opened = &stats.opened;
+            println!(
+                "encoder_opened vendor={:#06x} profile={} sps_profile={} sps_reorder={} cabac={} b_frames={} rate_control={} quality_vs_speed={} scenario={} encoder_sps={}",
+                opened.vendor,
+                opened.profile,
+                or_none(opened.sps_profile),
+                or_none(opened.sps_reorder),
+                or_none(opened.cabac),
+                or_none(opened.b_frames),
+                or_none(opened.rate_control),
+                or_none(opened.quality_vs_speed),
+                or_none(opened.scenario),
+                if opened.sps.is_empty() {
+                    "none".to_owned()
+                } else {
+                    opened
+                        .sps
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect()
+                },
+            );
         }
         if limits.backend {
             println!(
@@ -994,6 +1191,14 @@ mod bench {
             quantile(&tally.present_waits, 95),
             tally.coalesced,
             tally.coalesced as f64 / elapsed,
+        );
+        println!(
+            "dwell_p50_ms={:.3} dwell_p95_ms={:.3} present_to_output_samples={} present_to_output_p50_ms={:.3} present_to_output_p95_ms={:.3}",
+            quantile(&tally.dwell_ms, 50),
+            quantile(&tally.dwell_ms, 95),
+            tally.present_to_output.len(),
+            quantile(&tally.present_to_output, 50),
+            quantile(&tally.present_to_output, 95),
         );
         if let Some(first) = tally.first_unit {
             println!("first_access_unit_ms={:.1}", first.as_secs_f64() * 1e3);
@@ -1056,11 +1261,23 @@ mod pattern {
                 WindowsAndMessaging::*,
             },
         },
-        core::w,
+        core::{PCWSTR, w},
     };
 
-    /// A topmost window that repaints every display refresh, at physical
-    /// desktop coordinates: a changing colour, or fresh noise.
+    /// What the pattern window shows.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Fill {
+        /// A colour that changes, and a counter, every display refresh.
+        Colour,
+        /// Fresh noise every display refresh.
+        Noise,
+        /// A still page of text, painted once and again only when Windows
+        /// asks the window to repaint.
+        Text,
+    }
+
+    /// A topmost window at physical desktop coordinates: a changing colour
+    /// or fresh noise every display refresh, or a still page of text.
     pub struct Pattern {
         stop: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
@@ -1071,7 +1288,7 @@ mod pattern {
             y: i32,
             width: u32,
             height: u32,
-            noise: bool,
+            fill: Fill,
         ) -> Result<Self, Box<dyn std::error::Error>> {
             let stop = Arc::new(AtomicBool::new(false));
             let done = stop.clone();
@@ -1103,12 +1320,30 @@ mod pattern {
                 let dc = GetDC(Some(window));
                 let _ = SetBkMode(dc, TRANSPARENT);
                 let _ = SetTextColor(dc, COLORREF(0x00ffffff));
-                let noise = noise.then(|| Noise::new(dc, width, height)).flatten();
+                let noise = (fill == Fill::Noise)
+                    .then(|| Noise::new(dc, width, height))
+                    .flatten();
+                let text = (fill == Fill::Text)
+                    .then(|| Text::new(dc, width, height))
+                    .flatten();
                 let mut frame = 0u32;
                 let mut message = MSG::default();
+                // The text is painted at first, and after each repaint the
+                // window's own class made.
+                let mut stale = true;
                 while !done.load(Ordering::Acquire) {
                     while PeekMessageW(&mut message, Some(window), 0, 0, PM_REMOVE).as_bool() {
+                        stale |= message.message == WM_PAINT;
                         let _ = DispatchMessageW(&message);
+                    }
+                    if let Some(text) = &text {
+                        if std::mem::take(&mut stale) {
+                            text.paint(dc);
+                        }
+                        // Nothing to present: DwmFlush, which waits for
+                        // the next present, may not wait on a still screen.
+                        std::thread::sleep(std::time::Duration::from_millis(15));
+                        continue;
                     }
                     if let Some(noise) = &noise {
                         noise.paint(dc, frame);
@@ -1144,6 +1379,7 @@ mod pattern {
                     }
                 }
                 drop(noise);
+                drop(text);
                 let _ = ReleaseDC(Some(window), dc);
                 let _ = DestroyWindow(window);
             });
@@ -1228,6 +1464,147 @@ mod pattern {
         }
     }
     impl Drop for Noise {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DeleteDC(self.memory);
+                let _ = DeleteObject(self.bitmap.into());
+            }
+        }
+    }
+
+    /// The lines of the text page, in turn: pangrams, code, the alphabet
+    /// and the glyphs a codec blurs together first.
+    const LINES: [&str; 5] = [
+        "The quick brown fox jumps over the lazy dog. 0123456789 ",
+        "fn encode(picture: &Nv12, budget: u32) -> Result<Unit> { cabac(budget / 8) } // ok ",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz !@#$%^&*()[]{}<>=+-_ ",
+        "Sphinx of black quartz, judge my vow: 1 l I | i ! ; : , . ' \" ` ~ rn m vv w ",
+        "Pack my box with five dozen liquor jugs. 3.14159 2.71828 1.41421 0x7fff_ffff ",
+    ];
+
+    /// How each line is drawn, in turn: its height in pixels, face,
+    /// weight, ink (`0x00bbggrr`) and the band behind it, if any (a dark
+    /// one, as a dark theme's).
+    const STYLES: [(i32, PCWSTR, FONT_WEIGHT, u32, Option<u32>); 8] = [
+        (13, w!("Segoe UI"), FW_NORMAL, 0x0000_0000, None),
+        (15, w!("Consolas"), FW_NORMAL, 0x0040_4040, None),
+        (11, w!("Segoe UI"), FW_NORMAL, 0x0000_0000, None),
+        (20, w!("Times New Roman"), FW_NORMAL, 0x00a0_3000, None),
+        (
+            13,
+            w!("Consolas"),
+            FW_NORMAL,
+            0x00e0_e0e0,
+            Some(0x001e_1e1e),
+        ),
+        (16, w!("Segoe UI"), FW_BOLD, 0x0000_00c0, None),
+        (12, w!("Tahoma"), FW_NORMAL, 0x0060_6060, None),
+        (28, w!("Segoe UI"), FW_NORMAL, 0x0000_0000, None),
+    ];
+
+    /// A still page of text, drawn once into a bitmap the size of the
+    /// window with the system's text rendering (ClearType), and copied to
+    /// the window when it needs painting.
+    struct Text {
+        memory: HDC,
+        bitmap: HBITMAP,
+        width: i32,
+        height: i32,
+    }
+    impl Text {
+        unsafe fn new(dc: HDC, width: i32, height: i32) -> Option<Self> {
+            let bitmap = unsafe { CreateCompatibleBitmap(dc, width, height) };
+            if bitmap.is_invalid() {
+                return None;
+            }
+            let memory = unsafe { CreateCompatibleDC(Some(dc)) };
+            unsafe { SelectObject(memory, bitmap.into()) };
+            let text = Self {
+                memory,
+                bitmap,
+                width,
+                height,
+            };
+            unsafe { text.draw() };
+            Some(text)
+        }
+
+        /// White, then line after line until the page is full, each
+        /// repeated across it.
+        unsafe fn draw(&self) {
+            let memory = self.memory;
+            unsafe {
+                let _ = PatBlt(memory, 0, 0, self.width, self.height, WHITENESS);
+                let _ = SetBkMode(memory, TRANSPARENT);
+            }
+            let mut y = 8;
+            for line in 0.. {
+                if y >= self.height {
+                    break;
+                }
+                let (size, face, weight, ink, band) = STYLES[line % STYLES.len()];
+                let advance = size * 3 / 2;
+                if let Some(band) = band {
+                    unsafe {
+                        let brush = CreateSolidBrush(COLORREF(band));
+                        let _ = FillRect(
+                            memory,
+                            &RECT {
+                                left: 0,
+                                top: y,
+                                right: self.width,
+                                bottom: y + advance,
+                            },
+                            brush,
+                        );
+                        let _ = DeleteObject(brush.into());
+                    }
+                }
+                let words: Vec<u16> = LINES[line % LINES.len()].repeat(8).encode_utf16().collect();
+                unsafe {
+                    let font = CreateFontW(
+                        -size,
+                        0,
+                        0,
+                        0,
+                        weight.0 as i32,
+                        0,
+                        0,
+                        0,
+                        DEFAULT_CHARSET,
+                        OUT_DEFAULT_PRECIS,
+                        CLIP_DEFAULT_PRECIS,
+                        CLEARTYPE_QUALITY,
+                        u32::from(DEFAULT_PITCH.0 | FF_DONTCARE.0),
+                        face,
+                    );
+                    let previous = SelectObject(memory, font.into());
+                    let _ = SetTextColor(memory, COLORREF(ink));
+                    let _ = TextOutW(memory, 16, y + size / 4, &words);
+                    SelectObject(memory, previous);
+                    let _ = DeleteObject(font.into());
+                }
+                y += advance;
+            }
+        }
+
+        unsafe fn paint(&self, dc: HDC) {
+            let _ = unsafe {
+                BitBlt(
+                    dc,
+                    0,
+                    0,
+                    self.width,
+                    self.height,
+                    Some(self.memory),
+                    0,
+                    0,
+                    SRCCOPY,
+                )
+            };
+        }
+    }
+    impl Drop for Text {
         fn drop(&mut self) {
             unsafe {
                 let _ = DeleteDC(self.memory);
