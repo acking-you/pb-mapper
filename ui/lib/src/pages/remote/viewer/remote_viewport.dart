@@ -14,6 +14,12 @@ const kMaxScale = 8.0;
 /// of the visible rect.
 const kFollowMargin = 0.15;
 
+/// A fit that would enlarge the picture by less than this, in device
+/// pixels, shows it at one device pixel per video pixel instead, a little
+/// smaller than its room: bilinear sampling at a factor this close to 1
+/// blends every pixel with its neighbours and blurs text.
+const kExactFitLimit = 1.04;
+
 /// Zoom and pan of the remote picture: local only, never sent to the host,
 /// and independent of the encoder (P1-4).
 ///
@@ -23,6 +29,11 @@ const kFollowMargin = 0.15;
 /// the modifier bar only occlude ([occlusion]); they never change
 /// [layoutSize] or [scene], so nothing relayouts and the texture is
 /// untouched while they move.
+///
+/// While the picture shows one device pixel per video or remote pixel,
+/// [offset] puts its edge on a device pixel's, counted from the stage's
+/// place in the view ([setOrigin]): half a pixel off, sampling would
+/// spread every 1-pixel stroke over two pixels at half contrast.
 final class RemoteViewport extends ChangeNotifier {
   Size _layoutSize = Size.zero;
   double _aspectRatio = 16 / 9;
@@ -31,8 +42,22 @@ final class RemoteViewport extends ChangeNotifier {
   double _scale = kMinScale;
   Offset _offset = Offset.zero;
   ViewerScaleMode _mode = ViewerScaleMode.fit;
-  Size _remotePixels = Size.zero;
+
+  /// The remote display's size: original size shows one of its pixels per
+  /// physical pixel.
+  Size _display = Size.zero;
+
+  /// The video's size: the picture's own pixels.
+  Size _video = Size.zero;
   double _dpr = 1;
+
+  /// The stage's top left in the view, in logical pixels; null while it is
+  /// unknown, or while the stage is scaled or rotated there.
+  Offset? _origin;
+
+  /// [offset] before it snaps to device pixels: a pan goes on from here,
+  /// so moves smaller than a device pixel add up.
+  Offset _free = Offset.zero;
 
   /// The navigation saved when the soft keyboard opened.
   (double, Offset, EdgeInsets)? _beforeKeyboard;
@@ -63,10 +88,14 @@ final class RemoteViewport extends ChangeNotifier {
     _relayout(() => _aspectRatio = value);
   }
 
-  /// The picture fitted into [layoutSize] less [frame], before [scale].
+  /// The picture fitted into [layoutSize] less [frame], before [scale];
+  /// at one device pixel per video pixel where the fit would enlarge it by
+  /// less than [kExactFitLimit].
   Size get scene {
     final room = _frameRect.size;
     if (room.isEmpty) return Size.zero;
+    final exact = _exactScene(room);
+    if (exact != null) return exact;
     final width = math.min(room.width, room.height * _aspectRatio);
     return Size(width, width / _aspectRatio);
   }
@@ -150,7 +179,7 @@ final class RemoteViewport extends ChangeNotifier {
   void setOcclusion(EdgeInsets occlusion) {
     if (occlusion == _occlusion) return;
     _occlusion = occlusion;
-    _set(_scale, _offset, force: true);
+    _set(_scale, _free, force: true);
   }
 
   void zoomAt(Offset focal, double factor) {
@@ -163,7 +192,7 @@ final class RemoteViewport extends ChangeNotifier {
 
   void panBy(Offset delta) {
     _navigated = true;
-    _set(_scale, _offset + delta);
+    _set(_scale, _free + delta);
   }
 
   /// Two or more fingers: scale by their spread, pan by their midpoint. A
@@ -182,6 +211,14 @@ final class RemoteViewport extends ChangeNotifier {
         : (s0 * d / d0).clamp(kMinScale, kMaxScale);
     _navigated = true;
     _set(next, _centroid(now) - anchor * next);
+  }
+
+  /// The pinch's fingers lifted: the picture may settle on device pixels,
+  /// which it never does under the fingers.
+  void endPinch() {
+    if (_pinch == null) return;
+    _pinch = null;
+    _set(_scale, _free);
   }
 
   /// The smallest pan that brings [normalized] at least [margin] of the
@@ -218,7 +255,7 @@ final class RemoteViewport extends ChangeNotifier {
     _beforeKeyboard = null;
     _occlusion = before.$3;
     if (_navigated) {
-      _set(_scale, _offset, force: true);
+      _set(_scale, _free, force: true);
     } else {
       _set(before.$1, before.$2, force: true);
     }
@@ -226,16 +263,40 @@ final class RemoteViewport extends ChangeNotifier {
 
   /// Fit, or one remote pixel per physical pixel (follows the pointer
   /// through [autoScrollTo]).
-  void setMode(
-    ViewerScaleMode mode, {
-    required Size remotePixels,
+  void setMode(ViewerScaleMode mode) =>
+      _relayout(() => _mode = mode, rescale: true);
+
+  /// The remote display's size, the video's and this screen's device pixel
+  /// ratio, which original size and an exact fit are measured in. A zoom
+  /// of the user's stays in fit mode, as through any relayout.
+  void setPixels({
+    required Size display,
+    required Size video,
     required double dpr,
   }) {
+    final ratio = dpr.isFinite && dpr > 0 ? dpr : 1.0;
+    if (display == _display && video == _video && ratio == _dpr) return;
     _relayout(() {
-      _mode = mode;
-      _remotePixels = remotePixels;
-      _dpr = dpr > 0 ? dpr : 1;
-    }, rescale: true);
+      _display = display;
+      _video = video;
+      _dpr = ratio;
+    });
+  }
+
+  /// The stage's top left in the view, in logical pixels: the device
+  /// pixels the picture snaps to are counted from the view's own. Null
+  /// while the stage is scaled or rotated there: nothing snaps.
+  void setOrigin(Offset? origin) {
+    final was = _origin;
+    if (origin == was) return;
+    // The same place, computed along another path.
+    if (origin != null &&
+        was != null &&
+        (origin - was).distanceSquared < 1e-12) {
+      return;
+    }
+    _origin = origin;
+    _set(_scale, _free);
   }
 
   /// In original-size mode the view follows the pointer: its position in
@@ -261,6 +322,9 @@ final class RemoteViewport extends ChangeNotifier {
 
   @override
   void dispose() {
+    // A viewer that closes under a pinch ends it while the frame tears the
+    // tree down: the change it queued must not reach this after the frame.
+    _notifyQueued = false;
     _visibleRegion.dispose();
     super.dispose();
   }
@@ -281,18 +345,48 @@ final class RemoteViewport extends ChangeNotifier {
   double get _modeScale {
     if (_mode != ViewerScaleMode.original) return kMinScale;
     final width = scene.width * _dpr;
-    if (width <= 0 || _remotePixels.isEmpty) return kMinScale;
-    return (_remotePixels.width / width).clamp(kMinScale, kMaxScale);
+    if (width <= 0 || _display.isEmpty) return kMinScale;
+    return (_display.width / width).clamp(kMinScale, kMaxScale);
+  }
+
+  /// The picture at one device pixel per video pixel, when the fit of
+  /// [room] would enlarge it by at least 1 and less than [kExactFitLimit];
+  /// null otherwise, or while the video's size has not the picture's
+  /// aspect (it is not yet this picture's).
+  Size? _exactScene(Size room) {
+    final video = _video;
+    if (video.isEmpty) return null;
+    final fit = math.min(
+      room.width * _dpr / video.width,
+      room.height * _dpr / video.height,
+    );
+    if (fit < 1 || fit >= kExactFitLimit) return null;
+    final width = video.width / _dpr;
+    final height = width / _aspectRatio;
+    if ((height * _dpr - video.height).abs() >= 0.5) return null;
+    return Size(width, height);
+  }
+
+  /// One device pixel per video pixel, or per remote pixel, within half a
+  /// device pixel across the picture.
+  bool _pixelExact(double scale) {
+    final width = scene.width * scale * _dpr;
+    bool exact(Size pixels) =>
+        !pixels.isEmpty && (width - pixels.width).abs() < 0.5;
+    return exact(_video) || exact(_display);
   }
 
   /// Applies a change to the layout, the aspect or the mode while keeping
   /// the picture point at the centre of the visible rect. A zoom of the
-  /// user's stays in fit mode; original size follows the new scene.
+  /// user's stays in fit mode; original size follows the new scene. The
+  /// point is taken where the picture was before it snapped: taken where
+  /// it shows, each relayout of a live resize would add its snap's
+  /// rounding and the picture would slide.
   void _relayout(VoidCallback change, {bool rescale = false}) {
     final before = scene;
     final centre = before.isEmpty
         ? const Offset(0.5, 0.5)
-        : toNormalized(visibleRect.center, clamp: true)!;
+        : _beforeSnap(visibleRect.center);
     change();
     _pinch = null;
     final next = rescale || before.isEmpty || _mode == ViewerScaleMode.original
@@ -304,6 +398,16 @@ final class RemoteViewport extends ChangeNotifier {
       visibleRect.center -
           Offset(centre.dx * s.width, centre.dy * s.height) * next,
       force: true,
+    );
+  }
+
+  /// The picture point under [local], clamped to the picture, with the
+  /// picture at [_free]; the scene must not be empty.
+  Offset _beforeSnap(Offset local) {
+    final s = scene * _scale;
+    return Offset(
+      ((local.dx - _free.dx) / s.width).clamp(0.0, 1.0),
+      ((local.dy - _free.dy) / s.height).clamp(0.0, 1.0),
     );
   }
 
@@ -323,13 +427,50 @@ final class RemoteViewport extends ChangeNotifier {
     );
   }
 
+  /// Moves a pixel-exact picture by less than a device pixel, so its edge
+  /// falls on one and each device pixel samples one texel whole. Under a
+  /// pinch's fingers, or with the stage's place unknown, nothing moves. A
+  /// picture larger than the visible span stays within its bounds where a
+  /// device pixel's edge lies within them, so no sliver of ground shows.
+  Offset _snap(Offset offset, double scale) {
+    final origin = _origin;
+    if (origin == null || _pinch != null || !_pixelExact(scale)) {
+      return offset;
+    }
+    final s = scene * scale;
+    final v = visibleRect;
+    final dpr = _dpr;
+    double axis(double at, double origin, double lo, double hi, double extent) {
+      double toOffset(double device) => device / dpr - origin;
+      final snapped = toOffset(((origin + at) * dpr).roundToDouble());
+      if (extent <= hi - lo) return snapped;
+      final min = hi - extent, max = lo;
+      if (snapped > max) {
+        final inside = toOffset(((origin + max) * dpr + 1e-9).floorToDouble());
+        return inside >= min ? inside : snapped;
+      }
+      if (snapped < min) {
+        final inside = toOffset(((origin + min) * dpr - 1e-9).ceilToDouble());
+        return inside <= max ? inside : snapped;
+      }
+      return snapped;
+    }
+
+    return Offset(
+      axis(offset.dx, origin.dx, v.left, v.right, s.width),
+      axis(offset.dy, origin.dy, v.top, v.bottom, s.height),
+    );
+  }
+
   /// [force]: something besides the transform changed (the layout, the
   /// occlusion), so listeners hear of it even if the transform did not.
   void _set(double scale, Offset offset, {bool force = false}) {
     final bounded = _bound(offset, scale);
-    if (!force && scale == _scale && bounded == _offset) return;
+    final shown = _snap(bounded, scale);
+    _free = bounded;
+    if (!force && scale == _scale && shown == _offset) return;
     _scale = scale;
-    _offset = bounded;
+    _offset = shown;
     _changed();
   }
 

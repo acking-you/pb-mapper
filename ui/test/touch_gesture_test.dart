@@ -88,8 +88,117 @@ _machine(TouchMode mode) {
   return (machine: machine, sink: sink, viewport: viewport, haptics: haptics);
 }
 
+const _dpr = 1.25;
+const _origin = Offset(3.3, 29.9);
+
+/// At 125%, a 1920×1080 video in a 1950×1100 device-pixel room, the stage
+/// at a fractional device pixel in the view: the picture shows one device
+/// pixel per video pixel, centred off the device-pixel grid until it
+/// snaps.
+RemoteViewport _pixelExactViewport() => RemoteViewport()
+  ..aspectRatio = 1920 / 1080
+  ..layout(const Size(1950, 1100) / _dpr)
+  ..setPixels(
+    display: const Size(1920, 1080),
+    video: const Size(1920, 1080),
+    dpr: _dpr,
+  )
+  ..setOrigin(_origin);
+
+/// The picture's top left falls on a device pixel's.
+bool _onDevicePixels(RemoteViewport viewport) {
+  final edge = (_origin + viewport.offset) * _dpr;
+  return (edge.dx - edge.dx.roundToDouble()).abs() < 1e-6 &&
+      (edge.dy - edge.dy.roundToDouble()).abs() < 1e-6;
+}
+
+TouchGestureMachine _navigator(RemoteViewport viewport) => TouchGestureMachine(
+  sink: _Sink(),
+  viewport: viewport,
+  mode: () => TouchMode.trackpad,
+  interactive: () => true,
+  haptic: (_) {},
+);
+
+/// Runs [onDispose] when the tree drops it, inside the frame, as a viewer
+/// disposes its parts.
+class _OnDispose extends StatefulWidget {
+  const _OnDispose(this.onDispose);
+
+  final VoidCallback onDispose;
+
+  @override
+  State<_OnDispose> createState() => _OnDisposeState();
+}
+
+class _OnDisposeState extends State<_OnDispose> {
+  @override
+  void dispose() {
+    widget.onDispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox();
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('a pinch moves a pixel-exact picture freely, and it settles on '
+      'device pixels once the fingers lift or a third one scrolls', () {
+    final viewport = _pixelExactViewport();
+    final machine = _navigator(viewport);
+    expect(_onDevicePixels(viewport), isTrue);
+
+    // Pinching in holds the picture at its smallest, centred in the room.
+    machine.down(1, const Offset(500, 400), ms(0));
+    machine.down(2, const Offset(800, 400), ms(20));
+    machine.move(1, const Offset(600, 400), ms(60));
+    expect(viewport.scale, kMinScale);
+    expect(_onDevicePixels(viewport), isFalse, reason: 'under the fingers');
+    machine.up(1, const Offset(600, 400), ms(100));
+    expect(_onDevicePixels(viewport), isFalse, reason: 'one finger is left');
+    machine.up(2, const Offset(800, 400), ms(120));
+    expect(_onDevicePixels(viewport), isTrue, reason: 'lifted');
+
+    // A third finger ends the pinch while all three are still down.
+    machine.down(1, const Offset(500, 400), ms(1000));
+    machine.down(2, const Offset(800, 400), ms(1020));
+    machine.move(1, const Offset(600, 400), ms(1060));
+    expect(_onDevicePixels(viewport), isFalse, reason: 'under the fingers');
+    machine.down(3, const Offset(700, 500), ms(1080));
+    expect(_onDevicePixels(viewport), isTrue, reason: 'scrolling');
+    machine
+      ..up(1, const Offset(600, 400), ms(1200))
+      ..up(2, const Offset(800, 400), ms(1210))
+      ..up(3, const Offset(700, 500), ms(1220))
+      ..dispose();
+    viewport.dispose();
+  });
+
+  testWidgets('a viewer closed under a pinch publishes nothing from its '
+      'viewport once that is gone', (tester) async {
+    final viewport = _pixelExactViewport();
+    final machine = _navigator(viewport);
+    machine.down(1, const Offset(500, 400), ms(0));
+    machine.down(2, const Offset(800, 400), ms(20));
+    machine.move(1, const Offset(600, 400), ms(60));
+    expect(_onDevicePixels(viewport), isFalse);
+    await tester.pumpWidget(
+      _OnDispose(() {
+        // A viewer's input cancels through the machine first, which ends
+        // the pinch, and its viewport goes after.
+        machine
+          ..cancel(ms(100))
+          ..dispose();
+        viewport.dispose();
+      }),
+    );
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+  });
 
   test(
     'trackpad taps click at once and a held second tap drags without a remote double-click',
