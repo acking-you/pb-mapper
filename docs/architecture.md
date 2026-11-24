@@ -861,7 +861,11 @@ The design and its rules are in `docs/ui-design.md`.
     (`nativeDesktopVideo`); in a macOS app built with
     `--dart-define=presenter=layer`, its own Core Animation layer instead,
     which the viewer shows through the platform view its `platformViewType`
-    names. Dart binds it to a video source; the decoder
+    names; in a Linux app built with `--dart-define=presenter=plane`, the
+    runner's video plane under the Flutter view when the runner gives it
+    (`plane`), which the viewer places with `place` from the transparent
+    hole it leaves (`pages/remote/viewer/native_video_hole.dart`). Dart
+    binds it to a video source; the decoder
     pulls the video from Rust itself. The channel's `decoders` method says,
     without creating a decoder, how large H.264 and H.265 this device
     decodes and its fastest refresh, and on Windows what an install would
@@ -935,7 +939,8 @@ The design and its rules are in `docs/ui-design.md`.
     GStreamer module `linux/runner/desktop_video_gst.cc`, behind the C
     interface `desktop_video_module.h` and loaded with `dlopen`, which
     places its decoders on GPUs with `linux/runner/desktop_video_device.cc`,
-    and the GPU conversion `linux/runner/desktop_video_gl.cc`), or the
+    the GPU conversion `linux/runner/desktop_video_gl.cc`, and the opt-in
+    video plane under the Flutter view `linux/runner/desktop_video_plane.cc`), or the
     Android feeder; so H.264 and H.265 never pass through Dart. Where there
     is no decoder (Windows without Media Foundation, Linux without
     GStreamer's decoders) it is Dart's JPEG isolate. A unit's

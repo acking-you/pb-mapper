@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
@@ -6,9 +7,11 @@ import 'package:flutter/services.dart' show StandardMessageCodec;
 import 'package:flutter/widgets.dart';
 
 import '../../../common/l10n_extension.dart';
+import '../../../ffi/desktop_video.dart' show VideoPlacement;
 import '../../../state/desktop_store.dart';
 import '../../../state/viewer_prefs.dart';
 import 'jpeg_picture.dart';
+import 'native_video_hole.dart';
 import 'remote_cursor_layer.dart';
 import 'remote_input.dart';
 import 'remote_surface.dart';
@@ -49,6 +52,7 @@ class ViewerStage extends StatefulWidget {
     this.peerCursors,
     this.localPointer = false,
     this.greyPicture,
+    this.placePicture,
   });
 
   /// The stage over [desktop]'s own slices.
@@ -85,6 +89,7 @@ class ViewerStage extends StatefulWidget {
     peerCursors: desktop.peerCursors,
     localPointer: localPointer,
     greyPicture: desktop.greyPicture,
+    placePicture: desktop.placePicture,
   );
 
   final ValueListenable<DesktopSessionView> session;
@@ -123,6 +128,11 @@ class ViewerStage extends StatefulWidget {
 
   /// Greys a picture the runner presents itself (see [GreyStill]).
   final Future<void> Function(bool on)? greyPicture;
+
+  /// Places the plane a runner draws a texture's picture on, by the
+  /// texture's id (see [NativeVideoHole]).
+  final Future<void> Function(int textureId, VideoPlacement placement)?
+  placePicture;
 
   @override
   State<ViewerStage> createState() => _ViewerStageState();
@@ -196,6 +206,18 @@ class _ViewerStageState extends State<ViewerStage> {
       builder: (context, picture, _) {
         final id = picture?.textureId;
         if (id == null) return JpegPicture(image: jpegImage);
+        // A runner that draws pictures on its own plane under the Flutter
+        // view (the Linux video plane) gets a hole where the texture would
+        // be, which tells it where to draw.
+        if (picture?.plane == true) {
+          final place = widget.placePicture;
+          return NativeVideoHole(
+            key: ValueKey(id),
+            onPlace: (placement) {
+              if (place != null) unawaited(place(id, placement));
+            },
+          );
+        }
         final viewType = picture?.platformViewType;
         // A runner that presents pictures itself (the macOS layer) shows
         // them in its own view, which Flutter composites and transforms as

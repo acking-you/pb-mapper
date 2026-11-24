@@ -200,8 +200,11 @@ Future<void> main() async {
       'relay_only': relayOnly,
       'lan_first': lanFirst,
       'decoder_hints': decoderHints,
-      // `layer` on macOS when built with --dart-define=presenter=layer.
+      // `layer` on macOS when built with --dart-define=presenter=layer,
+      // `plane` on Linux with --dart-define=presenter=plane; `plane` says
+      // whether the Linux runner gave it, which it may refuse.
       'presenter': desktopVideoPresenter,
+      'plane': texture?.plane ?? false,
       'transport': config['transport'],
       'seconds': seconds,
       'warmup_seconds': _warmup.inSeconds,

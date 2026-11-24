@@ -2,18 +2,20 @@
 # Decodes recorded clips through the Linux viewer's GStreamer module
 # (ui/linux/runner/desktop_video_gst.cc), outside Flutter: the FFI's test
 # source plays them, the module decodes them, and a harness stands in for
-# Flutter's raster thread in a GL ES context with no surface
-# (ui/linux/test/desktop_video_test.cc). It ends with each clip size's
-# decoded and presented pictures a second and every thread's CPU per picture.
-# Before the clips, ui/linux/test/desktop_video_device_test.cc checks the
-# order the module tries decoders in for made-up GPUs.
+# Flutter's raster thread in a GL ES context with no surface, and for the
+# video plane in a desktop GL one (ui/linux/test/desktop_video_test.cc). It
+# ends with each clip size's decoded and presented pictures a second and
+# every thread's CPU per picture. Before the clips,
+# ui/linux/test/desktop_video_device_test.cc checks the order the module
+# tries decoders in for made-up GPUs.
 #
 # Needs: the GStreamer development files (libgstreamer1.0-dev,
 # libgstreamer-plugins-base1.0-dev), an H.264 decoder element (gst-libav's
 # avdec_h264, or a hardware one), h264parse/h265parse (gst-plugins-bad),
 # ffmpeg with libx264 (libx265 adds the H.265 case), cmake, libepoxy-dev, and
-# EGL with GL ES (Debian and Ubuntu: libegl1 libegl-mesa0 libgles2
-# libgl1-mesa-dri, which fall back to llvmpipe without a GPU).
+# EGL with GL ES and desktop GL (Debian and Ubuntu: libegl1 libegl-mesa0
+# libgles2 libopengl0 libgl1-mesa-dri, which fall back to llvmpipe without a
+# GPU; where EGL offers no desktop GL, the plane's desktop check is skipped).
 #
 #   scripts/test/linux-desktop-video.sh                    hardware decoders first
 #   scripts/test/linux-desktop-video.sh --software         hardware decoders ranked out

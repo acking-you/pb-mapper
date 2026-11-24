@@ -3857,7 +3857,10 @@ handed to a `FlutterTexture` (a Mac app built with
 decoder's own 420v pictures to the viewer's own Core Animation layer, shown
 through a platform view), and Linux with GStreamer into the decoder's
 own NV12 or I420 pictures, which the runner converts to RGBA on the GPU into
-an `FlTextureGL`.
+an `FlTextureGL` (a Linux app built with `--dart-define=presenter=plane`
+instead has the GTK thread convert them and draw them on a GL plane under
+the Flutter view, where the viewer leaves a hole, whenever GTK draws the
+window; [the Linux video plane](#the-linux-video-plane)).
 Capture, encoding, decoding and blocking FFI calls stay off the Dart UI
 isolate, and pinch and pan keep the same texture and decoder. On Android a
 decoder reset is acknowledged by the codec worker, keeps the Surface, and cannot
@@ -3872,7 +3875,8 @@ process, on Linux from the loaded `libpb_mapper_ffi.so` found with
 `dl_iterate_phdr`), never a second copy: the instance token must match
 Dart's. Each reports its presentations to `VideoConsumer::presented`
 directly, when the compositor took the picture, or, with the Mac's layer
-presenter, when the decoder thread committed it to the WindowServer. Dart
+presenter, when the decoder thread committed it to the WindowServer, or,
+with the Linux plane, when the GTK thread took and converted it. Dart
 reads only status, geometry, statistics and the latest cursor, through the
 per-frame view leaf.
 A device with no decoder, Windows without Media Foundation and Linux without
@@ -4390,6 +4394,95 @@ the session reports to the quality panel, says where it runs:
 the factory's long name when the whole would pass 63 bytes, as with a va
 decoder, whose long name names its driver's device.
 
+#### The Linux video plane
+
+Flutter's Linux embedder (3.44) has no vsync source: it frames on a fixed
+1/60 s timer. A texture's picture therefore waits for that timer, which runs
+unsynchronised with the display, then for Flutter's raster, `populate` and
+composite, then for GTK's frame clock; a 120 or 144 Hz monitor shows at most
+60 pictures a second, and on X11 every Flutter frame reads the whole window
+back. A Linux app built with `--dart-define=presenter=plane` asks `create`
+for the video plane instead (`ui/linux/runner/desktop_video_plane.cc`). It
+stays opt-in until a Linux device has measured it
+([the Linux viewer procedure](../scripts/test/desktop-ui-acceptance.md#linux-viewer)).
+
+The runner puts the Flutter view in a `GtkOverlay` over a `GtkGLArea`
+(`PbPlaneArea`, opaque, rendering at every draw), which stays hidden.
+`create` answers `{textureId, plane}`. The first texture that asks gets the
+plane, if its GL area realizes without error in GL ES or in desktop GL 3.2
+or later and builds its program; never under `FLUTTER_LINUX_RENDERER=software`.
+A second texture, and every refusal, stays on Flutter's texture.
+
+A plane texture's `frame_ready` never marks a Flutter frame. It flags the
+picture and, once for each picture that waits, wakes the GTK thread at high
+priority, which queues a draw of the placed rectangle. GDK's frame clock
+then renders the area. The compositor paces that clock at the display's
+refresh on Wayland and on an X11 desktop whose compositor reports its frames
+(`_NET_WM_FRAME_DRAWN`, as GNOME's does); on any other X11 desktop GDK paces
+it at its default 1/60 s, so the plane draws at most about 60 pictures a
+second there, though a picture still skips Flutter's timer and the window's
+read-back. More than 60 a second also needs a session that sends them:
+Smooth, or a frame-rate limit above 60 (Balanced's ceiling is 60). A waiting
+picture is taken and converted in GDK's context (the converter above, in
+GLSL 1.50 with R8 and RG8 planes and a vertex array object of its own on
+desktop GL), which is its receipt, and drawn into the placed rectangle, cut
+to its clip, bilinear. A redraw that Flutter or an overlay causes takes
+nothing and draws the last picture again. On Wayland GDK's context is EGL on
+the display Flutter uses, so dma-bufs are imported as for the texture; on
+X11 GDK 3 draws through GLX, so the decoder is told this presenter imports
+none, and every picture comes in system memory. A picture that no frame
+takes within 100 ms, as when the compositor stops the frames of a covered
+window or one on another workspace, is taken by a timer and kept for the
+next frame, so its receipt still comes well inside Rust's 700 ms stall
+watchdog.
+
+The plane shows, and the view's background turns fully transparent (which
+FlView then does not paint), only while a viewer has placed a visible
+picture; both go back when it hides the plane or disposes the texture, and
+outside a session nothing changes. The GL area's input window is hidden, so
+every pointer event still reaches the Flutter view.
+
+The viewer draws a `NativeVideoHole` in the texture's place: a repaint
+boundary, never raster-cached, that paints its rectangle with
+`BlendMode.clear`, which clears the ground painted under it down to the
+window; the cursors and overlays paint over it as before. At each composite
+it works out from the layers above it where it lands, in physical pixels
+and cut to their clips, and when that changed it sends
+`place {textureId, visible, x, y, w, h, clipX, clipY, clipW, clipH}` after
+the frame. `visible` is false when the hole was not composited (a covering
+route, or the stage gone), or lies under an opacity, a filter or a save
+layer (a route transition), where no hole reaches the window, or under a
+rotation, which the plane cannot follow; the video does not show during a
+route transition. The placement reaches the GTK thread after Flutter's
+frame, so while zooming or panning the picture can trail the overlays by a
+frame. `grey` puts the plane through the grey still's matrix, and the grey
+still asks for it as for the Mac's layer.
+
+`stats` adds `refreshIntervalMs`, the refresh interval the newest of GDK's
+recent frames carries (what an X11 compositor reports, or on Wayland the
+mode of the output, where GDK puts 1/60 s for an output it does not know)
+and left out when none carries one, and, while timed, `planeIntervalP50Ms`
+and `planeIntervalP95Ms`: the intervals between the frames that drew a newer
+picture, from GDK's presentation times or, where the compositor reports
+none, its frame times. `timings.surface_consume` then runs from
+`frame_ready` to the plane taking the picture. On X11 every redraw of the
+plane makes FlView upload its last frame again, which above 60 Hz may cost
+more than the read-back it saves; that is for the device run to show.
+Flutter runs Dart on the GTK thread, where the plane draws, so a long Dart
+frame holds the plane's next picture back; `PB_MAPPER_UI_THREAD=separate`
+gives Dart a thread of its own
+(`FL_UI_THREAD_POLICY_RUN_ON_SEPARATE_THREAD`) for an A/B under Dart load,
+and becomes the default only if that run shows the plane's p95 interval
+improve.
+
+None of this has run on a Linux device yet. The clip harness checks the
+plane's drawing pixel by pixel (placement, clip, orientation, grey) in its
+GL ES context and, with a converter of the plane's, in a desktop GL 3.2
+core context, and CI builds the runner. When the Flutter pin moves to 3.50
+or later, whose renderers differ (a Wayland subsurface, X11's
+`fl_opengl_frame`), check that Flutter's buffer keeps its alpha over the
+plane before shipping.
+
 ## Measurements and remaining acceptance
 
 Development environment: Windows 11 Enterprise 10.0.26300, Ryzen 9 9950X,
@@ -4479,7 +4572,15 @@ What each platform's new code has been through:
   CI, on llvmpipe; its dma-buf path (GStreamer 1.24 with a VA-API decoder)
   has not run. Nor has the order by the GPU that draws on a machine with
   more than one GPU: CI checks it as a pure function of made-up GPUs and
-  sysfs trees, and its llvmpipe names no GPU.
+  sysfs trees, and its llvmpipe names no GPU. The video plane, opt-in with
+  `--dart-define=presenter=plane`, has not run on Linux at all: CI builds
+  it, its clip harness draws through the plane's code in GL ES and desktop
+  GL on llvmpipe, and its Dart hole ran in widget tests. Its frame rate and
+  time to the screen against the texture's on 60 and 144 Hz monitors, under
+  GNOME and KDE on Wayland and GNOME and Xfce on X11, the picture through a
+  transparent Flutter view, clicks over it, a covered window's receipts and
+  the separate UI thread are outstanding; they decide whether it becomes
+  the Linux default.
 - **macOS host.** Compiled, linked, linted and unit-tested on a macOS
   runner in CI. The unit tests cover the VideoToolbox encoder, the display
   list, the system pointer read off the main thread in a window-server

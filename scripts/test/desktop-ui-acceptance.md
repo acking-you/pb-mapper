@@ -207,6 +207,69 @@ viewer: a decoder that stopped trusting the GPU's completion event says so
 once, in a line starting `Desktop video: the GPU completion event`, and then
 polls.
 
+## Linux viewer
+
+Build the FFI library (`cargo build --release -p pb-mapper-ffi`, copied to
+`ui/native/linux/x64/`), then from `ui/`, once per presenter, each into a
+bundle of its own:
+
+```sh
+flutter build linux --release --target tool/desktop_viewer_acceptance.dart \
+  --dart-define=setupUrl=http://127.0.0.1:18747/controller.json \
+  --dart-define=seconds=120 --dart-define=quality=smooth --dart-define=maxFps=120
+# the same with --dart-define=presenter=plane, into a second bundle
+```
+
+The viewer presents through Flutter's texture; `presenter=plane` asks the
+runner for its video plane under the Flutter view, and the report's
+`plane` says whether the runner gave it (it refuses under
+`FLUTTER_LINUX_RENDERER=software` and where its GL area does not realize;
+`G_MESSAGES_DEBUG=pb-mapper-video` logs why, and the context it drew in).
+Each sample's `native` holds the decoder's counts, `timings.decode`,
+`timings.convert` and `timings.surface_consume` (`frame_ready` to the
+texture's `populate`, or to the plane's render taking the picture),
+`refreshHz`, `dmabuf` and `videoconvert`; with the plane also
+`refreshIntervalMs`, the refresh interval GDK's recent frames carry, and
+`planeIntervalP50Ms` and `planeIntervalP95Ms`, the intervals between the
+frames that drew a newer picture. Without `refreshIntervalMs` no frame
+carried one, as on an X11 desktop whose compositor reports no frame
+timings, where GDK paces the window at 1/60 s whatever the monitor. On
+Wayland GDK puts its own 1/60 s (16.667) for an output whose mode it does
+not know, so there the plane's intervals, not this figure, say how fast it
+drew.
+
+The plane becomes the Linux default only after these runs, before and
+after, each on an Intel iGPU and an NVIDIA desktop, under GNOME Wayland,
+KDE Wayland, GNOME X11 and Xfce X11, on a 60 Hz and a 144 Hz monitor, at
+1080p with Balanced and Smooth (`maxFps` 0 and 120), against
+`desktop_ui_host` or a real host:
+
+- `presented_fps` and `picture_latency_ms` p50 and p95, native presented a
+  second, `timings.surface_consume`, the plane's intervals and
+  `refreshIntervalMs`;
+- CPU per thread with `pidstat -t -p <pid> 1` (the GTK thread, Flutter's
+  raster and UI threads, the decoder) and the GPU with `intel_gpu_top` or
+  `nvidia-smi dmon`;
+- the picture itself: placed where the texture was through pan, zoom,
+  1:1 and a resize, the cursor and overlays over it, a click on it, the
+  reconnect's grey still, and no video during a route transition;
+- a covered window for 10 s, then the window on another workspace for
+  10 s: no keyframe requests in the viewer's trace, no `No video for 5 s`
+  reconnect, and receipts continuing;
+- the UI thread as a separate A/B: the plane bundle run with and without
+  `PB_MAPPER_UI_THREAD=separate` under Dart load (the quality panel open,
+  panning continuously), keeping the separate thread only if the plane's
+  p95 interval improves, and checking the tray menu and window moves with
+  it;
+- the texture bundle against one built before the plane: typing, an input
+  method's preedit, a window drag and resize, and the tray menu, since
+  every Linux build now puts the Flutter view in a `GtkOverlay` over the
+  hidden plane.
+
+A 240 fps camera filming a flashing pattern on both screens gives the time
+from glass to glass, optionally. Record the runs under `docs/benchmarks/`
+with the machine, the compositor and the monitor.
+
 ## Pointer shapes and keyboard against a safe host
 
 To check pointer shapes and the keyboard on a real screen, the host must not
@@ -260,7 +323,9 @@ sensor), read it before and after the run with
 One JSON object:
 
 - `schema` (2), `case`, `quality`, `relay_only`, `lan_first`, `decoder_hints`,
-  `transport`, `seconds`, `warmup_seconds` (5).
+  `presenter` (`texture`, or the `layer` or `plane` a build asked for),
+  `plane` (whether the Linux runner gave its plane), `transport`, `seconds`,
+  `warmup_seconds` (5).
 - `build`: the app version, build number and mode (`release`, `profile` or
   `debug`).
 - `device`: the OS and its version, processors, the display refresh rate
@@ -291,8 +356,9 @@ One JSON object:
   Windows also the timings, `refreshHz`, `decoderCycles` and `lowLatency`
   that [Windows viewer](#windows-viewer) lists; on macOS the timings,
   `decoderCpuMs`, `hardware`, `lowLatency` and `refreshHz` that
-  [macOS viewer](#macos-viewer) lists; on Linux `timings.surface_consume`
-  and `refreshHz`) and
+  [macOS viewer](#macos-viewer) lists; on Linux the timings, `refreshHz`,
+  `dmabuf`, `videoconvert` and the plane's figures that
+  [Linux viewer](#linux-viewer) lists) and
   `flutter`: the frame timings Flutter reported in that second (it batches
   them about once a second), with the frames whose build or raster took
   longer than one refresh interval as `over_budget`.

@@ -7,8 +7,10 @@
 // converted, presents it, which is its receipt. It checks the decoder state
 // rules the runner shares with Windows and Android, the conversion against
 // GStreamer's own and against a decoder in system memory, the GL state the
-// conversion leaves, and measures how many pictures a second each size
-// decodes and presents and what each thread's CPU costs per picture. Run by
+// conversion leaves, the video plane's drawing in GL ES and in a desktop GL
+// 3.2 core context with a converter of its own (GDK's kind of context), and
+// measures how many pictures a second each size decodes and presents and
+// what each thread's CPU costs per picture. Run by
 // scripts/test/linux-desktop-video.sh, which builds the library and the
 // clips.
 //
@@ -138,8 +140,10 @@ class GlContext {
     if (display_ != EGL_NO_DISPLAY && owns_display_) eglTerminate(display_);
   }
   // `same_display`: another context's display, which stays initialized
-  // when this one goes.
-  bool Create(std::string* why, const GlContext* same_display = nullptr) {
+  // when this one goes. `desktop`: a desktop GL 3.2 core context, as GDK
+  // makes for a GtkGLArea, instead of GL ES 2; on the thread that makes it
+  // current, which binds that API.
+  bool Create(std::string* why, const GlContext* same_display = nullptr, bool desktop = false) {
     // Mesa's surfaceless platform, which falls back to llvmpipe without a
     // GPU; else whatever display EGL picks.
     EGLint major = 0, minor = 0;
@@ -160,6 +164,7 @@ class GlContext {
       *why = "no EGL display initializes";
       return false;
     }
+    if (desktop) return CreateDesktop(why);
     if (!eglBindAPI(EGL_OPENGL_ES_API)) {
       *why = "no GL ES in EGL";
       return false;
@@ -180,11 +185,43 @@ class GlContext {
   bool MakeCurrent() { return eglMakeCurrent(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, context_) == EGL_TRUE; }
   void Release() { eglMakeCurrent(display_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT); }
   EGLDisplay display() const { return display_; }
+  // Whether the display offers desktop GL at all: where it does not, the
+  // desktop context is not a check.
+  bool offers_desktop() const { return offers_desktop_; }
 
  private:
+  bool CreateDesktop(std::string* why) {
+    const char* apis = eglQueryString(display_, EGL_CLIENT_APIS);
+    // "OpenGL" as a word of its own, not the start of "OpenGL_ES".
+    for (const char* at = apis ? strstr(apis, "OpenGL") : nullptr; at; at = strstr(at + 6, "OpenGL")) {
+      if ((at == apis || at[-1] == ' ') && (at[6] == '\0' || at[6] == ' ')) offers_desktop_ = true;
+    }
+    if (!offers_desktop_ || !eglBindAPI(EGL_OPENGL_API)) {
+      *why = "EGL offers no desktop GL here";
+      return false;
+    }
+    const EGLint config_attributes[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_NONE};
+    EGLConfig config = nullptr;
+    EGLint configs = 0;
+    if (!eglChooseConfig(display_, config_attributes, &config, 1, &configs) || configs < 1) config = nullptr;
+    const EGLint context_attributes[] = {EGL_CONTEXT_MAJOR_VERSION_KHR,
+                                         3,
+                                         EGL_CONTEXT_MINOR_VERSION_KHR,
+                                         2,
+                                         EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR,
+                                         EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR,
+                                         EGL_NONE};
+    context_ = eglCreateContext(display_, config, EGL_NO_CONTEXT, context_attributes);
+    if (context_ == EGL_NO_CONTEXT) {
+      *why = "cannot create a desktop GL 3.2 core context";
+      return false;
+    }
+    return true;
+  }
+
   EGLDisplay display_ = EGL_NO_DISPLAY;
   EGLContext context_ = EGL_NO_CONTEXT;
-  bool owns_display_ = false;
+  bool owns_display_ = false, offers_desktop_ = false;
 };
 
 // The renderer and version behind a context (llvmpipe on CI), read before
@@ -534,8 +571,162 @@ class DirtyState {
 constexpr GLenum DirtyState::kSwitches[];
 
 // Which converter a verification checks: the one in use, on the context's
-// own paths, or one made for it on GL ES 2's paths.
-enum class Paths { kContext, kEs2 };
+// own paths, or one made for it on GL ES 2's paths; or the one in use and
+// then the video plane's drawing, in this GL ES context and in a desktop GL
+// 3.2 core one (GDK's kind) with a converter of the plane's.
+enum class Paths { kContext, kEs2, kPlane };
+
+// What the video plane's drawing (PlaneGl) gave in one context.
+struct PlaneVerification {
+  bool done = false;
+  // Why it was not checked, when the context could not be had.
+  std::string skipped;
+  std::string context;
+  // Desktop GL: its own converter took the picture, and how it compares
+  // with the GL ES conversion of it.
+  bool converted = false;
+  double psnr = 0;
+  bool setup = false;
+  // The picture drawn one to one, upright, where it was placed, and
+  // nothing outside the clip; its grey still; how many pixels differed.
+  bool placed = false, greyed = false;
+  size_t misplaced = 0, misgreyed = 0;
+  // The converter's and the plane's objects deleted in their context.
+  bool freed = false;
+  // What failed, a GL error included; empty when nothing did.
+  std::string failure;
+  // GL errors already pending when the drawing began: not the plane's.
+  std::string earlier_errors;
+};
+
+// The GL errors pending in the current context, which reading clears;
+// empty when there are none.
+std::string TakeGlErrors() {
+  std::string errors;
+  for (int i = 0; i < 16; ++i) {
+    const GLenum error = glGetError();
+    if (error == GL_NO_ERROR) break;
+    char code[16];
+    snprintf(code, sizeof(code), "%s0x%04x", errors.empty() ? "" : " ", error);
+    errors += code;
+  }
+  return errors;
+}
+
+// Adds `what` to the verification's failures.
+void AddFailure(PlaneVerification* result, const std::string& what) {
+  result->failure += (result->failure.empty() ? "" : "; ") + what;
+}
+
+// Fails the verification with the GL errors pending now, `when` they came.
+void FailOnGlErrors(PlaneVerification* result, const char* when) {
+  const std::string errors = TakeGlErrors();
+  if (!errors.empty()) AddFailure(result, std::string("GL error ") + errors + " " + when);
+}
+
+// A texture's pixels, rows top first as the picture's.
+std::vector<uint8_t> ReadTexture(GLuint name, uint32_t width, uint32_t height) {
+  std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4);
+  GLuint framebuffer = 0;
+  glGenFramebuffers(1, &framebuffer);
+  glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, name, 0);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+    glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_BYTE,
+                 rgba.data());
+  }
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glDeleteFramebuffers(1, &framebuffer);
+  return rgba;
+}
+
+// Draws the converted picture `texture` (`picture`, its pixels) with the
+// video plane's code into a framebuffer larger than it, placed at (16, 24)
+// and cut to a clip 64 pixels inside it across and 48 down, plain and then
+// grey, and checks every pixel: the picture's own one to one inside the
+// clip, black outside, and the grey still's luma; and that the drawing
+// leaves no GL error.
+void CheckPlaneDrawing(GLuint texture, uint32_t width, uint32_t height, const std::vector<uint8_t>& picture,
+                       PlaneVerification* result) {
+  const char* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
+  result->context = version ? version : "an unnamed GL";
+  result->earlier_errors = TakeGlErrors();
+  if (width <= 128 || height <= 96) {
+    AddFailure(result, "the picture is too small for the check");
+    return;
+  }
+  const int32_t target_width = static_cast<int32_t>(width) + 48, target_height = static_cast<int32_t>(height) + 40;
+  pb_video::PlaneRect placed;
+  placed.x = 16;
+  placed.y = 24;
+  placed.width = static_cast<int32_t>(width);
+  placed.height = static_cast<int32_t>(height);
+  pb_video::PlaneRect clip;
+  clip.x = placed.x + 64;
+  clip.y = placed.y + 48;
+  clip.width = placed.width - 128;
+  clip.height = placed.height - 96;
+  GLuint target = 0, framebuffer = 0;
+  glGenTextures(1, &target);
+  glBindTexture(GL_TEXTURE_2D, target);
+  glTexImage2D(GL_TEXTURE_2D, 0, epoxy_is_desktop_gl() || epoxy_gl_version() >= 30 ? GL_RGBA8 : GL_RGBA, target_width,
+               target_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+  glGenFramebuffers(1, &framebuffer);
+  glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+  pb_video::PlaneGl plane;
+  std::string setup_failure;
+  result->setup = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE && plane.Setup(&setup_failure);
+  if (!setup_failure.empty()) AddFailure(result, setup_failure);
+  std::vector<uint8_t> drawn(static_cast<size_t>(target_width) * target_height * 4);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  const auto at = [&](const std::vector<uint8_t>& rgba, int32_t x, int32_t y, int32_t stride) {
+    return &rgba[(static_cast<size_t>(y) * static_cast<size_t>(stride) + static_cast<size_t>(x)) * 4];
+  };
+  for (const bool grey : {false, true}) {
+    if (!result->setup) break;
+    plane.Draw(texture, placed, clip, grey, target_width, target_height);
+    glReadPixels(0, 0, target_width, target_height, GL_RGBA, GL_UNSIGNED_BYTE, drawn.data());
+    size_t wrong = 0;
+    for (int32_t y = 0; y < target_height; ++y) {
+      // GL's rows count from the bottom.
+      const int32_t row = target_height - 1 - y;
+      for (int32_t x = 0; x < target_width; ++x) {
+        const uint8_t* got = at(drawn, x, row, target_width);
+        int expected[3] = {0, 0, 0};
+        if (x >= clip.x && x < clip.x + clip.width && y >= clip.y && y < clip.y + clip.height) {
+          const uint8_t* source = at(picture, x - placed.x, y - placed.y, placed.width);
+          for (int c = 0; c < 3; ++c) expected[c] = source[c];
+          if (grey) {
+            const int luma = static_cast<int>(std::lround(0.1063 * source[0] + 0.3576 * source[1] + 0.0361 * source[2]));
+            expected[0] = expected[1] = expected[2] = luma;
+          }
+        }
+        if (std::abs(got[0] - expected[0]) > 2 || std::abs(got[1] - expected[1]) > 2 ||
+            std::abs(got[2] - expected[2]) > 2) {
+          ++wrong;
+        }
+      }
+    }
+    if (grey) {
+      result->misgreyed = wrong;
+      result->greyed = wrong == 0;
+    } else {
+      result->misplaced = wrong;
+      result->placed = wrong == 0;
+    }
+  }
+  // What the plane left bound goes with it; nothing of it stays current.
+  glUseProgram(0);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  plane.Free();
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glDeleteFramebuffers(1, &framebuffer);
+  glDeleteTextures(1, &target);
+  FailOnGlErrors(result, "after the plane's drawing");
+  result->done = true;
+}
 
 // What the conversion of one picture gave, checked on the raster thread.
 struct Verification {
@@ -554,6 +745,9 @@ struct Verification {
   // GL ES 2's converter: its texture is deleted when it goes, from a
   // thread with no context current.
   bool freed = false;
+  // Paths::kPlane: the video plane's drawing in this GL ES context, and in
+  // a desktop GL 3.2 core context with a converter of its own.
+  PlaneVerification plane_es, plane_desktop;
 };
 
 // Flutter's raster thread: acquires the newest picture whenever the module
@@ -771,6 +965,11 @@ class Raster {
       if (verify && converted) {
         Verification checked = Inspect(use, picture, planes, name, width, height, paths == Paths::kEs2);
         checked.state_changed = state_changed;
+        if (paths == Paths::kPlane) {
+          const std::vector<uint8_t> rgba = ReadTexture(name, width, height);
+          CheckPlaneDrawing(name, width, height, rgba, &checked.plane_es);
+          checked.plane_desktop = DesktopPlane(picture, rgba);
+        }
         if (es2) {
           // Gone on a thread with no context current, as the GTK thread
           // finalizes a texture.
@@ -792,6 +991,55 @@ class Raster {
     }
     converter.reset();
     if (gl_ready_) gl_->Release();
+  }
+
+  // The video plane in GDK's kind of context, a desktop GL 3.2 core one on
+  // the same display, made current on a thread of its own as GDK's is on
+  // the GTK thread: a converter of the plane's (Owner::kOwnEgl) takes the
+  // picture, which must match `es_rgba`, its conversion in GL ES, and the
+  // plane draws it; then both free what they made there.
+  PlaneVerification DesktopPlane(PbVideoPicture* picture, const std::vector<uint8_t>& es_rgba) {
+    PlaneVerification result;
+    std::thread worker([&] {
+      GlContext desktop;
+      std::string why;
+      if (!desktop.Create(&why, gl_, true) || !desktop.MakeCurrent()) {
+        if (desktop.offers_desktop()) {
+          AddFailure(&result, why.empty() ? "the desktop GL context cannot be made current" : why);
+        } else {
+          result.skipped = why;
+        }
+        eglReleaseThread();
+        return;
+      }
+      {
+        pb_video::VideoGl converter(module_, false, pb_video::Owner::kOwnEgl);
+        std::string failure;
+        // The converter checks for GL errors before it restores the state
+        // it saved; what the restore raises in a core context shows here.
+        result.converted = converter.Convert(picture, &failure);
+        FailOnGlErrors(&result, "after the desktop GL conversion");
+        uint32_t name = 0, width = 0, height = 0;
+        const bool textured = result.converted && converter.Texture(&name, &width, &height, &failure);
+        FailOnGlErrors(&result, "after the desktop GL converter's texture");
+        if (textured) {
+          const std::vector<uint8_t> rgba = ReadTexture(name, width, height);
+          result.psnr = Psnr(rgba, es_rgba);
+          CheckPlaneDrawing(name, width, height, rgba, &result);
+        } else if (converter.last_refused()) {
+          result.skipped = "this desktop GL context does not import the decoder's dma-bufs";
+        } else {
+          AddFailure(&result, failure);
+        }
+        converter.Free();
+        FailOnGlErrors(&result, "after the desktop GL converter's Free");
+        result.freed = name == 0 || glIsTexture(name) == GL_FALSE;
+      }
+      desktop.Release();
+      eglReleaseThread();
+    });
+    worker.join();
+    return result;
   }
 
   // Reads the converted texture back and compares it with GStreamer's
@@ -1129,6 +1377,38 @@ int main(int argc, char** argv) {
           checked.state_changed.empty() ? "it leaves GL ES 2's bindings and switches as it found them"
                                         : ("it changes the GL state around it: " + checked.state_changed).c_str());
     Check(checked.freed, "its GL objects are deleted in the share group when it goes, from a thread with no context");
+  }
+
+  // The video plane (desktop_video_plane.cc) draws in GDK's context: GL ES
+  // under GDK_GL=gles, else desktop GL 3.2 or later, which takes GLSL 1.50
+  // and a vertex array object of its own.
+  printf("the video plane's drawing\n");
+  {
+    const Verification checked = raster.Verify(milliseconds(5000), Paths::kPlane);
+    for (const PlaneVerification* plane : {&checked.plane_es, &checked.plane_desktop}) {
+      const bool desktop = plane == &checked.plane_desktop;
+      if (!plane->skipped.empty()) {
+        printf("  %s: not checked, %s\n", desktop ? "desktop GL" : "GL ES", plane->skipped.c_str());
+        continue;
+      }
+      printf("  in %s: %zu pixels placed wrong, %zu greyed wrong%s%s\n", plane->context.c_str(), plane->misplaced,
+             plane->misgreyed, plane->failure.empty() ? "" : "; ", plane->failure.c_str());
+      if (!plane->earlier_errors.empty()) {
+        printf("  GL errors %s were pending before the drawing (not the plane's)\n", plane->earlier_errors.c_str());
+      }
+      if (desktop) {
+        Check(plane->converted, "a converter in a desktop GL 3.2 core context converts the picture");
+        printf("  PSNR against the GL ES conversion: %.1f dB\n", plane->psnr);
+        Check(plane->psnr >= 40, "it matches the GL ES conversion at 40 dB or more");
+      }
+      Check(plane->done && plane->setup, desktop ? "the plane draws in desktop GL (GLSL 1.50)"
+                                                 : "the plane draws in GL ES (GLSL ES 1.00)");
+      Check(plane->placed, "the picture lands one to one and upright where it is placed, cut to the clip, black around");
+      Check(plane->greyed, "the grey still is the luma at half brightness");
+      Check(plane->failure.empty(), desktop ? "nothing of the plane fails in desktop GL or raises a GL error there"
+                                            : "nothing of the plane's drawing fails or raises a GL error");
+      if (desktop) Check(plane->freed, "the plane's converter deletes its texture in its own context");
+    }
   }
 
   printf("a discontinuity on a delta unit\n");

@@ -453,13 +453,12 @@ class _GreyStillState extends State<GreyStill> {
     super.dispose();
   }
 
-  /// The native picture's id, while the runner presents it itself and can
-  /// grey it.
+  /// The native picture's id, while the runner presents it itself (a
+  /// platform view, or a plane under the Flutter view) and can grey it.
   int? get _native {
     final picture = widget.picture?.value;
-    return picture?.platformViewType != null && widget.greyPicture != null
-        ? picture?.textureId
-        : null;
+    final native = picture?.platformViewType != null || picture?.plane == true;
+    return native && widget.greyPicture != null ? picture?.textureId : null;
   }
 
   bool get _wanted => viewerOverlayFor(widget.session.value).greyStill;
