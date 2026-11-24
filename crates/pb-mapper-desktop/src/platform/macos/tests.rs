@@ -801,9 +801,9 @@ fn rate_model_sweep(codec: VideoCodec, width: u32, height: u32, low_latency: boo
 /// 5 FPS: `nominal` keeps the bitrate at bits per frame × 60, `timestamp`
 /// sets bits per frame × the pace live. Each step prints what it produced a
 /// second against bits per frame × the pace (the spend QoS intends), counting
-/// the pictures VideoToolbox dropped, and per picture and per unit out;
-/// after the steps at 10 and 5 an IDR is forced, and its size and PSNR are
-/// printed. A summary line a case says whether the timestamp model's error
+/// the pictures VideoToolbox dropped, and per picture and per unit out.
+/// After its sweep each model forces an IDR at 10 and at 5 FPS, and prints
+/// its size and PSNR and the pictures dropped over the next 2 s. A summary line a case says whether the timestamp model's error
 /// was the smaller at every pace and within 25% at each. Run it as
 /// `video_toolbox_rate_model_h264` is.
 #[test]
@@ -873,6 +873,7 @@ fn follow_sweep(codec: VideoCodec, width: u32, height: u32, low_latency: bool) -
         low_latency,
         capped: true,
         quality: true,
+        max_qp: true,
     };
     let at_nominal = (bpf * f64::from(NOMINAL_FPS)) as u32;
     let encoder = match Encoder::tuned(
@@ -945,17 +946,25 @@ fn follow_sweep(codec: VideoCodec, width: u32, height: u32, low_latency: bool) -
             }
             let followed = step(&mut pacer, pace);
             print(model, &followed);
-            if matches!(pace, 10 | 5) {
-                forced_idr(
-                    &mut pacer,
-                    pace,
-                    bpf,
-                    &format!("follow {label} model={model}"),
-                );
-            }
             steps.push(followed);
         }
         errors.push(steps);
+        // After the sweep, so that no IDR's payback falls in a step.
+        for pace in [10, 5] {
+            let bitrate = if model == "timestamp" {
+                bpf * f64::from(pace)
+            } else {
+                bpf * f64::from(NOMINAL_FPS)
+            };
+            pacer.encoder.set_bitrate(bitrate as u32);
+            pacer.run(Some(pace), Instant::now() + SETTLE, |_| {});
+            forced_idr(
+                &mut pacer,
+                pace,
+                bpf,
+                &format!("follow {label} model={model}"),
+            );
+        }
     }
     let (nominal, timestamp) = (&errors[0], &errors[1]);
     let smaller = nominal
@@ -972,20 +981,26 @@ fn follow_sweep(codec: VideoCodec, width: u32, height: u32, low_latency: bool) -
     ))
 }
 
+/// How long after a forced IDR its payback is watched.
+const AFTER_IDR: Duration = Duration::from_secs(2);
+
 /// Force an IDR at `pace` and print its size against the bits per frame,
-/// and its PSNR.
+/// its PSNR, and the pictures handed over and dropped over `AFTER_IDR`.
 fn forced_idr(pacer: &mut Pacer, pace: u32, bpf: f64, label: &str) {
     pacer.encoder.probe(|probe| probe.quality.clear());
     pacer.force = true;
     let mut idr = None;
-    let until = Instant::now() + Duration::from_secs(1) / pace * 3;
-    pacer.run(Some(pace), until, |unit| {
+    let (submitted, dropped) = (pacer.frame, pacer.encoder.dropped());
+    pacer.run(Some(pace), Instant::now() + AFTER_IDR, |unit| {
         if unit.format.keyframe && idr.is_none() {
             idr = Some((unit.format.pts_us, unit.bytes.len() as u64 * 8));
         }
     });
+    let (submitted, dropped) = (pacer.frame - submitted, pacer.encoder.dropped() - dropped);
     let Some((pts, bits)) = idr else {
-        report(format_args!("{label} pace={pace} forced_idr=none"));
+        report(format_args!(
+            "{label} pace={pace} forced_idr=none submitted={submitted} dropped={dropped}"
+        ));
         return;
     };
     let error = pacer.encoder.probe(|probe| {
@@ -996,7 +1011,7 @@ fn forced_idr(pacer: &mut Pacer, pace: u32, bpf: f64, label: &str) {
             .map(|(_, error)| *error)
     });
     report(format_args!(
-        "{label} pace={pace} forced_idr_bits={bits} idr_over_bpf={:.1} idr_psnr={:.2}",
+        "{label} pace={pace} forced_idr_bits={bits} idr_over_bpf={:.1} idr_psnr={:.2} submitted={submitted} dropped={dropped}",
         bits as f64 / bpf,
         error.map_or(f64::NAN, |error| 10.0 * (255.0 * 255.0 / error).log10()),
     ));

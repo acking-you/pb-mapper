@@ -214,6 +214,10 @@ pub(super) struct Options {
     /// VideoToolbox measures each unit's luma error (`Probe::quality`).
     #[cfg(test)]
     pub quality: bool,
+    /// A low-latency session takes `MAX_QP`: always, but in a measurement's
+    /// before arm.
+    #[cfg(test)]
+    pub max_qp: bool,
 }
 impl Options {
     fn new(low_latency: bool) -> Self {
@@ -222,6 +226,8 @@ impl Options {
             capped: true,
             #[cfg(test)]
             quality: false,
+            #[cfg(test)]
+            max_qp: true,
         }
     }
 }
@@ -506,6 +512,10 @@ impl Encoder {
         // Whether the session took the data-rate cap and the QP bound, for
         // the log.
         let (mut capped, mut max_qp) = (false, false);
+        #[cfg(test)]
+        let bound_qp = options.max_qp;
+        #[cfg(not(test))]
+        let bound_qp = true;
         let configured = (|| {
             // SAFETY: VideoToolbox's and Core Video's static keys and values.
             unsafe {
@@ -559,6 +569,7 @@ impl Encoder {
                 // Low latency only, which drops a picture it cannot fit;
                 // an encoder that refuses it keeps its own.
                 max_qp = low_latency
+                    && bound_qp
                     && cf::symbol(MAX_QP)
                         .is_some_and(|key| set(&session, key, &cf::number(MAX_QP_VALUE)).is_ok());
                 #[cfg(test)]

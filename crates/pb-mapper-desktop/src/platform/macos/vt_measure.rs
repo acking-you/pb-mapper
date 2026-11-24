@@ -1,9 +1,11 @@
 //! Measurements of VideoToolbox's rate control on this Mac, as a Mac host
 //! drives it: what it drops, how soon a dropped last picture reaches the
 //! viewer, what it sustains at 120 FPS, and how it answers a bitrate cut. Each
-//! is an ignored test that paces a real session on IOSurface pictures painted
-//! before the run, so no Screen Recording grant is needed. Run one at a time,
-//! in release mode, on a quiet machine:
+//! is an ignored test that paces a real session on IOSurface pictures, each
+//! painted into a small pool of surfaces as it is handed over (`Source`), so
+//! no Screen Recording grant is needed. A test's before arm is the encoder
+//! without the change it measures: no QP bound, or no resubmit. Run one at
+//! a time, in release mode, on a quiet machine:
 //! `cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture
 //! --test-threads=1 <name>`.
 #![cfg(target_os = "macos")]
@@ -25,12 +27,12 @@ use crate::{
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
-    CVPixelBufferGetHeight, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetWidth,
-    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    CVPixelBufferGetHeightOfPlane, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
 };
 use std::time::{Duration, Instant};
 
-/// What a ring of pictures shows.
+/// What the pictures show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Content {
     /// Lines of text on white scrolling up, as a document or a terminal.
@@ -45,23 +47,154 @@ enum Content {
 
 /// Rows the content scrolls a picture.
 const SCROLL: usize = 4;
+/// Pictures before the document scrolls back to its top.
+const SCROLLED: usize = 600;
+/// Grain fields the busy pattern cycles through.
+const GRAINS: usize = 16;
+/// Surfaces a source paints its pictures into in turn, as ScreenCaptureKit
+/// fills its own pool: a surface is painted again only once the encoder
+/// let go of its last picture, eight pictures later.
+const POOL: usize = 8;
+const _: () = assert!(
+    VT_IN_FLIGHT + 1 < POOL,
+    "a surface is painted again only once its unit is out"
+);
 
-/// Pictures of `content` at `width` x `height`, `len` of them, painted
-/// before the run so that the pacing thread does nothing else.
-fn ring(
+/// Pictures of `content` at a size: picture `n` is painted into a surface
+/// of the pool when it is first handed over, as a capture delivers it, so
+/// that every picture is new to the encoder's surface and reference
+/// alike. Painting copies rows of a document painted once (and adds a
+/// grain field, or writes noise); the measurements print how long it took
+/// the pacing thread (`paint_p50_us`).
+#[derive(Clone)]
+struct Source(std::rc::Rc<Painted>);
+
+struct Painted {
     width: usize,
     height: usize,
     content: Content,
-    len: usize,
-) -> Vec<CFRetained<CVPixelBuffer>> {
-    let document = document(width, height + len * SCROLL, content == Content::Busy);
-    (0..len)
-        .map(|frame| {
+    document: Vec<u8>,
+    /// Grain of ±6, stored as 0 to 12.
+    grains: Vec<Vec<u8>>,
+    pool: Vec<CFRetained<CVPixelBuffer>>,
+}
+
+/// The pictures of `content` at `width` x `height`.
+fn ring(width: usize, height: usize, content: Content) -> Source {
+    let document = if content == Content::Noise {
+        Vec::new()
+    } else {
+        document(width, height + SCROLLED * SCROLL, content == Content::Busy)
+    };
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let grains = if content == Content::Busy {
+        (0..GRAINS)
+            .map(|_| {
+                (0..width * height)
+                    .map(|_| (next(&mut state) % 13) as u8)
+                    .collect()
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let pool = (0..POOL)
+        .map(|_| {
             let picture = surface(width, height);
-            paint(&picture, &document, frame, content);
+            // Grey chroma, once: no picture paints it.
+            with_planes(&picture, |plane, rows| {
+                if plane == 1 {
+                    for row in rows {
+                        row.fill(128);
+                    }
+                }
+            });
             picture
         })
-        .collect()
+        .collect();
+    Source(std::rc::Rc::new(Painted {
+        width,
+        height,
+        content,
+        document,
+        grains,
+        pool,
+    }))
+}
+
+impl Source {
+    fn width(&self) -> usize {
+        self.0.width
+    }
+
+    fn height(&self) -> usize {
+        self.0.height
+    }
+
+    /// The surface picture `n` is painted into.
+    fn picture(&self, n: usize) -> &CVPixelBuffer {
+        &self.0.pool[n % POOL]
+    }
+
+    /// Paint picture `n` into its surface.
+    fn paint(&self, n: usize) {
+        let painted = &*self.0;
+        let width = painted.width;
+        let offset = n % SCROLLED * SCROLL;
+        let grain = painted.grains.get(n % GRAINS.max(1));
+        let mut state = (n as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        with_planes(self.picture(n), |plane, rows| {
+            if plane != 0 {
+                return;
+            }
+            for (y, row) in rows.enumerate() {
+                if painted.content == Content::Noise {
+                    for chunk in row.chunks_mut(8) {
+                        let noise = next(&mut state).to_le_bytes();
+                        for (pixel, noise) in chunk.iter_mut().zip(noise) {
+                            *pixel = 64 + (noise & 127);
+                        }
+                    }
+                    continue;
+                }
+                let from = (y + offset) * width;
+                row.copy_from_slice(&painted.document[from..from + width]);
+                if let Some(grain) = grain {
+                    for (pixel, grain) in row.iter_mut().zip(&grain[y * width..][..width]) {
+                        *pixel = pixel.saturating_add(*grain).saturating_sub(6);
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Each plane of `picture`, locked, as its rows `width` bytes long.
+fn with_planes(
+    picture: &CVPixelBuffer,
+    mut each: impl FnMut(usize, &mut dyn Iterator<Item = &mut [u8]>),
+) {
+    let width = CVPixelBufferGetWidth(picture);
+    // SAFETY: locked around the writes.
+    assert_eq!(
+        unsafe { CVPixelBufferLockBaseAddress(picture, CVPixelBufferLockFlags(0)) },
+        0
+    );
+    for plane in 0..2 {
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(picture, plane);
+        let rows = CVPixelBufferGetHeightOfPlane(picture, plane);
+        let base = CVPixelBufferGetBaseAddressOfPlane(picture, plane).cast::<u8>();
+        assert!(!base.is_null() && stride >= width);
+        // SAFETY: the locked plane's rows, `stride` bytes each.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(base, stride * rows) };
+        // NV12's chroma interleaves U and V: as many bytes a row as luma.
+        each(
+            plane,
+            &mut bytes.chunks_exact_mut(stride).map(|row| &mut row[..width]),
+        );
+    }
+    // SAFETY: locked above.
+    unsafe { CVPixelBufferUnlockBaseAddress(picture, CVPixelBufferLockFlags(0)) };
 }
 
 /// A xorshift step.
@@ -111,55 +244,6 @@ fn document(width: usize, rows: usize, images: bool) -> Vec<u8> {
     luma
 }
 
-/// Picture `frame` of `content`: the document scrolled `frame * SCROLL`
-/// rows, with fresh grain of ±6 when busy, or fresh noise; grey chroma.
-fn paint(picture: &CVPixelBuffer, document: &[u8], frame: usize, content: Content) {
-    let width = CVPixelBufferGetWidth(picture);
-    let mut state = (frame as u64 + 1).wrapping_mul(0x2545_F491_4F6C_DD1D) | 1;
-    // SAFETY: locked around the writes.
-    assert_eq!(
-        unsafe { CVPixelBufferLockBaseAddress(picture, CVPixelBufferLockFlags(0)) },
-        0
-    );
-    for plane in 0..2 {
-        let stride = CVPixelBufferGetBytesPerRowOfPlane(picture, plane);
-        let rows = CVPixelBufferGetHeightOfPlane(picture, plane);
-        let base = CVPixelBufferGetBaseAddressOfPlane(picture, plane).cast::<u8>();
-        assert!(!base.is_null() && stride >= width);
-        // SAFETY: the locked plane's rows, `stride` bytes each.
-        let bytes = unsafe { std::slice::from_raw_parts_mut(base, stride * rows) };
-        for (y, row) in bytes.chunks_exact_mut(stride).enumerate() {
-            let row = &mut row[..width];
-            if plane == 1 {
-                row.fill(128);
-                continue;
-            }
-            if content == Content::Noise {
-                for chunk in row.chunks_mut(8) {
-                    let noise = next(&mut state).to_le_bytes();
-                    for (pixel, noise) in chunk.iter_mut().zip(noise) {
-                        *pixel = 64 + (noise & 127);
-                    }
-                }
-                continue;
-            }
-            let from = (y + frame * SCROLL) * width;
-            row.copy_from_slice(&document[from..from + width]);
-            if content == Content::Busy {
-                for chunk in row.chunks_mut(8) {
-                    let noise = next(&mut state).to_le_bytes();
-                    for (pixel, noise) in chunk.iter_mut().zip(noise) {
-                        *pixel =
-                            (i16::from(*pixel) + i16::from(noise % 13) - 6).clamp(0, 255) as u8;
-                    }
-                }
-            }
-        }
-    }
-    // SAFETY: locked above.
-    unsafe { CVPixelBufferUnlockBaseAddress(picture, CVPixelBufferLockFlags(0)) };
-}
-
 /// Bits a frame at 1080p, scaled by the encoded pixels to the power 0.75
 /// within 0.4 and 3, as a session's QoS scales them.
 fn scaled(bits_1080p: f64, width: usize, height: usize) -> f64 {
@@ -191,17 +275,18 @@ struct Out {
 struct Rig {
     encoder: Encoder,
     waiter: Waiter,
-    ring: Vec<CFRetained<CVPixelBuffer>>,
-    /// The ring's next picture.
+    ring: Source,
+    /// The next new picture.
     next: usize,
     keyframe: bool,
     submitted: u64,
     skipped: u64,
     armed: u64,
-    /// Each picture handed over: its presentation time, ring index and
-    /// kind.
+    /// Each picture handed over: its presentation time, number and kind.
     sent: Vec<(u64, usize, Unit)>,
     out: Vec<Out>,
+    /// How long each new picture took to paint, in microseconds.
+    paints: Vec<u32>,
 }
 
 impl Rig {
@@ -209,14 +294,13 @@ impl Rig {
     /// built with `options`; `None`, reported, where VideoToolbox refuses it.
     fn new(
         codec: VideoCodec,
-        ring: Vec<CFRetained<CVPixelBuffer>>,
+        ring: Source,
         fps: u32,
         bitrate: u32,
         options: Options,
         label: &str,
     ) -> Option<Self> {
-        let width = CVPixelBufferGetWidth(&ring[0]) as u32;
-        let height = CVPixelBufferGetHeight(&ring[0]) as u32;
+        let (width, height) = (ring.width() as u32, ring.height() as u32);
         let wake = Wake::new();
         let waiter = Waiter::new(&wake).unwrap();
         match Encoder::tuned(
@@ -239,6 +323,7 @@ impl Rig {
                 armed: 0,
                 sent: Vec::new(),
                 out: Vec::new(),
+                paints: Vec::new(),
             }),
             Err(failure) => {
                 report(format_args!("{label} refused: {failure}"));
@@ -271,18 +356,24 @@ impl Rig {
         }
     }
 
-    /// Hand the encoder ring picture `index`; the next tick's due time is the
-    /// pacer's to say.
+    /// Hand the encoder picture `index`, painted first when new; the next
+    /// tick's due time is the pacer's to say.
     fn hand(&mut self, index: usize, unit: Unit) {
         let keyframe = std::mem::take(&mut self.keyframe);
+        if unit == Unit::Fresh {
+            let started = Instant::now();
+            self.ring.paint(index);
+            self.paints
+                .push(u32::try_from(started.elapsed().as_micros()).unwrap_or(u32::MAX));
+        }
         self.encoder
-            .encode(&self.ring[index % self.ring.len()], keyframe, unit)
+            .encode(self.ring.picture(index), keyframe, unit)
             .unwrap();
         self.sent.push((self.encoder.last_pts(), index, unit));
         self.submitted += 1;
     }
 
-    /// Until `until`: a new picture of the ring at each tick at `pace`.
+    /// Until `until`: a new picture at each tick at `pace`.
     fn run(&mut self, pace: u32, until: Instant) {
         let mut pacer = Pacer::new(pace, Instant::now());
         loop {
@@ -377,14 +468,19 @@ fn psnr(errors: &[f64]) -> f64 {
     10.0 * (255.0 * 255.0 / mean.max(f64::MIN_POSITIVE)).log10()
 }
 
-/// The low-latency session a Mac host builds, measuring its luma error.
-fn host_options() -> Options {
+/// The low-latency session a Mac host builds, measuring its luma error;
+/// without the QP bound for a before arm.
+fn host_options(max_qp: bool) -> Options {
     Options {
         low_latency: true,
         capped: true,
         quality: true,
+        max_qp,
     }
 }
+
+/// A before arm and an after arm.
+const ARMS: [(&str, bool); 2] = [("before", false), ("after", true)];
 
 /// What low-latency rate control drops, and how it codes what it keeps:
 /// each codec at 1080p and 1440p, paced at 60 and 120 FPS at Balanced's
@@ -393,16 +489,19 @@ fn host_options() -> Options {
 /// session's IDR (steady state), and the 1.5 s after an IDR forced at 6 s.
 /// Each prints the pictures handed over and VideoToolbox's `FrameDropped`
 /// outputs, units a second, the largest unit that is not a keyframe, the
-/// forced IDR's size, and PSNR from VideoToolbox's own luma error.
+/// forced IDR's size, and PSNR from VideoToolbox's own luma error; before
+/// without `MaxAllowedFrameQP`, after with it.
 #[test]
 #[ignore = "a measurement: about 3.5 minutes of encoding, in release mode"]
 fn video_toolbox_drops() {
     for (width, height) in [(1920, 1080), (2560, 1440)] {
         for content in [Content::Noise, Content::Busy, Content::Text] {
-            let painted = ring(width, height, content, 12);
+            let painted = ring(width, height, content);
             for codec in [VideoCodec::H264, VideoCodec::H265] {
                 for pace in [60, 120] {
-                    drops_case(codec, &painted, content, pace);
+                    for (arm, max_qp) in ARMS {
+                        drops_case(codec, &painted, content, pace, arm, max_qp);
+                    }
                 }
             }
         }
@@ -411,24 +510,23 @@ fn video_toolbox_drops() {
 
 fn drops_case(
     codec: VideoCodec,
-    painted: &[CFRetained<CVPixelBuffer>],
+    painted: &Source,
     content: Content,
     pace: u32,
+    arm: &str,
+    max_qp: bool,
 ) {
-    let (width, height) = (
-        CVPixelBufferGetWidth(&painted[0]),
-        CVPixelBufferGetHeight(&painted[0]),
-    );
+    let (width, height) = (painted.width(), painted.height());
     let bitrate = (scaled(BALANCED_BPF, width, height) * f64::from(pace)) as u32;
     let label = format!(
-        "codec={codec:?} size={width}x{height} content={content:?} pace={pace} bitrate={bitrate}"
+        "codec={codec:?} size={width}x{height} content={content:?} pace={pace} bitrate={bitrate} arm={arm}"
     );
     let Some(mut rig) = Rig::new(
         codec,
-        painted.to_vec(),
+        painted.clone(),
         pace,
         bitrate,
-        host_options(),
+        host_options(max_qp),
         &label,
     ) else {
         return;
@@ -445,13 +543,14 @@ fn drops_case(
     let after = forced + Duration::from_millis(1500);
     rig.run(pace, after);
     let (idr_submitted, idr_dropped) = (rig.submitted - submitted, rig.dropped() - dropped);
+    let paint = quantile(&mut rig.paints, 0.5);
     for (name, from, to, submitted, dropped) in [
         ("steady", steady, forced, steady_submitted, steady_dropped),
         ("after_idr", forced, after, idr_submitted, idr_dropped),
     ] {
         let window = rig.window(from, to);
         report(format_args!(
-            "{label} window={name} submitted={submitted} dropped={dropped} units_per_s={:.1} mbps={:.2} largest_p_bits={} idr_bits={} psnr={:.2}",
+            "{label} window={name} submitted={submitted} dropped={dropped} units_per_s={:.1} mbps={:.2} largest_p_bits={} idr_bits={} psnr={:.2} paint_p50_us={}",
             window.per_second(window.units as f64),
             window.per_second(window.bits as f64) / 1e6,
             window.largest_p,
@@ -459,6 +558,7 @@ fn drops_case(
                 .keyframe_bits
                 .map_or_else(|| "-".to_owned(), |bits| bits.to_string()),
             window.psnr,
+            paint,
         ));
     }
 }
@@ -472,14 +572,18 @@ fn drops_case(
 /// a tick, and stops. It prints, for each `k` from 1 to 12, the time from
 /// the last new picture's submit to the first unit kept that carries it,
 /// as `MacVideo` would send it, and which unit that was (the picture itself,
-/// a resubmit or a liveness repeat); then a summary of each bitrate.
+/// a resubmit or a liveness repeat); then a summary of each bitrate. Before
+/// leaves a dropped picture to the liveness repeat; after resubmits it.
+/// Both arms bound the QP.
 #[test]
 #[ignore = "a measurement: about 3 minutes of encoding, in release mode"]
 fn video_toolbox_resubmit() {
-    let painted = ring(1920, 1080, Content::Text, 16);
+    let painted = ring(1920, 1080, Content::Text);
     for codec in [VideoCodec::H264, VideoCodec::H265] {
         for bitrate in [1_000_000, 2_000_000, 4_000_000] {
-            resubmit_case(codec, &painted, bitrate);
+            for (arm, resubmits) in ARMS {
+                resubmit_case(codec, &painted, bitrate, arm, resubmits);
+            }
         }
     }
 }
@@ -489,14 +593,15 @@ const RESUBMIT_PACE: u32 = 60;
 /// How long a trial waits for the last new picture.
 const RESUBMIT_WAIT: Duration = Duration::from_millis(600);
 
-fn resubmit_case(codec: VideoCodec, painted: &[CFRetained<CVPixelBuffer>], bitrate: u32) {
-    let label = format!("codec={codec:?} size=1920x1080 pace={RESUBMIT_PACE} bitrate={bitrate}");
+fn resubmit_case(codec: VideoCodec, painted: &Source, bitrate: u32, arm: &str, resubmits: bool) {
+    let label =
+        format!("codec={codec:?} size=1920x1080 pace={RESUBMIT_PACE} bitrate={bitrate} arm={arm}");
     let Some(mut rig) = Rig::new(
         codec,
-        painted.to_vec(),
+        painted.clone(),
         RESUBMIT_PACE,
         bitrate,
-        host_options(),
+        host_options(true),
         &label,
     ) else {
         return;
@@ -505,7 +610,7 @@ fn resubmit_case(codec: VideoCodec, painted: &[CFRetained<CVPixelBuffer>], bitra
     rig.run(RESUBMIT_PACE, Instant::now() + Duration::from_secs(1));
     let mut trials = Vec::new();
     for k in 1..=12 {
-        let mut host = Emulated::new(&rig);
+        let mut host = Emulated::new(&rig, resubmits);
         host.still(&mut rig, Instant::now() + Duration::from_secs(2));
         rig.keyframe = true;
         let carried = host.trial(&mut rig, k);
@@ -567,6 +672,9 @@ fn kind(unit: Unit) -> &'static str {
 /// while there are any, else the last again for a keyframe, a resubmit or
 /// after `LIVENESS_INTERVAL`, marked a duplicate unless it is a resubmit.
 struct Emulated {
+    /// The policy resubmits (after) or leaves a drop to the liveness repeat
+    /// (before).
+    resubmits: bool,
     /// A resubmit taken from the encoder and not yet submitted.
     resubmit: bool,
     last_submit: Instant,
@@ -577,9 +685,10 @@ struct Emulated {
 }
 
 impl Emulated {
-    fn new(rig: &Rig) -> Self {
+    fn new(rig: &Rig, resubmits: bool) -> Self {
         let now = Instant::now();
         Self {
+            resubmits,
             resubmit: false,
             last_submit: now,
             last: rig.next.saturating_sub(1),
@@ -597,7 +706,7 @@ impl Emulated {
         }
         if self.pacer.due(now) && !rig.encoder.waiting() {
             rig.keyframe |= rig.encoder.keyframe_due();
-            self.resubmit |= rig.encoder.take_resubmit();
+            self.resubmit |= rig.encoder.take_resubmit() && self.resubmits;
             match rig.encoder.admit(VT_IN_FLIGHT) {
                 Admit::Full => self.pacer.consume(now, None),
                 Admit::Busy => {}
@@ -626,7 +735,7 @@ impl Emulated {
             && !rig.keyframe
             && !self.resubmit
             && !rig.encoder.wants_keyframe()
-            && !rig.encoder.wants_resubmit();
+            && !(self.resubmits && rig.encoder.wants_resubmit());
         let wait = if rig.encoder.waiting() {
             now + LATE_OUTPUT
         } else if idle {
@@ -696,7 +805,7 @@ impl Emulated {
 fn video_toolbox_120() {
     for (width, height) in [(2560, 1440), (2560, 1664), (3024, 1964), (3840, 2160)] {
         for content in [Content::Text, Content::Busy] {
-            let painted = ring(width, height, content, 12);
+            let painted = ring(width, height, content);
             for codec in [VideoCodec::H265, VideoCodec::H264] {
                 for (pace, model) in [(120, "both"), (60, "timestamp"), (60, "nominal")] {
                     for mode in modes(codec) {
@@ -716,6 +825,7 @@ struct Mode {
     low_latency: bool,
     capped: bool,
     factor: f64,
+    max_qp: bool,
 }
 
 /// H.265's arms; H.264 gains nothing from standard rate control, so only
@@ -726,8 +836,13 @@ fn modes(codec: VideoCodec) -> Vec<Mode> {
         low_latency,
         capped,
         factor,
+        max_qp: true,
     };
     let mut modes = vec![
+        Mode {
+            max_qp: false,
+            ..mode("ll_default_qp", true, true, 1.0)
+        },
         mode("ll", true, true, 1.0),
         mode("std_capped", false, true, 1.0),
         mode("std_1.00", false, false, 1.0),
@@ -744,16 +859,13 @@ const NOMINAL_120: u32 = 120;
 
 fn case_120(
     codec: VideoCodec,
-    painted: &[CFRetained<CVPixelBuffer>],
+    painted: &Source,
     content: Content,
     pace: u32,
     model: &str,
     mode: Mode,
 ) {
-    let (width, height) = (
-        CVPixelBufferGetWidth(&painted[0]),
-        CVPixelBufferGetHeight(&painted[0]),
-    );
+    let (width, height) = (painted.width(), painted.height());
     let bpf = scaled(SMOOTH_BPF, width, height);
     let target = bpf * f64::from(pace);
     let budget = if model == "nominal" {
@@ -770,10 +882,11 @@ fn case_120(
         low_latency: mode.low_latency,
         capped: mode.capped,
         quality: true,
+        max_qp: mode.max_qp,
     };
     let Some(mut rig) = Rig::new(
         codec,
-        painted.to_vec(),
+        painted.clone(),
         NOMINAL_120,
         bitrate,
         options,
@@ -793,7 +906,7 @@ fn case_120(
     let mut calls = rig.encoder.probe(|probe| std::mem::take(&mut probe.calls));
     let window = rig.window(from, to);
     report(format_args!(
-        "{label} bitrate={bitrate} submitted_per_s={:.1} units_per_s={:.1} dropped={} dwell_p50_ms={:.2} dwell_p95_ms={:.2} call_p50_ms={:.2} produced_over_target={:.2} psnr={:.2}",
+        "{label} bitrate={bitrate} submitted_per_s={:.1} units_per_s={:.1} dropped={} dwell_p50_ms={:.2} dwell_p95_ms={:.2} call_p50_ms={:.2} produced_over_target={:.2} psnr={:.2} paint_p50_us={}",
         window.per_second((rig.submitted - submitted) as f64),
         window.per_second(window.units as f64),
         rig.dropped() - dropped,
@@ -802,6 +915,7 @@ fn case_120(
         f64::from(quantile(&mut calls, 0.5)) / 1000.0,
         window.per_second(window.bits as f64) / target,
         window.psnr,
+        quantile(&mut rig.paints, 0.5),
     ));
 }
 
@@ -815,23 +929,25 @@ fn case_120(
 #[test]
 #[ignore = "a measurement: about 15 seconds of encoding, in release mode"]
 fn video_toolbox_rate_step() {
-    let painted = ring(1920, 1080, Content::Busy, 12);
+    let painted = ring(1920, 1080, Content::Busy);
     for codec in [VideoCodec::H264, VideoCodec::H265] {
-        rate_step_case(codec, &painted);
+        for (arm, max_qp) in ARMS {
+            rate_step_case(codec, &painted, arm, max_qp);
+        }
     }
 }
 
-fn rate_step_case(codec: VideoCodec, painted: &[CFRetained<CVPixelBuffer>]) {
+fn rate_step_case(codec: VideoCodec, painted: &Source, arm: &str, max_qp: bool) {
     const PACE: u32 = 60;
     const STEPS: [(usize, u32); 3] = [(0, 8_000_000), (60, 2_000_000), (180, 8_000_000)];
     const END: usize = 300;
-    let label = format!("codec={codec:?} size=1920x1080 content=Busy pace={PACE}");
+    let label = format!("codec={codec:?} size=1920x1080 content=Busy pace={PACE} arm={arm}");
     let Some(mut rig) = Rig::new(
         codec,
-        painted.to_vec(),
+        painted.clone(),
         PACE,
         STEPS[0].1,
-        host_options(),
+        host_options(max_qp),
         &label,
     ) else {
         return;
