@@ -905,8 +905,8 @@ worker collected it, on the system clock both processes read, from which
 the app's once-a-second debug event `desktop_helper_push` (target
 `pb_mapper_desktop::feedback`) reports the delay to its receipt (p50, p95,
 maximum), with the answers, which are the round trips, units, fresh
-pictures and pointers it received per second, and the age of each fresh
-picture as its notice arrived. How much sooner a unit, a picture and an
+pictures and pointers it received per second, and each fresh picture's age
+as the worker wrote its notice. How much sooner a unit, a picture and an
 input arrive on a Windows computer, and what it saves of the app's, the
 service's and the worker's processor time, is still to be measured there.
 
