@@ -1376,7 +1376,7 @@ the helper's answer carries no date yet, so a host behind the helper keeps
 the grid. A tick that finds no new picture stays armed, so the next picture
 is taken as it appears rather than a tick later. ScreenCaptureKit, which
 pushes, wakes the thread for it. DXGI cannot, in the app's process or
-behind the helper (whose answer says when a capture found nothing new), so
+behind the helper (whose answer says when a capture left the tick armed), so
 it is asked again, never at once: every 2 ms (`DRAIN_POLL`, or the
 backend's `capture_poll`) for 250 ms (`HOT_WINDOW`) after an input the
 thread injected or a new picture, when the next present is likely, and
@@ -1388,7 +1388,9 @@ the next tick opens three quarters of a period later, and DXGI is asked
 every 2 ms from then until the next present lands, where a grid at the
 display's own rate mostly found a present already waiting at its tick.
 `desktop_capture_pacing`'s `empty_polls_per_s` and `video_bench`'s
-`polls_per_s` count them. A change of the viewers' limits that changes only
+`polls_per_s` count them, together with the asks of a Windows encoder
+that had not asked for input yet (`video_bench`'s `waiting` counts those
+apart). A change of the viewers' limits that changes only
 the frame rate keeps the capture source where it can serve the new limits as
 it is (the synthetic test platform's can; the Windows and Mac sources are
 still built again), and asks for an IDR either way. Thread C passes each
@@ -1436,13 +1438,23 @@ counts it, and wakes thread C for each output, which thread C then
 collects, and for an input request a waiting tick waits for, which thread
 C then answers with a capture, so neither waits for a poll and thread C
 no longer wakes every 2 ms while a unit is in the encoder. While it waits
-for a request, thread C still asks again every 2 ms. The watcher takes a
+for a request, thread C still asks again every 2 ms; a request that came
+while thread C was still finishing the capture that found none is
+answered at once all the same. A drain collects at most one output, and
+none after the encoder changed its output type or for an output it
+discards; while an output so announced is still uncollected, thread C
+drains again every 2 ms, since no further event will wake it for that
+one. The watcher takes a
 failed event, or more requests or outputs than the encoder may have, for
 the encoder's failure, which thread C's next drain returns. Dropping the
 encoder shuts it down (`IMFShutdown`), which ends the watcher's wait, and
 joins it, at most 100 ms, before the encoder's interfaces and Media
-Foundation go. An encoder without `IMFShutdown` gets no watcher, and its
-events are read at each drain, every 2 ms while it holds units. Behind
+Foundation go. A watcher whose wait the shutdown did not end is left
+behind, with the encoder it holds, and every later encoder of the process
+gets no watcher, so that at most one is left behind however often the
+encoder is built again. An encoder without `IMFShutdown`, or without a
+watcher, has its events read at each drain, every 2 ms while it holds
+units. Behind
 the helper, the worker's encoder has its watcher too, but nothing it wakes:
 thread C still polls the worker every 2 ms, and the worker reads the counts
 each millisecond of a drain's long poll. An encoder that holds nothing and
@@ -2183,7 +2195,9 @@ dated picture's present to the capture call that took it; `dated_share`, the
 captures whose picture was dated; and per second `captures_per_s` (captures
 that spent their tick), `presents_per_s` (the presents their pictures
 covered), `coalesced_per_s` (those beyond one per picture: presents no
-capture took) and `empty_polls_per_s` (captures that found nothing new). A
+capture took) and `empty_polls_per_s` (captures that left the tick armed:
+they found nothing new, or a Windows encoder that had not asked for input
+yet). A
 Mac host traces `macos_capture_timing` there too, once a second while it
 submits: ScreenCaptureKit's `complete_per_s`, `idle_per_s` and
 `replaced_per_s` (pictures a newer one replaced before thread C took them),
@@ -2193,15 +2207,17 @@ queue. A Windows encoder logs its first acquire as
 `windows_capture_first_acquire` on `pb_mapper_desktop::session` (debug):
 `last_present_time`, `accumulated_frames` and whether a desktop image came
 with it, which it also keeps in its statistics for `video_bench`'s
-`first_acquire_*`. It logs, as it starts, whether its events are pushed
-(`windows_encoder_events`, debug: `encoder`, `pushed`), and warns
-`windows_encoder_watcher_failed` when its watcher thread could not start
-(the events are then polled) and `windows_encoder_watcher_stuck` when its
-shutdown did not end the watcher's wait within 100 ms (the thread is left
-behind). Its statistics, which `video_bench` prints, count the submits
-that found no input request (`waiting`) and, while its events are pushed,
-how long each output waited from its announcement to the drain that
-collected it (`have_output_to_collect_us`). The app's own host writes these debug events when
+`first_acquire_*`. A session's encoder logs, as it starts, whether its
+events are pushed (`windows_encoder_events`, debug: `encoder`, `pushed`;
+the H.265 probe's encoder, which nothing waits on, logs nothing), and
+warns `windows_encoder_watcher_failed` when its watcher thread could not
+start (the events are then polled) and `windows_encoder_watcher_stuck`
+when its shutdown did not end the watcher's wait within 100 ms (the thread
+is left behind, and later encoders poll their events). Its statistics,
+which `video_bench` prints, count the submits that found no input request
+(`waiting`) and, while its events are pushed, how long each output waited
+from its announcement to the start of the drain's call that collected it
+(`have_output_to_collect_us`). The app's own host writes these debug events when
 `RUST_LOG` enables their targets; the background service's log keeps its
 targets at info, and its capture helper logs nothing.
 

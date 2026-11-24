@@ -55,7 +55,8 @@ pub(crate) enum Request {
         nominal_fps: u32,
     },
     /// Drain finished output, then submit one capture when `submit` is set;
-    /// the answer's `submitted` says when that capture found nothing new.
+    /// the answer's `submitted` says when that capture left the tick armed:
+    /// it found nothing new, or an encoder that had not asked for input.
     /// A drain alone may wait up to `wait_ms` (at most 4) for encoder output
     /// while units are pending. The helper never paces.
     Video {
@@ -171,9 +172,9 @@ pub(crate) struct Response {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<crate::VideoFormat>,
     /// In the answer to a `Video` request that submits: `Some(false)` when
-    /// the worker's source had no new picture to submit, which leaves the
-    /// host's tick armed. Absent, it was handed the tick, or spent it on a
-    /// full encoder.
+    /// the worker's source had no new picture to submit, or its encoder had
+    /// not asked for input yet, which leaves the host's tick armed. Absent,
+    /// it was handed the tick, or spent it on a full encoder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub submitted: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
