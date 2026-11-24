@@ -3311,6 +3311,8 @@ fn direct_quic_on_lossy_links() {
 const STANDBY_RUNS: usize = 10;
 /// When the live link goes dead, after the viewer began connecting.
 const STANDBY_BLOCK_AT: Duration = Duration::from_secs(6);
+/// How long the relay standby's own traffic is counted.
+const STANDBY_TRAFFIC_SPAN: Duration = Duration::from_secs(5);
 /// The longest a measured run waits for anything.
 const STANDBY_LIMIT: Duration = Duration::from_secs(15);
 
@@ -3506,13 +3508,15 @@ fn standby_baseline_reconnects() {
 /// from the session's first picture to the session running direct, the
 /// IDRs the host encoded from that picture to a second after, and the
 /// longest the renderer went without a picture within a second either side
-/// of the switch.
+/// of the switch; then, with a relay standby beside the direct session, the
+/// bytes it carries both ways over 5 s, as the host's tunnel counts them.
 #[test]
-#[ignore = "explicit ~1-minute measurement of a relayed session moving to direct, 10 runs"]
+#[ignore = "explicit ~1.5-minute measurement of a relayed session moving to direct, 10 runs"]
 fn standby_upgrades_a_relayed_session() {
     const CASE: &str = "standby_upgrade";
     traced(|_| async move {
         let (mut directs, mut keyframes, mut gaps) = (Vec::new(), Vec::new(), Vec::new());
+        let mut standbys = Vec::new();
         for run in 0..STANDBY_RUNS {
             let relay = Relay::start_with_direct(
                 &format!("desktop-standby-upgrade-{run}"),
@@ -3570,14 +3574,30 @@ fn standby_upgrades_a_relayed_session() {
                 .windows(2)
                 .map(|pair| pair[1].duration_since(pair[0]).as_secs_f64() * 1000.0)
                 .fold(0.0, f64::max);
+            // Beside the direct session now stands a relay standby: what it
+            // carries, both ways, as the host's tunnel counts it.
+            first(|| {
+                let sessions = host.metrics().sessions;
+                (sessions.active_direct == 1 && sessions.active_relay == 1).then_some(())
+            })
+            .await
+            .unwrap();
+            let relayed = || {
+                let traffic = host.metrics().traffic.relay;
+                traffic.sent + traffic.received
+            };
+            let (from, at) = (relayed(), Instant::now());
+            tokio::time::sleep(STANDBY_TRAFFIC_SPAN).await;
+            let standby_bps = (relayed() - from) as f64 * 8.0 / at.elapsed().as_secs_f64();
             let status = viewer.status();
             let direct_ms = direct.duration_since(fresh).as_secs_f64() * 1000.0;
             println!(
-                "{CASE} run={run} direct_after_first_picture_ms={direct_ms:.0} keyframes={idrs} longest_gap_ms={gap:.0} pictures={} state={:?} host_viewers={}",
+                "{CASE} run={run} direct_after_first_picture_ms={direct_ms:.0} keyframes={idrs} longest_gap_ms={gap:.0} pictures={} relay_standby_bit_s={standby_bps:.0} state={:?} host_viewers={}",
                 shown_at.len(),
                 status.state,
                 host.status().viewers.len(),
             );
+            standbys.push(standby_bps);
             assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
             directs.push(direct_ms);
             keyframes.push(idrs);
@@ -3589,8 +3609,9 @@ fn standby_upgrades_a_relayed_session() {
         }
         let (direct_p50, direct_p90, direct_max) = spread(&mut directs);
         let (gap_p50, gap_p90, gap_max) = spread(&mut gaps);
+        let (standby_p50, standby_p90, standby_max) = spread(&mut standbys);
         println!(
-            "{CASE} summary runs={STANDBY_RUNS} direct_after_first_picture_ms p50={direct_p50:.0} p90={direct_p90:.0} max={direct_max:.0} keyframes min={} max={} longest_gap_ms p50={gap_p50:.0} p90={gap_p90:.0} max={gap_max:.0}",
+            "{CASE} summary runs={STANDBY_RUNS} direct_after_first_picture_ms p50={direct_p50:.0} p90={direct_p90:.0} max={direct_max:.0} keyframes min={} max={} longest_gap_ms p50={gap_p50:.0} p90={gap_p90:.0} max={gap_max:.0} relay_standby_bit_s p50={standby_p50:.0} p90={standby_p90:.0} max={standby_max:.0}",
             keyframes.iter().min().unwrap(),
             keyframes.iter().max().unwrap(),
         );
