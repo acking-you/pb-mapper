@@ -2253,16 +2253,18 @@ none; on iOS it is the device's. While a read asks for timings it adds
 `timings.surface_consume` (from a picture's publication to the compositor
 taking it) and `timings.decode` (`VTDecompressionSessionDecodeFrame`,
 keyframes included), each `{samples, mean_ms, max_ms}` since the timings
-began, and `decoderCpuMs`: the decoder thread's CPU time since it started at
-attach (`CLOCK_THREAD_CPUTIME_ID`), which the thread reads itself after each
-unit it decodes, so it trails by at most that unit. Without timings the
-thread reads no clock, and stopping them drops all three.
+began, and `decoderCpuMs`: the CPU time of the texture's decoder threads
+(`CLOCK_THREAD_CPUTIME_ID`), which each thread reads itself after each unit
+it decodes, so it trails by at most that unit. Each attach starts a thread,
+and an ended thread's whole time stays in the figure, so it only grows and
+two reads across a reconnect still give the CPU spent between them. Without
+timings no thread reads a clock, and stopping them drops all three.
 
-The iOS app links the
-whole FFI static library and keeps its symbols (`-force_load`,
-`-Wl,-export_dynamic` in `ui/ios/Flutter/PbMapperFfi.xcconfig`): Dart and the
-decoder find every symbol by name at run time, so before this the linker took
-none of the library and every lookup would have failed. CI's `ios-app` job
+The iOS app links the whole FFI static library and keeps its symbols
+(`-force_load`, `-Wl,-export_dynamic` in
+`ui/ios/Flutter/PbMapperFfi.xcconfig`): Dart and the decoder find every
+symbol by name at run time, so before this the linker took none of the
+library and every lookup would have failed. CI's `ios-app` job
 builds the app without signing and checks that it exports the FFI's entry
 points. The iOS FFI is built without netdev, which does not compile for iOS
 (libc defines its `in6_ifreq` for macOS only): there, LAN-first ranks

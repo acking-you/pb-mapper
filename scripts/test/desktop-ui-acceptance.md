@@ -137,9 +137,9 @@ Each sample's `native` holds VideoToolbox's own figures: the counts;
 `timings.decode` (`VTDecompressionSessionDecodeFrame`, keyframes included)
 and `timings.surface_consume` (a picture's publication to the compositor
 taking it), each `samples`, `mean_ms` and `max_ms` since the timings began;
-`decoderCpuMs`, the decoder thread's CPU time since it started (a reconnect
-starts a new thread); `hardware`; `lowLatency`; and `refreshHz`, the
-display the viewer window is on. Compare builds as on Windows below, with
+`decoderCpuMs`, the CPU time of the texture's decoder threads, which a
+reconnect's new thread adds to; `hardware`; `lowLatency`; and `refreshHz`,
+the display the viewer window is on. Compare builds as on Windows below, with
 `decoderCpuMs` gained per second in place of `decoderCycles`.
 
 ## Windows viewer

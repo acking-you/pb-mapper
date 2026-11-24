@@ -601,10 +601,14 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
   // time (key frames included).
   private var surfaceConsume: Timing?
   private var decodeTime: Timing?
-  /// While timed: the Feed thread's CPU time at the end of the last unit it
-  /// decoded. Its thread starts at attach, so this counts from there; gone
-  /// when the timings stop or the thread does.
+  /// While timed: the CPU time of this texture's Feed threads, the running
+  /// one's as it read it at the end of its last unit. Each attach starts a
+  /// thread whose time adds to the ended ones', so the figure only grows
+  /// and two reads across a reconnect still give the CPU spent between
+  /// them. Gone when the timings stop.
   private var decoderCpuNs: UInt64?
+  /// While timed: the CPU time of the Feed threads that ended.
+  private var endedCpuNs: UInt64 = 0
 
   init(textures: FlutterTextureRegistry, library: VideoLibrary) {
     self.textures = textures
@@ -653,7 +657,6 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     lock.lock()
     stopping = false
     revision += 1
-    decoderCpuNs = nil
     lock.unlock()
   }
 
@@ -666,7 +669,7 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
   }
 
   /// [timings] starts the timing accumulators, or keeps them; false drops
-  /// them, and the decoder thread's CPU time with them.
+  /// them, and the decoder threads' CPU time with them.
   func stats(timings: Bool) -> [String: Any] {
     lock.lock()
     defer { lock.unlock() }
@@ -674,6 +677,7 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
       surfaceConsume = nil
       decodeTime = nil
       decoderCpuNs = nil
+      endedCpuNs = 0
     } else if surfaceConsume == nil {
       surfaceConsume = Timing()
       decodeTime = Timing()
@@ -786,7 +790,19 @@ private final class DesktopVideoViewer: NSObject, FlutterTexture {
     lock.lock()
     if let timing = decodeTime {
       if let ns = decodeNs { timing.add(ns) }
-      decoderCpuNs = threadCpuNs
+      decoderCpuNs = endedCpuNs &+ threadCpuNs
+    }
+    lock.unlock()
+  }
+
+  /// The Feed thread, as it ends: while timed, its whole CPU time joins the
+  /// ended threads', read here because only the thread itself can read it.
+  /// Detach waits for this, so the next thread adds to it.
+  func feedEnded() {
+    lock.lock()
+    if decodeTime != nil {
+      endedCpuNs &+= clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+      decoderCpuNs = endedCpuNs
     }
     lock.unlock()
   }
@@ -887,6 +903,7 @@ private final class Feed {
     library.detach(consumer)
     decoder?.close()
     decoder = nil
+    viewer.feedEnded()
   }
 
   private func accept(_ base: UnsafeMutablePointer<UInt8>, _ unit: UnitMeta) {

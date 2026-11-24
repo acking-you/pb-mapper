@@ -443,9 +443,9 @@ void main() {
   });
 
   test("two decoder reads give each timing's mean over the samples between "
-      "them, the decoder thread's CPU a second, and the hardware flag; a "
-      'figure missing from either read, or a CPU time that went back, gives '
-      'none', () {
+      "them (the second read's own when the first has none), the decoder "
+      "thread's CPU a second, and the hardware flag; a CPU time missing from "
+      'either read, or one that went back, gives none', () {
     Map<String, Object?> timing(int samples, double meanMs) => {
       'samples': samples,
       'mean_ms': meanMs,
@@ -487,14 +487,15 @@ void main() {
     expect(windows.decoderCpuMsPerSecond, isNull);
     expect(windows.hardware, isNull);
 
-    // The timings just began: the first read has no CPU time yet. A new
-    // decoder thread (a reconnect) starts its CPU time over.
-    expect(
-      DesktopDecoderStats.between(const {}, const {
-        'decoderCpuMs': 12.0,
-      }, const Duration(seconds: 1)).decoderCpuMsPerSecond,
-      isNull,
-    );
+    // The timings just began: the first read has no timing and no CPU time
+    // yet. A timing counts from nothing, a CPU time cannot.
+    final first = DesktopDecoderStats.between(const {}, {
+      'decoderCpuMs': 12.0,
+      'timings': {'decode': timing(30, 2.5)},
+    }, const Duration(seconds: 1));
+    expect(first.decodeMs, closeTo(2.5, 1e-9));
+    expect(first.decoderCpuMsPerSecond, isNull);
+    // A CPU time that went back gives none, as a count that went back does.
     expect(
       DesktopDecoderStats.between(
         const {'decoderCpuMs': 900.0},
