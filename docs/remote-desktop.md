@@ -1036,9 +1036,10 @@ does not require Flutter or a POCOX runtime.
   quality, progress })` uses `Client::connect_tcp` and the existing
   registration, namespace, direct commit and pre-commit relay fallback; its
   `ConnectOptions.lan_first`, which the app takes from Settings at each
-  connect, decides whether a shared LAN is tried first. A session decides
-  its path once and keeps it: one that took the relay stays on it. A
-  fallback that says the path cannot be punched (the punch after a grant
+  connect, decides whether a shared LAN is tried first. A connection
+  decides its path once and keeps it; a session moves to another path only
+  by a standby on it taking its place ([Standby sessions](#standby-sessions)).
+  A fallback that says the path cannot be punched (the punch after a grant
   found no way through, negotiating outran its 3 s, or the relay offers no
   direct) pauses direct for that client's later `connect_tcp` calls to the
   same computer once the relay has carried the session (10 s, doubling to
@@ -1140,6 +1141,97 @@ does not require Flutter or a POCOX runtime.
   registration/connection. Drop initiates cancellation. Coordinator loss or
   relay credential revocation does not forcibly close an established direct
   endpoint; local desktop stop does.
+
+### Standby sessions
+
+A session's connection keeps its path for its life, and a path can die while
+the other lives: UDP blocked or throttled mid-session, a NAT on the host's
+side that rebinds (QUIC moves no server), a lost port mapping. Without a
+standby such a session ends at the viewer's 4 s read timeout, and the host
+ends its side at 3 s, which empties a single viewer's room: capture pauses
+and a changed display mode is put back before the app reconnects. And a
+session that took the relay because direct fell back for a moment stays on
+the relay. A standby is a second, ordinary session of the same viewer to
+the same host, on the other path, that waits to take the first one's place.
+
+- **Wire.** Both ends list `standby`. A host gives a session whose viewer
+  listed it a ticket, `Accepted::ticket`: 32 bytes from ring's system
+  generator, base64url, which names the pair. A standby authenticates as
+  any viewer, with `Authenticate::standby_for` set to it. The host checks
+  the token first, in constant time, then the ticket, in constant time over
+  SHA-256 digests against every pair's; a ticket no pair holds is denied, and
+  so is the right ticket beside a wrong token. Each field is written only to
+  a peer that listed the capability and left out when unset; the ALPN stays
+  `pb-mapper/desktop/2`. A standby's own `Accepted` carries no ticket.
+- **Host.** A standby takes a standby's admission permit (`MAX_VIEWERS` of
+  them), never a slot's, and a pair holds one (a second is `busy`). It runs
+  paused, on its pair's codec, and thread C knows nothing of it: it causes no
+  keyframe, shows in no `HostStatus` and has no peer pointer; it hears
+  `State`, `Stats` and probes, and answers them. Its `Resume` promotes it:
+  under the room's lock it takes the pair's slot, with the slot's admission
+  permit and the ticket, and the session it replaces ends without a word
+  (`End::Closed`). Thread C releases the replaced session's held input,
+  failing closed, and hands the newcomer the control it had, and with it the
+  admission lease, which is never let go meanwhile. The room never empties,
+  so a changed display mode stays as it is until the pair's last session
+  ends, which puts it back once. The resume IDR is forced; a `Path` resets
+  the QoS baseline only when the route changed, as the standby measured its
+  own all along. A pair's session whose connection ends (closed, failed or
+  silent) while its standby stands by hands it the place, still paused,
+  costing no keyframe; one the host ends for a reason (`Stopped`) ends its
+  standby with it.
+- **Viewer.** `Viewer::connect` with `PathPolicy::Auto`, to a host that gave
+  a ticket, opens a standby once the session streams. Beside a session that
+  runs direct across the internet (QUIC, punched or through a port mapping;
+  never one within a LAN) it opens one on the relay. Beside a session the
+  relay carries after direct fell back for a while (its negotiation timed
+  out or failed, or a grant found no path, or a pause left direct out), or
+  after its direct connection died and a relay standby took its place, it
+  opens a direct-only one through the hidden `Client::connect_tcp_direct`,
+  which never takes the relay: one consumer and endpoint across attempts,
+  under the client's pauses for the computer, never again after the relay
+  or the host said direct is not offered, and counting no fallback. A relay
+  standby that fails is opened again after 1 s, doubling to 30 s; a direct
+  one at the end of the pause its failure set, or after 10 s doubling to
+  5 min, or at once on a network change; each doubling wait is jittered
+  down to as little as three quarters of it. A ticket the host denied, or a
+  standby the host ended itself, ends the viewer's standbys.
+- **Taking the place.** The live connection gives way when it fails or
+  closes, or when it has read no byte for max(1.5 s, 4 × base RTT) while the
+  standby read a whole message in that time; a direct standby takes the
+  place as soon as it commits. The viewer drops what it had queued for the
+  old host session (input, receipts, presentations, a mode change), writes
+  `Resume` first on the standby, then the choices the new session has yet to
+  hear: control (asked for again if the app wants it, revoked if not), a
+  pause, the preset, the fps cap. Its status, view and video sink stay what
+  they are: the sink drops what it held and hands out next an IDR marked as
+  a discontinuity, and no presentation of the old session admits input. The
+  old connection stays open, reading and dropping what still comes, until
+  its host session ends, at most 3 s, so the host hears the `Resume` before
+  the close. `Viewer::metrics` follows the live connection: a
+  `subscribe_metrics` stream taken before a switch ends with it. The trace
+  events `desktop_viewer_promoted` (cause, route, outage_ms) and
+  `desktop_viewer_standby` (route, outcome) count how often either happens.
+- **Costs.** One more session per viewer while a standby stands by: one more
+  relay stream for every viewer whose session runs direct across the
+  internet, counted against the namespace's stream budget like any other,
+  carrying its stats once a second, its probes and their echoes, and pings
+  (6.8 kbit/s both ways over loopback, where probes run every 250 ms; see
+  below). One IDR per switch.
+- **What it does not cover.** A change of the viewer's own network
+  (Wi-Fi to cellular, a VPN coming up) kills both connections: the app
+  reconnects as before. RelayOnly viewers and hosts that do not list
+  `standby` are unchanged. No FFI, Dart or helper-pipe change:
+  `HostStatus` keeps its shape.
+
+Measured in process ([standby session measurements](benchmarks/2026-11-24-standby-session/README.md)):
+with the live path holding every byte while the relay lives, the promoted
+session's first picture came 1568 ms after the block (p50 of 10, max 1585)
+and input was taken at 1572 ms (max 1591), where without a standby the
+session ended at the read timeout, 3991 ms after it (p50, at the base
+commit), before any reconnect; a relayed session moved to direct with
+exactly one IDR and no gap between pictures over 34 ms. Real NATs and
+firewalls are still to be run.
 
 ## Platforms
 
@@ -3276,6 +3368,7 @@ so read at the display's rate, and a still one on the timer only.
 | Helper pipes | 256 KiB may wait each way; the service relays through 256 KiB toward the app and 64 KiB toward the worker; one write per answer with its byte record |
 | Timeouts | handshake 3 s; host read 3 s; viewer header 4 s; writes 3 s plus the message's time at 1 Mbit/s; `Stopped` best effort within 1 s; the host reads on until the viewer closes, within the same second |
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
+| Standby | one a pair, `MAX_VIEWERS` a host; the live connection gives way after max(1.5 s, 4 × base RTT) without a byte while the standby read a message in that time, or at once when it fails; a committed direct standby at once; silence checked every 100 ms, whether a standby is wanted every 1 s once streaming; a replaced connection kept up to 3 s; a relay standby again after 1 s doubling to 30 s, a direct one after its pause, or 10 s doubling to 5 min, the doubling waits jittered down to ¾ |
 | Credit window | `t` = base RTT (100 ms until measured) + a rebase + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms, or at once to the busy rate while a receipt episode lasts |
 | Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder (2 in flight in a Mac host's VideoToolbox) |
 | Encoder cap | a rolled second is full with a full tick (a due tick skipped for 4 in the encoder) and 3 or more units inside on average (units a second × median dwell); uncapped, a full one caps at max(the viewers' presets' highest minimum, ⌊0.95 × units a second⌋) where that is below the units a second; judged by the first second loading the cap (0.9 × it or more) at least max(2, ⌈3 ÷ (units a second − cap)⌉ + 1) rolls later, at most 8, whose median dwell not below 0.6 × the capping second's lifts it, none again for 30 s, doubling with each lift in a row up to 8 min; capped, 3 loaded seconds since a full one raise it to ⌊0.95 ÷ median dwell⌋ when that is a twentieth (≥ 1) more, below the cap it last filled at unless a twentieth above that too, and from 30 s after a measurement a probe adds a twentieth (≥ 1) each loaded second, that hold doubling with each fill up to 4 min; a full second lowers it to ⌊0.95 × units a second⌋; unloaded seconds and a pace asked at or below it leave it; cleared at the asked pace; reset when the encoder is rebuilt |

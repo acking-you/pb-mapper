@@ -1,0 +1,12 @@
+test slow_link::standby_upgrades_a_relayed_session ... standby_upgrade run=0 direct_after_first_picture_ms=129 keyframes=1 longest_gap_ms=34 pictures=35 relay_standby_bit_s=6798 state=Streaming host_viewers=1
+standby_upgrade run=1 direct_after_first_picture_ms=125 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6798 state=Streaming host_viewers=1
+standby_upgrade run=2 direct_after_first_picture_ms=124 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6798 state=Streaming host_viewers=1
+standby_upgrade run=3 direct_after_first_picture_ms=122 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6798 state=Streaming host_viewers=1
+standby_upgrade run=4 direct_after_first_picture_ms=111 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6800 state=Streaming host_viewers=1
+standby_upgrade run=5 direct_after_first_picture_ms=124 keyframes=1 longest_gap_ms=34 pictures=34 relay_standby_bit_s=6798 state=Streaming host_viewers=1
+standby_upgrade run=6 direct_after_first_picture_ms=118 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6797 state=Streaming host_viewers=1
+standby_upgrade run=7 direct_after_first_picture_ms=118 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6798 state=Streaming host_viewers=1
+standby_upgrade run=8 direct_after_first_picture_ms=117 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6798 state=Streaming host_viewers=1
+standby_upgrade run=9 direct_after_first_picture_ms=119 keyframes=1 longest_gap_ms=33 pictures=34 relay_standby_bit_s=6798 state=Streaming host_viewers=1
+standby_upgrade summary runs=10 direct_after_first_picture_ms p50=119 p90=125 max=129 keyframes min=1 max=1 longest_gap_ms p50=33 p90=34 max=34 relay_standby_bit_s p50=6798 p90=6798 max=6800
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 415 filtered out; finished in 62.43s

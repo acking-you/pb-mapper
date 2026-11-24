@@ -243,6 +243,14 @@ The relay listens on `7666/tcp` and, for direct connections, on `7666/udp`.
 Open both in the firewall and the cloud security group; without the UDP port,
 every connection still works through the relay.
 
+A remote desktop viewer whose picture comes directly across the internet
+keeps a paused standby session through the relay (see
+[Remote desktop in the app](#remote-desktop-in-the-app)): one more relay
+stream for each such viewer, counted like any other, that carries the
+host's statistics once a second, timing probes and pings, 6.8 kbit/s both
+ways in a loopback test where the probes run every 250 ms, and the whole
+picture once the direct path fails.
+
 Optional flags:
 
 - `--relay-only` (alias `--disable-direct`): serve the relay alone, with no UDP port
@@ -476,6 +484,8 @@ Closing the window keeps the app in the tray. Quit from the tray menu, or on mac
 **Typing.** **Shortcuts → Input method** chooses, per computer, how your keyboard types. **This computer's** (the default) lets your own input method compose, Chinese, Japanese or Korean included, with its candidates next to the remote pointer, and sends the text it commits; a Shift or Ctrl+Space tap on its own stays here to switch your input method. Some input methods (WeType on Windows, for one) also take Shift held through a mouse click as that switch, so after a Shift+click yours may type English, as in any other app; a Shift tap switches it back. **The remote computer's** sends keys by their place on the keyboard, so the remote computer's layout and input method type them; **Switch input method** in Shortcuts sends Win+Space to Windows or Ctrl+Space to a Mac. Toward a Mac, Shortcuts offers the Mac's own **Switch app** (⌘Tab), **Force Quit** (⌥⌘Esc) and **Spotlight** (⌘Space) in place of the Windows entries, and the phone's modifier bar reads ⌃ ⌥ ⇧ ⌘. Between a Mac and another computer, Cmd and Ctrl swap places by default (**Cmd acts as Ctrl** or **Ctrl acts as Cmd** in the same menu). A remote computer on an older pb-mapper takes letters, digits and Space as keys and the rest as text.
 
 **Full screen** (the app on Windows): while the picture has the keyboard and you control, your own system's shortcuts go to the remote computer alone — the Windows key and Alt with whatever you press while holding them (Alt+Tab, Alt+F4, Win+D, Win+Space), Ctrl+Esc, Ctrl+Shift+Esc, F10 and Print Screen — and a lone Windows key opens the remote computer's Start menu. Your input method still composes. Leave full screen from the toolbar at the top, or switch to another app with the mouse, and they are this computer's again. Ctrl+Alt+Del and Win+L act on this computer too: Windows takes them before any app.
+
+**Staying connected.** When the picture comes directly across the internet, the viewer keeps a second, paused connection to the same computer through the relay. If the direct path stops carrying anything while the relay still works (a firewall that starts dropping UDP, a router that changes the computer's address), the viewer switches to it after about 1.5 s without a byte, longer on a slow path, instead of waiting 4 s for the session to end and reconnecting; the computer keeps you in its viewer list, and keeps your control and its changed resolution. The picture comes back from a fresh keyframe. The other way round, a session that had to start on the relay because a direct path failed for a moment keeps trying a direct connection beside it (no sooner than direct connections are paused after such a failure, 10 s at first) and moves onto it as soon as it connects. Neither helps when this computer's own network changes, from Wi-Fi to mobile data say: both connections end and the viewer reconnects as before. A session within one local network, a relay-only session, and a computer on an older pb-mapper have no second connection.
 
 **The pointer** takes the remote computer's shape (a text beam over text, a hand over links, resize arrows at window edges). While you control from a desktop, your own pointer changes shape over the picture, to the remote computer's own picture of it where your system has no such pointer (an app's own cursor, or a busy pointer on a Mac), and still moves as quickly as your mouse; a phone draws it. A remote computer on an older pb-mapper shows a plain arrow.
 
