@@ -72,7 +72,10 @@ Future<DesktopDecoders> probeDesktopDecoders() async {
   return decodersFromProbe(
     reply,
     android: Platform.isAndroid,
-    linux: Platform.isLinux && !_linuxSoftwareRenderer,
+    linux:
+        Platform.isLinux &&
+        !_linuxSoftwareRenderer &&
+        _linuxDecoderModuleBundled,
   );
 }
 
@@ -81,6 +84,20 @@ Future<DesktopDecoders> probeDesktopDecoders() async {
 /// (`SoftwareRenderer` in desktop_video.cc).
 bool get _linuxSoftwareRenderer =>
     Platform.environment['FLUTTER_LINUX_RENDERER'] == 'software';
+
+/// Whether this app was built with its GStreamer decoder module, which the
+/// runner loads from the bundle's `lib` (`LoadModule` in desktop_video.cc;
+/// every release bundle has it). An app built where GStreamer's development
+/// files were missing has none and decodes nothing natively, whatever is
+/// installed, so an install would add nothing.
+bool get _linuxDecoderModuleBundled {
+  try {
+    final bundle = File(Platform.resolvedExecutable).parent.path;
+    return File('$bundle/lib/libpb_mapper_desktop_video.so').existsSync();
+  } catch (_) {
+    return false;
+  }
+}
 
 /// What a probe that failed, or has not answered yet, stands for on this
 /// device ([decodersFromProbe]).

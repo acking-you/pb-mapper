@@ -841,7 +841,8 @@ The design and its rules are in `docs/ui-design.md`.
     add (`installable`); the store offers H.265 and the frame-rate choices
     from it. A probe that fails or does not answer is no decoder (JPEG)
     except on Android (`unprobedDesktopDecoders`); a Linux answer without a
-    codec is that codec's decoder missing (`DesktopDecoders.missing`)
+    codec, from an app bundling its decoder module, is that codec's decoder
+    missing (`DesktopDecoders.missing`)
   - `display_refresh.dart`: `DisplayRefresh`, the refresh rate of the
     display the window is on, which a viewer on macOS, Windows and Linux
     sends as `display_refresh` once connected and whenever it changes:
