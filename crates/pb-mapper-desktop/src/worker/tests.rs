@@ -1751,9 +1751,9 @@ fn a_present_a_millisecond_before_the_tick_is_captured_as_it_lands() {
     assert!(waits.iter().all(|wait| wait.is_zero()), "{waits:?}");
 }
 
-/// A viewer joining or pausing that changes only the frame-rate limit keeps
-/// the capture source, with an IDR for the change; a smaller size builds
-/// another.
+/// A viewer joining, pausing or resuming that changes only the frame-rate
+/// limit keeps the capture source, with an IDR for each change; a smaller
+/// size builds another.
 #[test]
 fn a_frame_rate_change_keeps_the_source_and_a_size_change_rebuilds_it() {
     let mut h = Synth::<false>::new(None);
@@ -1766,12 +1766,20 @@ fn a_frame_rate_change_keeps_the_source_and_a_size_change_rebuilds_it() {
     h.run(Duration::from_millis(100));
     assert_eq!(h.engine.limits.max_fps, 30);
     assert_eq!(h.probe.opened(), 1);
-    // The watcher pausing gives the frame rate back.
-    watcher.targets.paused.store(true, Ordering::Release);
-    let sent = h.run(Duration::from_millis(100));
-    assert_eq!(h.engine.limits, LIMITS);
-    assert_eq!(h.probe.opened(), 1);
-    assert!(sent.iter().any(|unit| unit.keyframe));
+    // The watcher pausing gives the frame rate back, and resuming takes it
+    // again, each time without a new source.
+    for _ in 0..3 {
+        watcher.targets.paused.store(true, Ordering::Release);
+        let sent = h.run(Duration::from_millis(400));
+        assert_eq!(h.engine.limits, LIMITS);
+        assert_eq!(h.probe.opened(), 1);
+        assert!(sent.iter().any(|unit| unit.keyframe));
+        watcher.targets.paused.store(false, Ordering::Release);
+        let sent = h.run(Duration::from_millis(400));
+        assert_eq!(h.engine.limits.max_fps, 30);
+        assert_eq!(h.probe.opened(), 1);
+        assert!(sent.iter().any(|unit| unit.keyframe));
+    }
 
     h.join(VideoLimits {
         max_width: 32,
