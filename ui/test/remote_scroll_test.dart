@@ -179,6 +179,10 @@ void main() {
         // macOS's accelerated wheel: two and a half lines.
         await tester.sendEventToBinding(mouse.scroll(Offset(0, -notch * 2.5)));
         expect(_scrolls(h), [hires ? 'scroll 0,-300' : 'wheel 0,-2']);
+        // The half kept toward an older host takes nothing from a notch the
+        // other way.
+        await tester.sendEventToBinding(mouse.scroll(Offset(0, notch)));
+        expect(_scrolls(h), [hires ? 'scroll 0,120' : 'wheel 0,1']);
         await _close(tester, h);
       }
     },
@@ -228,6 +232,41 @@ void main() {
         }
         await tester.pump(const Duration(seconds: 1));
         expect(_scrolls(h), isEmpty, reason: 'a slow pan flings nothing');
+        await _close(tester, h);
+      }
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+  );
+
+  testWidgets(
+    "what a touchpad's travel left short of a step is no part of a wheel's "
+    'notch',
+    (tester) async {
+      for (final hires in [true, false]) {
+        final h = await _surface(tester, capabilities: hires ? _hires : []);
+        final pad = TestPointer(2, PointerDeviceKind.trackpad);
+        final mouse = TestPointer(1, PointerDeviceKind.mouse)..hover(_at);
+        // 25.75 px down: 30 units with 0.9 kept, or 0.86 of a notch kept.
+        await _pan(tester, pad, [25.75]);
+        await tester.sendEventToBinding(pad.panZoomEnd());
+        expect(_scrolls(h), hires ? ['scroll 0,30 ~'] : isEmpty);
+        // Quarter notches down: each as it came, or one notch with the
+        // fourth, not with the first.
+        for (var i = 1; i <= 4; i++) {
+          await tester.sendEventToBinding(mouse.scroll(const Offset(0, 10)));
+          expect(
+            _scrolls(h),
+            hires
+                ? ['scroll 0,30']
+                : i == 4
+                ? ['wheel 0,1']
+                : isEmpty,
+            reason: 'quarter $i, hires $hires',
+          );
+        }
+        // A notch the other way is a whole notch, never one short.
+        await tester.sendEventToBinding(mouse.scroll(const Offset(0, -40)));
+        expect(_scrolls(h), [hires ? 'scroll 0,-120' : 'wheel 0,-1']);
         await _close(tester, h);
       }
     },

@@ -61,9 +61,10 @@ class _RemoteSurfaceState extends State<RemoteSurface>
   /// The mouse buttons this surface pressed on the host, per pointer.
   final _buttons = <int, Set<RemoteButton>>{};
 
-  /// Scrolling not yet a whole step: a notch, or 1/120 of one toward a host
-  /// that takes that.
-  final _scroll = ScrollCarry();
+  /// Scrolling not yet a whole step (a notch, or 1/120 of one toward a host
+  /// that takes that): a wheel's apart from a touchpad's travel and its
+  /// fling, so what one left never shortens the other's next step.
+  final _wheel = ScrollCarry(), _travel = ScrollCarry();
   double _panZoomScale = 1;
 
   /// A touchpad's pan so far, whose velocity starts a fling as it ends:
@@ -330,7 +331,8 @@ class _RemoteSurfaceState extends State<RemoteSurface>
   /// a step is dropped with it.
   void _scrollCancelled() {
     _stopFling();
-    _scroll.clear();
+    _wheel.clear();
+    _travel.clear();
   }
 
   double get _devicePixelRatio =>
@@ -340,7 +342,8 @@ class _RemoteSurfaceState extends State<RemoteSurface>
   /// pixels as Flutter reports them, to the host: to one that takes it, in
   /// 1/120 of a notch, 100 px a notch of travel and a wheel's notch as
   /// this computer's embedder reports one; to any other, in whole notches,
-  /// 30 px of travel each. What falls short of a step waits for the next.
+  /// 30 px of travel each. What falls short of a step waits for the next
+  /// of its kind.
   void _scrollBy(double dx, double dy, {required bool trackpad}) {
     final notch = trackpad
         ? null
@@ -349,17 +352,18 @@ class _RemoteSurfaceState extends State<RemoteSurface>
             devicePixelRatio: _devicePixelRatio,
             windowsLines: WheelLines.value,
           );
+    final carry = trackpad ? _travel : _wheel;
     if (_input.hiresWheel) {
       final (h, v) = notch == null
-          ? _scroll.take(dx * kScrollUnitsPerPixel, dy * kScrollUnitsPerPixel)
-          : _scroll.take(
+          ? carry.take(dx * kScrollUnitsPerPixel, dy * kScrollUnitsPerPixel)
+          : carry.take(
               dx / notch * DesktopScroll.unitsPerNotch,
               dy / notch * DesktopScroll.unitsPerNotch,
             );
       if (h != 0 || v != 0) _input.scroll(h, v, continuous: trackpad);
     } else {
       final per = notch ?? kTrackpadPxPerNotch;
-      final (h, v) = _scroll.take(dx / per, dy / per);
+      final (h, v) = carry.take(dx / per, dy / per);
       if (h != 0 || v != 0) _input.wheel(h, v);
     }
   }

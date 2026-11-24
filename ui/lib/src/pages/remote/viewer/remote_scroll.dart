@@ -74,16 +74,18 @@ abstract final class WheelLines {
 }
 
 /// Whole steps out of fractional amounts, per axis, what falls short of one
-/// kept for the next. An amount within a millionth of a whole step counts
-/// as whole, so steps that add up exactly, as a Windows notch at 150 % in
-/// quarters does, are never one short for rounding.
+/// kept for the next. An amount against the direction of what is kept
+/// drops it first, as the host's carry does, so a turn never comes a step
+/// short. An amount within a millionth of a whole step counts as whole, so
+/// steps that add up exactly, as a Windows notch at 150 % in quarters does,
+/// are never one short for rounding.
 final class ScrollCarry {
   double _x = 0, _y = 0;
 
   /// The whole steps [dx] and [dy] complete with what was kept.
   (int, int) take(double dx, double dy) {
-    _x += dx;
-    _y += dy;
+    _x = _turned(_x, dx) + dx;
+    _y = _turned(_y, dy) + dy;
     final x = _whole(_x), y = _whole(_y);
     _x -= x;
     _y -= y;
@@ -91,6 +93,9 @@ final class ScrollCarry {
   }
 
   void clear() => _x = _y = 0;
+
+  static double _turned(double kept, double amount) =>
+      kept.sign * amount.sign < 0 ? 0 : kept;
 
   static int _whole(double amount) {
     final nearest = amount.roundToDouble();
@@ -101,9 +106,10 @@ final class ScrollCarry {
 /// A trackpad's fling, carried on after the fingers lift as this
 /// computer's own scroll views carry one, since Flutter passes on none of
 /// the system's: on a Mac or an iPad UIKit's normal deceleration (0.998 a
-/// millisecond, `BouncingScrollSimulation`'s friction), elsewhere Android's
-/// (`ClampingScrollSimulation`). It ends when it slows below what a
-/// scroll view still shows, 20 device pixels a second.
+/// millisecond, `BouncingScrollSimulation`'s friction), which ends when it
+/// slows below what a scroll view still shows, 20 device pixels a second;
+/// elsewhere Android's curve (`ClampingScrollSimulation`), which ends at
+/// the time it computes for the fling's speed, as it comes to a stop.
 final class ScrollFling {
   ScrollFling._(this._direction, this._simulation);
 
