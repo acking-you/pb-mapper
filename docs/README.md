@@ -45,6 +45,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [Capture pacing measurements](benchmarks/2026-11-24-capture-pacing/README.md) | `host_send_bench` before and after present-anchored capture pacing, and the Windows and Mac device runs its effect still needs |
 | [Windows host kept awake](benchmarks/2026-11-24-win-keep-awake/README.md) | what a capture call's keep-awake touch costs, and the device checks still outstanding |
 | [Rate-model latch measurements](benchmarks/2026-11-24-rate-model-latch/README.md) | the slow-link suite, with an encoder that budgets per second, before and after the rate-model latch read the last 2 s of QoS ticks instead of two 3 s windows |
+| [Viewer fps cap measurements](benchmarks/2026-11-24-viewer-fps-cap/README.md) | the slow-link suite, three runs before and after the viewer's fps cap measured its decoder, raised in steps scaled to the ceiling and drained a backlog instead of freezing until the IDR |
 
 ## Security
 
