@@ -22,6 +22,8 @@ pb-mapper-protocol.workspace = true
 pb-mapper-server.workspace = true
 
 rand.workspace = true
+# The lossy hop's sockets ask for larger buffers.
+socket2.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true

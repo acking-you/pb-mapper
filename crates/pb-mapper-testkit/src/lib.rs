@@ -26,7 +26,9 @@
 //!
 //! A case that needs a slower network puts a [`shaped_link`] hop, with its
 //! delay and rate, in front of a [`Relay`] and connects through the hop; a
-//! [`shaped_link_each_way`] shapes each direction apart.
+//! [`shaped_link_each_way`] shapes each direction apart. A case about QUIC
+//! over a lossy long path sends its datagrams through a [`lossy_udp`] hop,
+//! which loses, delays and polices them.
 //!
 //! A case about the SDK rather than the CLI entry points builds its own
 //! backend with [`tcp_echo`] or [`udp_echo`], and its tunnel with
@@ -62,6 +64,7 @@ mod echo;
 /// one is test support; the file uses only `pb-mapper-core` and `tracing`.
 #[path = "../../pb-mapper-cli/src/bin/pb-mapper/logging.rs"]
 mod logging;
+mod lossy;
 mod poll;
 mod relay;
 mod sdk;
@@ -71,6 +74,10 @@ mod tunnel;
 
 pub use control::{V2ControlSpec, register_v2_control};
 pub use echo::{Echo, tcp_echo, udp_echo};
+pub use lossy::{
+    LOSSY_SOCKET_BUFFER, LossyCounts, LossyShape, LossyUdp, POLICER_BURST, lossy_udp,
+    lossy_udp_socket,
+};
 pub use relay::{Relay, loopback_direct, loopback_quic};
 pub use sdk::{admin_client, publish, subscribe};
 pub use shaped::{Shape, ShapedLink, shaped_link, shaped_link_each_way};

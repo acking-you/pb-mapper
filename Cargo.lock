@@ -3290,6 +3290,7 @@ dependencies = [
  "pb-mapper-protocol",
  "pb-mapper-server",
  "rand 0.10.2",
+ "socket2 0.6.1",
  "tokio",
  "tokio-util",
  "tracing",
