@@ -255,7 +255,11 @@ pub(crate) enum HostMessage {
         /// Monotonic for the session, never reused.
         frame_id: u64,
         keyframe: bool,
-        /// A static-desktop liveness re-encode.
+        /// A re-encode of an unchanged picture: the liveness repeat of a
+        /// static desktop, a keyframe of one, or, from a host whose encoder
+        /// refines, a refinement repeat of a picture that just stopped
+        /// changing, which sharpens it. Presented as any unit; not a new
+        /// picture for frame rates.
         duplicate: bool,
         width: u32,
         height: u32,

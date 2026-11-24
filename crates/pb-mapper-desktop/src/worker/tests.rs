@@ -2,7 +2,10 @@ use super::*;
 use crate::{
     CursorPosition, DRAIN_POLL, Display, EncodedFrame, Input, InputEvent, KeyframeReason,
     VideoFormat, VideoRate,
-    codec::present_waiter::{FRESH_FOR, Idle, Status},
+    codec::{
+        present_waiter::{FRESH_FOR, Idle, Status},
+        refine::Repeats,
+    },
     error,
     idr::IdrReason,
     lane::LANE_CAPACITY,
@@ -372,7 +375,7 @@ impl Backend for Fake {
 /// A capture thread that thread C arms, as the Windows encoder's, which
 /// follows the encoder's rule (`present_waiter::Idle`): what it published
 /// and how far it looked, and what each capture call did. Its look answers
-/// at once.
+/// at once, and each unit, 8 bytes, comes out in the call that submits it.
 struct Armed {
     status: Status,
     /// When the picture that waits was published.
@@ -380,6 +383,10 @@ struct Armed {
     created: Instant,
     last_submit: Option<Instant>,
     keyframe: bool,
+    /// When the encoder repeats the last picture on its own: liveness only,
+    /// unless a test gives it bursts.
+    repeats: Repeats,
+    pts: u64,
     /// Each capture call: when, and whether it armed the thread or sent a
     /// new picture or a repeat.
     calls: Vec<(Instant, Call)>,
@@ -388,7 +395,10 @@ struct Armed {
 enum Call {
     Arm,
     Fresh,
+    /// A keyframe, or the liveness repeat: it spends the tick.
     Repeat,
+    /// A refinement repeat, which leaves the tick and the thread armed.
+    Refine,
 }
 impl Armed {
     fn new(created: Instant) -> Self {
@@ -398,6 +408,8 @@ impl Armed {
             created,
             last_submit: None,
             keyframe: false,
+            repeats: Repeats::default(),
+            pts: 0,
             calls: Vec::new(),
         }
     }
@@ -410,6 +422,7 @@ impl Armed {
             last_submit: self.last_submit,
             keyframe: self.keyframe,
             look: Self::LOOK,
+            repeats: self.repeats,
         }
     }
     const LOOK: Duration = Duration::from_millis(32);
@@ -428,7 +441,8 @@ impl Armed {
     /// As the encoder's submit: the published picture, unless it waited
     /// `FRESH_FOR`, when it is held back while the thread looks past it,
     /// and goes once the look answered; else a due repeat once the thread
-    /// found nothing newer; else arm the thread.
+    /// found nothing newer, a refinement repeat leaving it armed; else arm
+    /// the thread.
     fn submit(
         &mut self,
         now: Instant,
@@ -449,32 +463,48 @@ impl Armed {
         {
             Call::Fresh
         } else if self.rule().repeat_now(now) {
-            Call::Repeat
+            if self.rule().refines(now) {
+                Call::Refine
+            } else {
+                Call::Repeat
+            }
         } else {
             Call::Arm
         };
         self.calls.push((now, call));
-        *submitted = call != Call::Arm;
+        *submitted = !matches!(call, Call::Arm | Call::Refine);
         if call == Call::Arm {
             self.status.armed.get_or_insert(now);
             self.status.idle = true;
             return None;
         }
-        self.status = Status::default();
-        self.published_at = None;
+        if call != Call::Refine {
+            self.status = Status::default();
+            self.published_at = None;
+        }
         self.last_submit = Some(now);
+        self.pts += 1;
         let keyframe = std::mem::take(&mut self.keyframe);
+        let duplicate = call != Call::Fresh;
+        match call {
+            Call::Refine => self.repeats.refined(now, self.pts),
+            _ if !duplicate || keyframe => self.repeats.fresh(now),
+            _ => {}
+        }
+        let bytes = vec![1; 8];
+        self.repeats
+            .output(self.pts, duplicate, keyframe, bytes.len(), None);
         Some(EncodedFrame {
             format: VideoFormat {
                 codec,
                 width: 16,
                 height: 10,
                 keyframe,
-                duplicate: call == Call::Repeat,
+                duplicate,
                 gop: u32::MAX,
                 ..VideoFormat::default()
             },
-            bytes: vec![1; 8],
+            bytes,
         })
     }
 }
@@ -1938,6 +1968,94 @@ fn an_armed_capture_thread_is_taken_as_it_publishes_and_never_polled() {
     assert_eq!(last(&h), Some((taken, Call::Arm)));
     assert_eq!(h.next_capture(), taken);
     assert_eq!(last(&h), Some((taken, Call::Fresh)));
+    assert!(!h.sent().last().unwrap().duplicate);
+}
+
+/// An armed capture thread whose encoder refines a still picture, as the
+/// Windows encoder does where its GPU earned it: once a picture whose unit
+/// filled its budget has stood still `REFINE_AFTER`, thread C sends its
+/// refinement repeats a period apart, each leaving the tick and the thread
+/// armed, until two small outputs after `REFINE_MIN` end the burst, and the
+/// liveness repeat follows 250 ms later. A present that lands right after a
+/// refinement repeat goes at once, where one after a liveness repeat waits
+/// for the next tick.
+#[test]
+fn a_refinement_burst_keeps_the_tick_armed_for_the_next_present() {
+    use crate::codec::{
+        pipeline::LIVENESS_INTERVAL,
+        refine::{REFINE_AFTER, REFINE_MIN},
+    };
+    let mut h = Harness::new(true, None);
+    let period = Duration::from_secs(1) / 60;
+    let start = h.now();
+    let mut armed = Armed::new(start);
+    // Its 8-byte units fill an 8-byte budget (3 840 bit/s at a nominal
+    // 60), and as repeats are under `REFINE_DONE_BYTES`.
+    armed.repeats = Repeats::new(true, 3_840, 60, 60);
+    *h.fake.armed.lock() = Some(armed);
+    let calls = |h: &Harness| {
+        h.fake
+            .armed
+            .lock()
+            .as_ref()
+            .map(|armed| armed.calls.clone())
+            .unwrap()
+    };
+    let last = |h: &Harness| calls(h).last().copied();
+    let publish = |h: &Harness| h.fake.armed.lock().as_mut().unwrap().publish(h.now());
+    let after = |h: &Harness, from: Instant| -> Vec<(Instant, Call)> {
+        calls(h).into_iter().filter(|(at, _)| *at > from).collect()
+    };
+
+    h.step();
+    let first = start + Duration::from_millis(40);
+    *h.now.lock() = first;
+    publish(&h);
+    h.step();
+    assert_eq!(last(&h), Some((first, Call::Fresh)));
+    h.run(Duration::from_secs(1), true);
+    let spell = after(&h, first);
+    let refined: Vec<Instant> = spell
+        .iter()
+        .filter(|(_, call)| *call == Call::Refine)
+        .map(|(at, _)| *at)
+        .collect();
+    let expected: Vec<Instant> = (0..u32::from(REFINE_MIN))
+        .map(|n| first + REFINE_AFTER + period * n)
+        .collect();
+    assert_eq!(refined, expected, "{spell:?}");
+    // Armed once after the picture, then the burst, then liveness only.
+    let kinds: Vec<Call> = spell.iter().map(|(_, call)| *call).take(6).collect();
+    assert_eq!(
+        kinds,
+        [
+            Call::Arm,
+            Call::Refine,
+            Call::Refine,
+            Call::Refine,
+            Call::Repeat,
+            Call::Arm
+        ],
+        "{spell:?}"
+    );
+    let ended = *refined.last().unwrap();
+    assert_eq!(spell[4].0, ended + LIVENESS_INTERVAL);
+
+    // A new picture that fills its budget refines in turn; a present that
+    // lands just after its first refinement repeat is taken at once.
+    publish(&h);
+    h.run(period * 3, true);
+    let (second, _) = after(&h, ended)
+        .into_iter()
+        .find(|(_, call)| *call == Call::Fresh)
+        .unwrap();
+    let refine = second + REFINE_AFTER;
+    let to = refine + Duration::from_millis(1);
+    h.run(to - h.now(), true);
+    assert_eq!(last(&h), Some((refine, Call::Refine)));
+    publish(&h);
+    h.step();
+    assert_eq!(last(&h), Some((to, Call::Fresh)));
     assert!(!h.sent().last().unwrap().duplicate);
 }
 

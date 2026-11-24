@@ -133,7 +133,9 @@ pub trait Backend: 'static {
     /// Whether the last `capture_video` handed a tick to the capture source,
     /// or spent it on a full encoder. A source with no new picture to encode,
     /// or whose encoder has not asked for input yet, can leave the tick
-    /// armed, even when `capture_video` collected the previous tick's output.
+    /// armed, even when `capture_video` collected the previous tick's output;
+    /// so can one that sent a refinement repeat of a still picture, which
+    /// paces those itself.
     /// Thread C asks a push source again when it wakes thread C or at its
     /// `capture_idle_until`, and a pull source, which names no time, after
     /// `capture_poll()` for 250 ms after an input thread C injected or a new
@@ -146,7 +148,8 @@ pub trait Backend: 'static {
     /// submitted, and how many presents it covers. Thread C anchors its next
     /// tick on it, so a display presenting at the pace is taken as each
     /// present lands. `None`, the default, for a call that submitted
-    /// nothing, a repeat of an unchanged picture (liveness or a keyframe),
+    /// nothing, a repeat of an unchanged picture (liveness, a keyframe or a
+    /// refinement),
     /// and a picture the source cannot date; thread C then keeps an even
     /// grid. A time later than the call began counts as its start, and one
     /// more than a period old as `None`.

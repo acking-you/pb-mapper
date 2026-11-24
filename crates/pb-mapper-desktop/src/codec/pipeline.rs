@@ -20,7 +20,9 @@ const _: () = assert!(
     "a late unit is discarded before the encoder counts as stalled"
 );
 /// A static desktop still submits a verified repeat this often, which keeps a
-/// presented frame fresh enough to authorise input.
+/// presented frame fresh enough to authorise input; an encoder that refines
+/// a picture that just stopped changing (`refine.rs`) repeats it sooner
+/// first.
 pub(crate) const LIVENESS_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Whether an output collected at `now`, of a unit submitted at `submitted`,
