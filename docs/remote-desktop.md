@@ -1718,8 +1718,10 @@ In a test loop on an M6, fresh full-screen noise at 1920x1080, 4 Mbit/s and
 169 and H.265 135. At 2560x1440 the counts were 90 against 158 to 162. At
 120 FPS the bound likewise kept about every other picture, against 22 to 90
 of about 360 without it. Scrolling text, and the busy pattern (text with
-image blocks under fresh grain), dropped none either way. The 1.5 s after
-an IDR dropped about as many either way.
+image blocks under fresh grain), dropped none either way in steady state.
+In the 1.5 s after an IDR they dropped about as many either way, 15 to 37
+pictures a window, while noise dropped half its pictures with the bound
+against about three quarters without it.
 
 The host counts the pictures VideoToolbox drops. Thread C traces them as
 `macos_encoder_dropped`, at most once a second, from its drain.
@@ -1735,18 +1737,22 @@ thread C, and the next tick sends the last picture again. The rules
 (`codec/resubmit.rs`):
 
 - Only the newest unit counts. A drop with a later unit in flight, the
-  mailbox's included, is left to that unit.
-- A dropped duplicate is never sent again: the viewer has it.
-- The resubmit goes as a new picture, not a duplicate, since the viewer
-  never had it, and it counts toward the viewer's `received_fps` when kept.
-- A picture is sent again at most twice. A new picture, or one the encoder
-  keeps, starts the count again.
+  mailbox's included, is left to that unit, and so is one reported just
+  before thread C hands the next unit over.
+- A picture the encoder kept before is never sent again.
+- A picture is sent again at most twice; a new picture starts the count
+  again. After that the liveness repeat carries it.
 - A newer picture that arrived meanwhile goes instead.
+
+Which unit is a duplicate is decided as the encoder keeps it: only one whose
+picture a unit before it carried out. A resubmit, or a repeat of a picture
+whose every unit was dropped, is the viewer's first sight of that picture,
+and counts toward its `received_fps` and the host's unique frames.
 
 In the test loop: an IDR of a still 1920x1080 screen of text, at 60 FPS,
 then 1 to 12 new pictures. At 1 Mbit/s the last new picture took 250 ms or
 more, or never came within 600 ms, in 5 of 12 trials instead of 10, for
-each codec. In 5 trials a resubmit brought it within 22 to 40 ms. At 2
+each codec. In 5 trials a resubmit brought it within 23 to 40 ms. At 2
 Mbit/s, 1 trial of 12 took that long before and after, and at 4 Mbit/s
 none did.
 
@@ -1760,14 +1766,16 @@ measured on the same Mac and not made:
   to 18 of the 20 pictures after it. Mac sessions still start at `nominal`;
   see [Encoder rate model per GPU](#encoder-rate-model-per-gpu).
 - *Standard rate control above low latency's knee.* At a nominal 120 FPS,
-  low latency held 118 to 120 pictures a second at 2560x1440, 108 to 113 at
-  2560x1664, 91 to 93 at 3024x1964 and 59 to 64 at 3840x2160. Without the
-  data-rate cap, standard rate control held 118 to 120 at every size but
-  on the busy pattern at 4K (87). But it coded scrolling text 12 to 15 dB
-  below low latency while spending 3.6 to 7.2 times its bits a second, and
-  it overspent the busy pattern by a third at 3024x1964 whatever mean it
-  was set to. With the cap it fell to 69 to 78 a second after 3 s at
-  3024x1964 and 3840x2160. H.265 stays on low latency at every size.
+  low latency held 119 to 120 pictures a second at 2560x1440, 106 to 113
+  at 2560x1664, 91 to 93 at 3024x1964 and 60 to 63 at 3840x2160. Without
+  the data-rate cap, standard rate control held 118 to 120 at every size
+  but on the busy pattern at 4K (103 to 104). But, set to the target, it
+  coded scrolling text 11 to 15 dB below low latency while spending 3.8 to
+  7.1 times its bits a second, and it overspent the busy pattern by a
+  third at 3024x1964 whatever mean it was set to. With the cap it fell to
+  71 to 78 a second after 3 s at 3024x1964 and 3840x2160. The planned
+  switch's conditions also held at 2560x1664, where low latency kept 106
+  to 113. H.265 stays on low latency at every size.
 - *Holding the old cap for a second after a bitrate cut.* A cut from 8 to 2
   Mbit/s dropped no picture, and the first unit after it was within 1.2
   times its new budget. So a new bitrate still sets its cap at once.
@@ -1776,8 +1784,10 @@ The tests are ignored tests in `platform/macos/vt_measure.rs` and
 `platform/macos/tests.rs`: `video_toolbox_drops`, `video_toolbox_resubmit`,
 `video_toolbox_rate_model_follow_h264` and `_h265`, `video_toolbox_120` and
 `video_toolbox_rate_step`. They pace a real session on IOSurface pictures
-painted into a pool as ScreenCaptureKit fills its own, and need no Screen
-Recording grant
+and need no Screen Recording grant. Those in `vt_measure.rs` paint each new
+picture into a pool of eight surfaces as it is handed over, as
+ScreenCaptureKit fills its own; the follow-pace sweeps paint each picture
+onto one of three surfaces in turn
 ([measurements](benchmarks/2026-11-24-macos-rate-model/README.md)). A live
 session's effect is still to be seen on a Mac host, behind a shaped link.
 
@@ -2055,7 +2065,7 @@ the fitted model (the same ±25% classifier, `codec/rate_fit.rs`); the largest
 unit after a 1 s pause; each encoder's `macos_encoder_opened` line; and a
 summary line a case. A case that fits neither model is reported, not failed.
 Run them in release mode on a quiet Mac, one at a time:
-`cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture --test-threads=1 video_toolbox_rate_model`.
+`cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture --test-threads=1 video_toolbox_rate_model_h26`.
 Their pacing follows a Mac host's submit gate (two units in flight, a busy
 submit thread leaving the tick armed).
 
@@ -2069,6 +2079,9 @@ start scaled by the size (`bpf`). After a step at 60, two sweeps run at 30,
 
 - `nominal` keeps the bitrate at bpf × 60, as a session starting there does;
 - `timestamp` sets bpf × the pace, live.
+
+They run as the tests above do, with the filter
+`video_toolbox_rate_model_follow`, about 5.5 minutes each.
 
 Each step's spend a second, over bpf × the pace (what QoS means to spend),
 with low latency, at 30 / 15 / 10 / 5 FPS

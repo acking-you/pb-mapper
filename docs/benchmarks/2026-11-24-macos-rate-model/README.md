@@ -80,8 +80,7 @@ does not need.
 
 ### Raw output
 
-The tables below come from these runs, on this branch's final measurement
-code:
+The tables below come from these runs:
 
 - [drops](drops.txt): `video_toolbox_drops`;
 - [resubmit](resubmit.txt): `video_toolbox_resubmit`;
@@ -90,15 +89,14 @@ code:
   `video_toolbox_rate_model_follow_h264` and `_h265`;
 - [120 FPS](120.txt): `video_toolbox_120`.
 
-Some details of those runs:
+The resubmit and 120 FPS runs were made on this branch's final code. The
+others were made before three review fixes that leave what they measure as
+it was: a unit handed over after a drop cancels that drop's resubmit, a
+unit is marked a duplicate as the encoder keeps it, and the 120 FPS test
+prints its refusals. They print what the final code prints.
 
-- The resubmit and rate-step runs kept a document of 600 pictures. No case
-  in them painted that many new pictures.
-- The 120 FPS run's build also carried the H.265 switch under evaluation
-  (below). Its `past_knee` column is that rule's verdict. The arms named
-  `std_*` ran that switch's uncapped mode, with the bitrate set so that the
-  mean was the arm's share of the target. That is the setting the test knob
-  makes now.
+The resubmit and rate-step runs kept a document of 600 pictures. No case
+in them painted that many new pictures.
 
 Earlier runs are kept for the record. They cycled a fixed ring of 12
 pictures painted once, and their before arm was the build before each
@@ -147,8 +145,11 @@ way, and PSNR within 0.25 dB in all but two cases. The two were H.265 busy
 at 1920x1080 and 60 FPS (35.27 → 35.88 dB) and at 2560x1440 and 60 FPS
 (35.88 → 33.93 dB).
 
-The 1.5 s after an IDR dropped the same either way, for instance 22 of 90
-H.264 busy pictures at 1920x1080 and 60 FPS.
+In the 1.5 s after an IDR, the busy pattern and text dropped about as many
+either way, 15 to 37 pictures a window: for instance 22 of 90 H.264 busy
+pictures at 1920x1080 and 60 FPS in both arms. Noise dropped fewer with the
+bound: 45 of 90 at 60 FPS and 87 to 90 of about 180 at 120 FPS, against 65
+to 67 and 130 to 134 without it.
 
 No content here dropped a picture in steady state without the bound, except
 noise. That includes grain over scrolling text and image blocks. A session
@@ -175,15 +176,20 @@ carries it. Trials where that took 250 ms or more, or never came within
 | 4 Mbit/s | 0 → 0 | 0 → 0 |
 
 At 1 Mbit/s, after the change, the picture came within 250 ms in 7 trials.
-In 5 of those a resubmit carried it, 22 to 40 ms after its submit: one or
+In 5 of those a resubmit carried it, 23 to 40 ms after its submit: one or
 two ticks, plus the encode. In the other 5 trials it came only with a
-liveness repeat, or not within 600 ms.
+liveness repeat (291 and 540 ms), or not within 600 ms.
 
-At 2 Mbit/s the one long trial moved: before it was k = 3 (256 to 257 ms),
-after it was k = 1 (291 ms). The resubmits change what the rate control has spent. At
-4 Mbit/s one trial a codec now came by a resubmit, about 22 ms after its
-submit, where every trial before came with the picture itself, within
-7 ms.
+At 2 Mbit/s the one long trial moved: before it was k = 3 (257 ms), after
+it was k = 1 (291 ms), carried by a liveness repeat. At 4 Mbit/s every
+trial in both arms came with the picture itself, within 8 ms.
+
+An earlier run of the same test ([resubmit-earlier](resubmit-earlier.txt))
+was made before a unit handed over after a drop cancelled that drop's
+resubmit, and before a repeat of a picture every unit of which was dropped
+counted as new. It gave the same counts. It differed at 4 Mbit/s, where one
+trial a codec came by a resubmit, about 22 ms after its submit. One run of
+each cannot say whether the change or the run made that difference.
 
 A resubmit therefore helps only after the payback's first drops. The device
 check still needed is a host behind a 2 Mbit/s link, taking control and
@@ -258,43 +264,48 @@ frame scaled by the size. The arms:
   and 0.75 of it.
 
 Each case runs 1 s. It is then measured for 2 s (early) and for the next 3 s
-(late).
+(late). Besides units a second, it prints refusals a second
+(`refused_per_s`): ticks skipped for two units in flight, and submits that
+found the submit thread busy, which `macos_encoder_load` counts as
+`gate_ticks` and `armed_refusals`.
 
 H.265 paced at 120, units a second (late window):
 
 | Size | Content | Low latency | Standard, capped | Standard, uncapped |
 | --- | --- | ---: | ---: | ---: |
-| 2560x1440 | Text | 119.7 | 119.0 | 119.7 |
-| 2560x1440 | Busy | 118.7 | 116.7 | 119.7 |
-| 2560x1664 | Text | 113.0 | 105.7 | 120.0 |
-| 2560x1664 | Busy | 108.0 | 104.7 | 119.7 |
-| 3024x1964 | Text | 92.7 | 77.7 | 119.7 |
-| 3024x1964 | Busy | 90.7 | 76.7 | 119.0 |
-| 3840x2160 | Text | 63.7 | 70.7 | 118.7 |
-| 3840x2160 | Busy | 58.7 | 69.0 | 87.3 |
+| 2560x1440 | Text | 120.3 | 118.7 | 119.7 |
+| 2560x1440 | Busy | 119.3 | 118.3 | 119.7 |
+| 2560x1664 | Text | 113.3 | 106.0 | 119.7 |
+| 2560x1664 | Busy | 106.0 | 104.0 | 119.7 |
+| 3024x1964 | Text | 92.7 | 78.0 | 120.0 |
+| 3024x1964 | Busy | 90.7 | 76.3 | 120.0 |
+| 3840x2160 | Text | 63.3 | 71.0 | 119.3 |
+| 3840x2160 | Busy | 60.0 | 71.0 | 103.3 |
 
 Capped standard rate control held 120 a second at the large sizes for its
-first 2 s, then fell to about 70. Uncapped, it held the pace except on the
+first 2 s, then fell to 71 to 78. Uncapped, it held the pace except on the
 busy pattern at 4K.
 
 The same cases, quality and spend (late window):
 
 | Size | Content | Low latency: PSNR (dB), produced / target | Uncapped at the target | Uncapped at 0.75 |
 | --- | --- | --- | --- | --- |
-| 3024x1964 | Text | 52.2, 0.25 | 37.4, 0.90 | 28.6, 0.64 |
-| 3024x1964 | Busy | 35.4, 1.10 | 27.0, 1.33 | 27.0, 1.33 |
-| 3840x2160 | Text | 52.1, 0.12 | 40.0, 0.86 | 32.1, 0.70 |
-| 3840x2160 | Busy | 35.2, 0.97 | 27.2, 0.94 | 27.2, 0.93 |
+| 3024x1964 | Text | 52.2, 0.24 | 37.1, 0.91 | 28.6, 0.64 |
+| 3024x1964 | Busy | 35.8, 0.99 | 27.0, 1.34 | 27.0, 1.35 |
+| 3840x2160 | Text | 52.1, 0.12 | 40.9, 0.85 | 32.1, 0.70 |
+| 3840x2160 | Busy | 35.5, 1.04 | 27.2, 1.11 | 27.2, 1.11 |
 
-Standard rate control coded scrolling text 12 to 24 dB below low latency,
-while spending 2.6 to 7.2 times its bits a second. Its quality was still
-rising over the 5 s: at 3840x2160 it was 33.2 dB early and 40.0 late.
+Uncapped, standard rate control coded scrolling text 11 to 24 dB below low
+latency at these sizes, while spending 2.7 to 7.1 times its bits a second.
+Its quality was still rising over the 5 s: at 3840x2160 at the target it
+was 33.6 dB early and 40.9 late.
 
-On the busy pattern it spent the same whatever mean it was set to. At
-3024x1964 that was 1.33 of the target.
+On the busy pattern it spent the same whatever mean it was set to: 1.34 to
+1.35 of the target at 3024x1964, 1.11 to 1.12 at 3840x2160 and 1.49 at the
+two smaller sizes.
 
 H.264 standard rate control, uncapped, held 120 units a second early at
-3024x1964 and 88 to 96 at 3840x2160, and fell to 68 to 79 late at both.
+3024x1964 and 90 to 95.5 at 3840x2160, and fell to 67 to 81 late at both.
 
 The plan would switch a low-latency H.265 session to uncapped standard rate
 control when, over a 1 s window, the session was paced at 0.9 of the
@@ -302,22 +313,32 @@ nominal rate or more, encoded under 0.95 of the pace, and was refused at
 least a tenth of the nominal rate's ticks. Its acceptance asked for four
 things at 3840x2160 and 3024x1964, and one at the smaller sizes:
 
-- at least 115 units a second: met except busy at 4K (87);
-- dwell p95 of 18 ms or less: met except busy at 4K (19.0 ms);
-- produced at most 1.15 × target on grain: not met at 3024x1964 (1.33);
-- scroll PSNR within 1.5 dB of low latency: not met (12 to 15 dB below);
-- no switch at 2560x1440 and 2560x1664: the rule fired at 2560x1664, where
-  low latency held 108 to 113 a second.
+- at least 115 units a second: met except busy at 4K (103);
+- dwell p95 of 18 ms or less: met (14.3 to 15.4 ms at the target);
+- produced at most 1.15 × target on grain: not met at 3024x1964 (1.34);
+- scroll PSNR within 1.5 dB of low latency: not met (11 to 15 dB below at
+  the target);
+- no switch at 2560x1440 and 2560x1664: not met. The rule is not in the
+  code, but its three conditions can be read from the columns, over the
+  2 s and 3 s windows rather than 1 s ones. Paced at 120, in three of its
+  four windows, low latency at 2560x1664 encoded 105 to 113 units a
+  second, under 114, with 101 to 106 refusals a second. At 2560x1440 it
+  kept 119 to 120 units a second, and the rule held in no window.
 
 So H.265 stays on low latency. A Mac host at 4K or at a MacBook Pro's
-native size, with a 120 Hz viewer, still gets low latency's 59 to 93
+native size, with a 120 Hz viewer, still gets low latency's 60 to 93
 pictures a second, at its quality.
 
-The QP bound changed low latency's units by at most 7 a second and its PSNR
-by at most 3.1 dB. Both were in the early window paced at 60 under
+The QP bound changed low latency's units by at most 8.5 a second and its
+PSNR by at most 3.1 dB. The largest change in units was H.264 text at
+3024x1964 in the early window at 120, with no picture dropped in either
+arm. The largest in PSNR was in the early window paced at 60 under
 `timestamp`, where the bound kept pictures that the payback of the
-session's IDR dropped without it: H.265 text at 2560x1664 dropped 14 of
-120 without it and none with it.
+session's IDR dropped without it: H.265 text at 2560x1440 dropped 8 of 120
+without it and none with it.
+
+The run made on the build the switch was evaluated on is not kept, since
+that build is in no commit; this run, on the final code, replaces it.
 
 ## Bitrate cut
 

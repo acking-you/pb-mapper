@@ -670,7 +670,7 @@ fn kind(unit: Unit) -> &'static str {
 /// `MacVideo::submit`'s policy over the rig's encoder, as a still screen
 /// with `fresh` new pictures waiting meets it: a new picture each due tick
 /// while there are any, else the last again for a keyframe, a resubmit or
-/// after `LIVENESS_INTERVAL`, marked a duplicate unless it is a resubmit.
+/// after `LIVENESS_INTERVAL`.
 struct Emulated {
     /// The policy resubmits (after) or leaves a drop to the liveness repeat
     /// (before).
@@ -801,7 +801,9 @@ impl Emulated {
 /// `nominal`; pace 120 is both. Each case runs 1 s and is measured over the
 /// next 2 s (`early`) and the 3 s after (`late`), since standard rate
 /// control settles slowly: pictures handed over and units out a second,
-/// VideoToolbox's drops, the dwell (p50, p95), the encode call on the submit
+/// refusals a second (ticks skipped for two units in flight and submits
+/// that found the submit thread busy, `macos_encoder_load`'s `gate_ticks`
+/// and `armed_refusals`), VideoToolbox's drops, the dwell (p50, p95), the encode call on the submit
 /// thread (p50), what it produced against the target, PSNR, and how long
 /// painting a picture took the pacing thread (p50).
 #[test]
@@ -910,14 +912,16 @@ fn case_120(
         ("late", start + EARLY_120, start + LATE_120),
     ] {
         let (submitted, dropped) = (rig.submitted, rig.dropped());
+        let refused = rig.skipped + rig.armed;
         rig.encoder.probe(|probe| probe.calls.clear());
         rig.run(pace, to);
         let mut calls = rig.encoder.probe(|probe| std::mem::take(&mut probe.calls));
         let window = rig.window(from, to);
         report(format_args!(
-            "{label} bitrate={bitrate} window={name} submitted_per_s={:.1} units_per_s={:.1} dropped={} dwell_p50_ms={:.2} dwell_p95_ms={:.2} call_p50_ms={:.2} produced_over_target={:.2} psnr={:.2} paint_p50_us={}",
+            "{label} bitrate={bitrate} window={name} submitted_per_s={:.1} units_per_s={:.1} refused_per_s={:.1} dropped={} dwell_p50_ms={:.2} dwell_p95_ms={:.2} call_p50_ms={:.2} produced_over_target={:.2} psnr={:.2} paint_p50_us={}",
             window.per_second((rig.submitted - submitted) as f64),
             window.per_second(window.units as f64),
+            window.per_second((rig.skipped + rig.armed - refused) as f64),
             rig.dropped() - dropped,
             window.dwell_p50_ms,
             window.dwell_p95_ms,

@@ -472,7 +472,8 @@ Nothing in the SDK crates knows it exists.
     (`avcc.rs`, for VideoToolbox), and the encoder rules both platforms
     share (`pipeline.rs`: late output, first-submit and output waits,
     liveness, what an H.265 failure is), when a picture the encoder dropped
-    is sent again (`resubmit.rs`, used by the macOS encoder); `rate_fit.rs`,
+    is sent again and which unit is a duplicate (`resubmit.rs`, used by the
+    macOS encoder); `rate_fit.rs`,
     test-only, fits a pace sweep to a rate model for the macOS encoder's
     measurement and, by path, `video_bench --pace`
   - `input/`: the input vocabulary a controlling viewer sends (`Input`,
