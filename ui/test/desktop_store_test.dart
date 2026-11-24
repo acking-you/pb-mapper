@@ -1507,4 +1507,33 @@ void main() {
       store.dispose();
     },
   );
+
+  testWidgets(
+    'a picture the runner presents itself names its platform view and is '
+    'greyed there; a Flutter texture names none and takes no grey',
+    (tester) async {
+      for (final viewType in [null, 'pb_mapper/desktop_video_view']) {
+        final api = FakeDesktopApi()..codec = 'h264';
+        final textures = FakeTextures()..platformViewType = viewType;
+        final store = DesktopStore(api, textures: textures.create);
+        final viewer = store.demand(DesktopDemand.viewer);
+        await _live(tester, store, api);
+        final texture = textures.created.single;
+        expect(store.picture.value?.textureId, texture.textureId);
+        expect(store.picture.value?.platformViewType, viewType);
+
+        await store.greyPicture(true);
+        await store.greyPicture(false);
+        expect(texture.greys, viewType == null ? isEmpty : [true, false]);
+
+        // Gone with its texture: nothing left to grey.
+        await store.disconnect();
+        await store.greyPicture(true);
+        expect(texture.greys, hasLength(viewType == null ? 0 : 2));
+
+        viewer.dispose();
+        store.dispose();
+      }
+    },
+  );
 }

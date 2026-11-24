@@ -1,0 +1,30 @@
+source luma       [88, 147, 75, 126, 159, 84, 222, 43]
+decoded luma      [88, 147, 75, 126, 159, 84, 222, 43] (no transfer conversion at encode when equal)
+attachments BGRA        : CV[ITU_R_709_2, ITU_R_709_2, ITU_R_709_2] IOSurface[IOSurfaceColorPrimaries=ITU_R_709_2; IOSurfaceColorSpace=32; IOSurfaceColorSpaceID=32; IOSurfaceTransferFunction=ITU_R_709_2; IOSurfaceYCbCrMatrix=ITU_R_709_2]
+attachments 420v stream : CV[ITU_R_709_2, ITU_R_709_2, ITU_R_709_2] IOSurface[IOSurfaceColorPrimaries=ITU_R_709_2; IOSurfaceColorSpace=32; IOSurfaceColorSpaceID=32; IOSurfaceTransferFunction=ITU_R_709_2; IOSurfaceYCbCrMatrix=ITU_R_709_2]
+attachments 420v layer  : CV[ITU_R_709_2, ITU_R_709_2, IEC_sRGB] IOSurface[IOSurfaceColorPrimaries=ITU_R_709_2; IOSurfaceColorSpace={length = 648, bytes = 0x00000288 6170706c 04000000 6d6e7472 ... 00000000 00000000 }; IOSurfaceTransferFunction=IEC_sRGB; IOSurfaceYCbCrMatrix=ITU_R_709_2]
+sRGB values       224,48,32 | 48,192,64 | 32,64,224 | 128,128,128 | 240,160,16 | 144,48,192 | 240,240,240 | 32,32,32
+VT-BGRA (today)   222,47,31 | 48,192,63 | 32,64,222 | 127,128,127 | 239,159,16 | 143,48,192 | 239,239,239 | 31,31,31
+CA 420v (709 tf)  228,54,34 | 55,200,73 | 36,73,227 | 139,139,139 | 242,170,15 | 154,55,200 | 242,242,242 | 35,35,35  max diff vs VT-BGRA 12
+CA 420v (sRGB tf) 224,48,31 | 49,192,64 | 33,64,223 | 128,128,128 | 240,160,17 | 144,48,193 | 240,240,240 | 31,31,31  max diff vs VT-BGRA 2
+attachments retagged    : CV[ITU_R_709_2, ITU_R_709_2, IEC_sRGB] IOSurface[IOSurfaceColorPrimaries=ITU_R_709_2; IOSurfaceColorSpace=32; IOSurfaceColorSpaceID=32; IOSurfaceTransferFunction=IEC_sRGB; IOSurfaceYCbCrMatrix=ITU_R_709_2]
+CA 420v (retagged) 228,54,34 | 55,200,73 | 36,73,227 | 139,139,139 | 242,170,15 | 154,55,200 | 242,242,242 | 35,35,35  max diff vs VT-BGRA 12
+orientation: CGImage contents top band (0, 0, 0) bottom band (254, 254, 254)
+orientation: 420v surface top band     (0, 0, 0) bottom band (255, 255, 255)
+CA CGImage(sRGB) of VT-BGRA 222,47,31 | 48,192,63 | 32,64,222 | 127,128,127 | 239,159,16 | 143,48,192 | 239,239,239 | 31,31,31
+CA 420v layer path          224,48,31 | 49,192,64 | 33,64,223 | 128,128,128 | 240,160,17 | 144,48,193 | 240,240,240 | 31,31,31  max diff 2
+    CV[ITU_R_709_2, ITU_R_709_2, IEC_sRGB] IOSurface[IOSurfaceColorPrimaries=ITU_R_709_2; IOSurfaceTransferFunction=IEC_sRGB; IOSurfaceYCbCrMatrix=ITU_R_709_2]
+retag transfer, drop CGColorSpace      224,48,31 | 49,192,64 | 33,64,223 | 128,128,128 | 240,160,17 | 144,48,193 | 240,240,240 | 31,31,31  max diff 2
+    CV[ITU_R_709_2, ITU_R_709_2, IEC_sRGB] IOSurface[IOSurfaceColorPrimaries=ITU_R_709_2; IOSurfaceColorSpace=15; IOSurfaceColorSpaceID=15; IOSurfaceTransferFunction=IEC_sRGB; IOSurfaceYCbCrMatrix=ITU_R_709_2]
+retag transfer + CGColorSpace sRGB     224,48,31 | 49,192,64 | 33,64,223 | 128,128,128 | 240,160,17 | 144,48,193 | 240,240,240 | 31,31,31  max diff 2
+    CV[ITU_R_709_2, ITU_R_709_2, IEC_sRGB] IOSurface[IOSurfaceColorPrimaries=ITU_R_709_2; IOSurfaceColorSpace=kCGColorSpaceSRGB; IOSurfaceColorSpaceID=32; IOSurfaceTransferFunction=IEC_sRGB; IOSurfaceYCbCrMatrix=ITU_R_709_2]
+retag transfer + IOSurfaceColorSpace   224,48,31 | 49,192,64 | 33,64,223 | 128,128,128 | 240,160,17 | 144,48,193 | 240,240,240 | 31,31,31  max diff 2
+    CV[ITU_R_709_2, ITU_R_709_2, IEC_sRGB] IOSurface[IOSurfaceColorPrimaries=ITU_R_709_2; IOSurfaceColorSpace={length = 648, bytes = 0x00000288 6170706c 04000000 6d6e7472 ... 00000000 00000000 }; IOSurfaceTransferFunction=IEC_sRGB; IOSurfaceYCbCrMatrix=ITU_R_709_2]
+retag transfer + space from attachments 224,48,31 | 49,192,64 | 33,64,223 | 128,128,128 | 240,160,17 | 144,48,193 | 240,240,240 | 31,31,31  max diff 2
+grey expected (GreyStill's matrix) 42,42,42 | 76,76,76 | 34,34,34 | 64,64,64 | 83,83,83 | 39,39,39 | 119,119,119 | 16,16,16
+grey CIColorMatrix on content      85,85,85 | 122,122,122 | 61,61,61 | 92,92,92 | 129,129,129 | 69,69,69 | 176,176,176 | 20,20,20  max diff 57
+grey saturationBlendMode + 50% black 49,49,49 | 67,67,67 | 36,36,36 | 64,64,64 | 84,84,84 | 46,46,46 | 120,120,120 | 16,16,16  max diff 9
+grey colorBlendMode + 50% black 49,49,49 | 67,67,67 | 36,36,36 | 64,64,64 | 84,84,84 | 46,46,46 | 120,120,120 | 16,16,16  max diff 9
+snapshot, BGRA (texture)   226,54,34 | 55,199,72 | 35,73,226 | 138,139,138 | 241,169,14 | 154,55,199 | 241,241,241 | 34,34,34
+snapshot, 420v (layer)     222,47,31 | 48,192,63 | 32,64,222 | 127,128,127 | 239,159,16 | 143,48,192 | 239,239,239 | 31,31,31  max diff 11
+snapshot, 420v vs sRGB src max diff 2 ; BGRA vs sRGB src 11

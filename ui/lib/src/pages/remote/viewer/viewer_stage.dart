@@ -1,6 +1,8 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart' show PlatformViewHitTestBehavior;
+import 'package:flutter/services.dart' show StandardMessageCodec;
 import 'package:flutter/widgets.dart';
 
 import '../../../common/l10n_extension.dart';
@@ -46,6 +48,7 @@ class ViewerStage extends StatefulWidget {
     this.cursor,
     this.peerCursors,
     this.localPointer = false,
+    this.greyPicture,
   });
 
   /// The stage over [desktop]'s own slices.
@@ -81,6 +84,7 @@ class ViewerStage extends StatefulWidget {
     cursor: desktop.cursor,
     peerCursors: desktop.peerCursors,
     localPointer: localPointer,
+    greyPicture: desktop.greyPicture,
   );
 
   final ValueListenable<DesktopSessionView> session;
@@ -116,6 +120,9 @@ class ViewerStage extends StatefulWidget {
   /// A desktop viewer: the local pointer hovers the picture, and takes the
   /// host's shape there while it controls (see [RemotePointerLook]).
   final bool localPointer;
+
+  /// Greys a picture the runner presents itself (see [GreyStill]).
+  final Future<void> Function(bool on)? greyPicture;
 
   @override
   State<ViewerStage> createState() => _ViewerStageState();
@@ -188,13 +195,29 @@ class _ViewerStageState extends State<ViewerStage> {
       valueListenable: picture,
       builder: (context, picture, _) {
         final id = picture?.textureId;
-        return id != null
-            ? Texture(
+        if (id == null) return JpegPicture(image: jpegImage);
+        final viewType = picture?.platformViewType;
+        // A runner that presents pictures itself (the macOS layer) shows
+        // them in its own view, which Flutter composites and transforms as
+        // it would the texture. It takes hits as the texture does; the
+        // pointer's events still reach Flutter through the native view. It
+        // never takes the keyboard focus, which would hand the keys to a
+        // view that wants none.
+        return viewType != null
+            ? ExcludeFocus(
+                child: AppKitView(
+                  key: ValueKey(id),
+                  viewType: viewType,
+                  creationParams: <String, Object?>{'textureId': id},
+                  creationParamsCodec: const StandardMessageCodec(),
+                  hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+                ),
+              )
+            : Texture(
                 key: ValueKey(id),
                 textureId: id,
                 filterQuality: FilterQuality.low,
-              )
-            : JpegPicture(image: jpegImage);
+              );
       },
     );
     return Stack(
@@ -226,7 +249,12 @@ class _ViewerStageState extends State<ViewerStage> {
                 : scene,
           ),
         ),
-        GreyStill(session: session, viewport: viewport),
+        GreyStill(
+          session: session,
+          viewport: viewport,
+          picture: picture,
+          greyPicture: widget.greyPicture,
+        ),
         if (peerCursors != null)
           RemotePeerCursorLayer(viewport: viewport, peerCursors: peerCursors),
         RemoteCursorLayer(viewport: viewport, input: input, pointer: pointer),
