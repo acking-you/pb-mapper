@@ -5,8 +5,8 @@ use super::{
     lan::{self, Assessment},
 };
 use crate::diagnostics::{
-    CandidateCounts, Diagnostics, DirectLink, LanEvidence, LinkKind, LinkStats, LinkVia,
-    SetupTimings,
+    CandidateCounts, CongestionControl, Diagnostics, DirectLink, LanEvidence, LinkKind, LinkStats,
+    LinkVia, SetupTimings,
 };
 use pb_mapper_protocol::direct::{AddressFamily, LinkSummary};
 use std::{io, net::SocketAddr, time::Duration};
@@ -79,6 +79,7 @@ pub(super) fn direct_link(
         timings,
         candidates,
         stats: LinkStats::default(),
+        congestion: conn.congestion(),
     })
 }
 
@@ -119,7 +120,8 @@ pub(super) fn summary(link: &DirectLink) -> LinkSummary {
 /// The line that says which way a session went, which the app's Logs page
 /// shows. It carries the figures a LAN-first A/B compares: the setup time,
 /// how soon a LAN address answered (absent when none did) and the handshakes
-/// this end started (none on the publishing end, which is dialed).
+/// this end started (none on the publishing end, which is dialed); and the
+/// controller this end sends under, so a trace tells BBR from Cubic.
 pub(super) fn log_path(service: &str, link: &DirectLink) {
     tracing::info!(
         event = "session_path_selected",
@@ -129,6 +131,7 @@ pub(super) fn log_path(service: &str, link: &DirectLink) {
         kind = link.kind.as_str(),
         family = link.family.as_str(),
         transport = link.transport.as_str(),
+        congestion = link.congestion.map_or("os", CongestionControl::as_str),
         local_ip = %link.local_ip.map_or_else(|| "-".to_string(), |ip| ip.to_string()),
         evidence = link.same_lan.map_or("none", LanEvidence::as_str),
         setup_ms = link.timings.setup_ms,

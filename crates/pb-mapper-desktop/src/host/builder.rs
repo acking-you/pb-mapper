@@ -1,13 +1,13 @@
 //! How a host is configured and started.
 
-use super::Host;
+use super::{Host, VIDEO_CONGESTION};
 use crate::{
     Backend, BackendCaps, Result,
     launch::{Launch, Launcher},
     platform,
     security::HostIdentity,
 };
-use pb_mapper_client::sdk::{Client, RegisterOptions};
+use pb_mapper_client::sdk::{Client, CongestionControl, RegisterOptions};
 use std::{marker::PhantomData, path::PathBuf, sync::Arc};
 
 /// Which display a host shares.
@@ -66,6 +66,11 @@ pub struct HostOptions {
     /// `None` is the platform's own directory. A privileged host never uses
     /// it: the helper keeps its own, protected.
     pub state_dir: Option<PathBuf>,
+    /// What a test's host sends its direct video under in place of
+    /// [`VIDEO_CONGESTION`], so a test can tell the host's controller from
+    /// the default.
+    #[cfg(test)]
+    pub(crate) sender_congestion: Option<CongestionControl>,
 }
 impl HostOptions {
     pub fn new(service: impl Into<String>) -> Self {
@@ -79,7 +84,17 @@ impl HostOptions {
             lan_first: register.lan_first,
             lan_tcp: register.lan_tcp,
             state_dir: None,
+            #[cfg(test)]
+            sender_congestion: None,
         }
+    }
+    /// What the host's end of a direct QUIC session sends its video under.
+    pub(super) fn sender_congestion(&self) -> CongestionControl {
+        #[cfg(test)]
+        if let Some(congestion) = self.sender_congestion {
+            return congestion;
+        }
+        VIDEO_CONGESTION
     }
 }
 

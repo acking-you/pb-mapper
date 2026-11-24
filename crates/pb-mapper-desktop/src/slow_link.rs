@@ -2,11 +2,18 @@
 //! asynchronous encoder and a simulated decoder: pipeline observations, not a
 //! GPU benchmark or real rendered fps. Each case shapes the viewer's link to
 //! the relay and reads the host's once-a-second `desktop_feedback_interval`
-//! trace. The cases run one at a time. Run with:
+//! trace; `direct_quic_on_lossy_links` instead carries the session over one
+//! QUIC connection with the direct transport, through a lossy hop. The cases
+//! run one at a time. Run with:
 //! cargo test -p pb-mapper-desktop -- --ignored --nocapture slow_link
 use crate::*;
-use pb_mapper_client::sdk::{Client, ConnectOptions, PathPolicy};
-use pb_mapper_testkit::{Relay, Shape, ShapedLink, admin_credential, shaped_link_each_way};
+use pb_mapper_client::sdk::{
+    Client, CongestionControl, ConnectOptions, PathPolicy, direct_transport_config,
+};
+use pb_mapper_testkit::{
+    LossyQuicPair, LossyShape, Relay, Shape, ShapedLink, admin_credential, lossy_quic_pair,
+    shaped_link_each_way,
+};
 use std::{
     collections::{BTreeSet, VecDeque},
     future::Future,
@@ -512,7 +519,13 @@ struct Probe {
     held: AtomicBool,
     /// Each pace the encoder was asked for, from the capture that first asked.
     paces: Mutex<Vec<(Instant, u32)>>,
+    /// When each picture was captured: the one of presentation time
+    /// `(n + 1) × PTS_STEP_US` at `n`.
+    captured: Mutex<Vec<Instant>>,
 }
+
+/// The synthetic encoder's presentation time per picture.
+const PTS_STEP_US: u64 = 16_667;
 
 /// What the synthetic encoder's pictures weigh.
 #[derive(Clone, Copy)]
@@ -601,6 +614,7 @@ impl Backend for SyntheticEncoder {
         let now = Instant::now();
         self.frames += 1;
         self.probe.captures.fetch_add(1, Ordering::Relaxed);
+        self.probe.captured.lock().unwrap().push(now);
         {
             let mut paces = self.probe.paces.lock().unwrap();
             if paces.last().is_none_or(|(_, pace)| *pace != rate.pace_fps) {
@@ -629,7 +643,7 @@ impl Backend for SyntheticEncoder {
                 width: 1920,
                 height: 1080,
                 keyframe,
-                pts_us: self.frames * 16_667,
+                pts_us: self.frames * PTS_STEP_US,
                 ..VideoFormat::default()
             },
             bytes: vec![0x65; bytes],
@@ -3143,4 +3157,302 @@ fn idr_another_viewer_asked_for_on_a_slow_link() {
         );
         trace.assert_never_latched();
     });
+}
+
+/// A relay the host registers on, a host of the synthetic encoder, and a
+/// viewer that reaches the host's listener as a direct session does: over
+/// one QUIC connection through a lossy hop, the host's end dialing its
+/// listener and sending the video under the controller the case names.
+struct QuicRig {
+    host: Host,
+    viewer: Viewer,
+    probe: Arc<Probe>,
+    /// The connection: its accepting end is the host's, whose path stats
+    /// are read.
+    quic: LossyQuicPair,
+    /// The host's end's forwarding, aborted with the rig.
+    _forward: tokio::task::JoinSet<()>,
+    _client: Client,
+    _relay: Relay,
+}
+impl QuicRig {
+    async fn start(name: &str, congestion: CongestionControl, shape: Arc<LossyShape>) -> Self {
+        let relay = Relay::start(&format!("desktop-{name}")).await;
+        let client =
+            Client::from_credential(relay.addr().to_string(), admin_credential(), true, None);
+        let probe = Arc::new(Probe::default());
+        let source = probe.clone();
+        let mut options = HostOptions::new(format!("desktop:{name}"));
+        options.allow_control = true;
+        options.allow_direct = false;
+        let host = Host::builder(options)
+            .backend(move || {
+                Ok(SyntheticEncoder {
+                    probe: source.clone(),
+                    sizes: TYPICAL,
+                    latency: ENCODE_TIME,
+                    serial: false,
+                    nominal_fps: 0,
+                    frames: 0,
+                    last_capture: None,
+                    pending: VecDeque::new(),
+                })
+            })
+            .start(&client)
+            .await
+            .unwrap();
+        // pb-mapper's direct transport each way: the host's end sends
+        // under `congestion` and the viewer's under Cubic, as a direct
+        // session's do.
+        let quic = lossy_quic_pair(
+            direct_transport_config(congestion).unwrap(),
+            direct_transport_config(CongestionControl::Cubic).unwrap(),
+            shape,
+        )
+        .await;
+        // The host's end dials the listener for the stream the viewer
+        // opens, as a direct provider dials its local service.
+        let mut forward = tokio::task::JoinSet::new();
+        let (accepting, listening) = (quic.accepted.clone(), host.listening());
+        forward.spawn(async move {
+            let Ok((send, recv)) = accepting.accept_bi().await else {
+                return;
+            };
+            let Ok(mut service) = tokio::net::TcpStream::connect(listening).await else {
+                return;
+            };
+            let _ = service.set_nodelay(true);
+            let mut quic = tokio::io::join(recv, send);
+            let _ = tokio::io::copy_bidirectional(&mut quic, &mut service).await;
+        });
+        let (send, recv) = quic.dialed.open_bi().await.unwrap();
+        let invitation = host.invitation();
+        let tls = security::client(invitation.fingerprint)
+            .unwrap()
+            .connect(
+                quinn::rustls::pki_types::ServerName::try_from(security::NAME).unwrap(),
+                tokio::io::join(recv, send),
+            )
+            .await
+            .unwrap();
+        let viewer = Viewer::over_stream_for_test(
+            tls,
+            invitation.token_text(),
+            ViewerConfig {
+                codecs: vec![VideoCodec::H264],
+                limits: VideoLimits::for_viewer(CEILING_FPS as f64),
+                fps_override: false,
+                quality: QualityPreset::Balanced,
+                progress: None,
+            },
+        )
+        .await
+        .unwrap();
+        Self {
+            host,
+            viewer,
+            probe,
+            quic,
+            _forward: forward,
+            _client: client,
+            _relay: relay,
+        }
+    }
+    async fn stop(&self) {
+        self.viewer.stop().await.unwrap();
+        self.host.stop().await.unwrap();
+    }
+}
+
+/// One unit a `Timed` decoder took: when it was received whole, how long
+/// after its capture, and whether it was an IDR.
+#[derive(Clone, Copy)]
+struct Taken {
+    received: Instant,
+    latency: Duration,
+    keyframe: bool,
+}
+
+/// A decoder without decode time that presents every unit and notes how
+/// long after its capture, as the synthetic encoder noted it, each was
+/// received whole.
+struct Timed {
+    stop: Arc<AtomicBool>,
+    taken: Arc<Mutex<Vec<Taken>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Timed {
+    fn start(viewer: &Viewer, probe: Arc<Probe>) -> Self {
+        let consumer = viewer.video_sink().attach().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let taken = Arc::new(Mutex::new(Vec::new()));
+        let (done, noted) = (stop.clone(), taken.clone());
+        let thread = traced_thread(move || {
+            while !done.load(Ordering::Acquire) {
+                match consumer.next(Duration::from_millis(50), wire::MAX_PAYLOAD) {
+                    Pull::Unit(unit) => {
+                        let captured =
+                            (unit.pts_us / PTS_STEP_US)
+                                .checked_sub(1)
+                                .and_then(|index| {
+                                    probe.captured.lock().unwrap().get(index as usize).copied()
+                                });
+                        if let Some(captured) = captured {
+                            noted.lock().unwrap().push(Taken {
+                                received: unit.received_at,
+                                latency: unit.received_at.saturating_duration_since(captured),
+                                keyframe: unit.keyframe,
+                            });
+                        }
+                        consumer.presented(unit.generation, unit.frame_id);
+                    }
+                    Pull::Closed => break,
+                    _ => {}
+                }
+            }
+        });
+        Self {
+            stop,
+            taken,
+            thread: Some(thread),
+        }
+    }
+    fn taken(&self) -> Vec<Taken> {
+        self.taken.lock().unwrap().clone()
+    }
+}
+impl Drop for Timed {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
+}
+
+/// The links the closed loop runs on: a name, the round trip in ms, the
+/// loss each way and the policer's rate in bit/s (0 for none).
+const QUIC_LINKS: [(&str, u64, f64, u64); 5] = [
+    ("rtt60_loss0.1", 60, 0.001, 0),
+    ("rtt60_loss1", 60, 0.01, 0),
+    ("rtt120_loss0.1", 120, 0.001, 0),
+    ("rtt120_loss1", 120, 0.01, 0),
+    ("rtt60_policer5", 60, 0.0, 5_000_000),
+];
+/// How long a session runs on its lossy link before it is measured, and
+/// for how long.
+const QUIC_SETTLE: Duration = Duration::from_secs(6);
+const QUIC_MEASURE: Duration = Duration::from_secs(20);
+/// How often the viewer asks for an IDR, as a refresh does.
+const QUIC_IDR_EVERY: Duration = Duration::from_secs(2);
+
+/// `values`' `p`th percentile by nearest rank, in ms.
+fn percentile_ms(values: &mut [Duration], p: f64) -> Option<f64> {
+    values.sort_unstable();
+    let rank = ((p / 100.0) * values.len() as f64).ceil() as usize;
+    values
+        .get(rank.max(1) - 1)
+        .map(|value| value.as_secs_f64() * 1000.0)
+}
+
+/// The closed loop over a direct QUIC connection: the real session, its
+/// receipt-driven rate control on, with the host's end under Cubic and
+/// then BBR on each of `QUIC_LINKS`, where loss is random and each way, or
+/// a policer drops what its bucket cannot pay for. After `QUIC_SETTLE` the
+/// viewer asks for an IDR every `QUIC_IDR_EVERY` for `QUIC_MEASURE`.
+/// Reports, per run: P-frame and IDR latency from capture to received
+/// whole, the wait from each request to its IDR, the received fps, the
+/// host's mean sent bitrate and pace and its rate cuts, and the host's
+/// packets sent and lost, congestion events and window from quinn. It
+/// asserts only that each session stayed up.
+#[test]
+#[ignore = "explicit ~5-minute measurement of the host's direct QUIC under Cubic and BBR on lossy links"]
+fn direct_quic_on_lossy_links() {
+    for (link, rtt_ms, loss, policer_bps) in QUIC_LINKS {
+        for congestion in [CongestionControl::Cubic, CongestionControl::Bbr] {
+            traced(|trace| async move {
+                let shape = LossyShape::new(0.0, Duration::from_millis(rtt_ms) / 2, policer_bps);
+                let name = format!("quic-{link}-{}", congestion.as_str());
+                let rig = QuicRig::start(&name, congestion, shape.clone()).await;
+                shape.set_loss(loss);
+                let timed = Timed::start(&rig.viewer, rig.probe.clone());
+                tokio::time::sleep(QUIC_SETTLE).await;
+                let started = Instant::now();
+                let before = rig.quic.accepted.stats().path;
+                let mut asked = Vec::new();
+                let mut fps = Vec::new();
+                while started.elapsed() < QUIC_MEASURE {
+                    asked.push(Instant::now());
+                    rig.viewer.request_keyframe(KeyframeReason::User);
+                    tokio::time::sleep(QUIC_IDR_EVERY).await;
+                    fps.push(rig.viewer.status().stats.received_fps);
+                }
+                let ended = Instant::now();
+                let after = rig.quic.accepted.stats().path;
+                let status = rig.viewer.status();
+                let taken = timed.taken();
+                drop(timed);
+                let [up, down] = rig.quic.hop.counts();
+                rig.stop().await;
+
+                let within: Vec<Taken> = taken
+                    .iter()
+                    .filter(|unit| (started..ended).contains(&unit.received))
+                    .copied()
+                    .collect();
+                let latencies = |keyframe: bool| -> Vec<Duration> {
+                    within
+                        .iter()
+                        .filter(|unit| unit.keyframe == keyframe)
+                        .map(|unit| unit.latency)
+                        .collect()
+                };
+                let (mut frames, mut idrs) = (latencies(false), latencies(true));
+                let mut waits: Vec<Duration> = asked
+                    .iter()
+                    .filter_map(|asked| {
+                        taken
+                            .iter()
+                            .find(|unit| unit.keyframe && unit.received >= *asked)
+                            .map(|unit| unit.received - *asked)
+                    })
+                    .collect();
+                let answered = waits.len();
+                let intervals = trace.between(started, ended);
+                let average = |value: fn(&Interval) -> u64| {
+                    intervals.iter().map(value).sum::<u64>() as f64 / intervals.len().max(1) as f64
+                };
+                let ms = |value: Option<f64>| {
+                    value.map_or_else(|| "-".to_owned(), |ms| format!("{ms:.1}"))
+                };
+                let sent = after.sent_packets - before.sent_packets;
+                let lost = after.lost_packets - before.lost_packets;
+                println!(
+                    "direct_quic link={link} cc={} p_frames={} p_p50={} p_p95={} p_p99={} idrs={} idr_p50={} idr_p95={} asked={} answered={answered} idr_wait_p50={} idr_wait_p95={} received_fps_mean={:.1} sent_bitrate_mean={:.0} pace_mean={:.1} cuts={} sent_packets={sent} lost_packets={lost} lost_pct={:.2} congestion_events={} cwnd={} hop_lost={} hop_policed={} state={:?}",
+                    congestion.as_str(),
+                    frames.len(),
+                    ms(percentile_ms(&mut frames, 50.0)),
+                    ms(percentile_ms(&mut frames, 95.0)),
+                    ms(percentile_ms(&mut frames, 99.0)),
+                    idrs.len(),
+                    ms(percentile_ms(&mut idrs, 50.0)),
+                    ms(percentile_ms(&mut idrs, 95.0)),
+                    asked.len(),
+                    ms(percentile_ms(&mut waits, 50.0)),
+                    ms(percentile_ms(&mut waits, 95.0)),
+                    mean(&fps),
+                    average(|interval| interval.sent_bitrate),
+                    average(|interval| interval.pace_fps),
+                    intervals.last().map_or(0, |interval| interval.cuts),
+                    100.0 * lost as f64 / sent.max(1) as f64,
+                    after.congestion_events - before.congestion_events,
+                    after.cwnd,
+                    up.lost + down.lost,
+                    up.policed + down.policed,
+                    status.state,
+                );
+                assert_eq!(status.state, ViewerState::Streaming, "{}", status.message);
+            });
+        }
+    }
 }

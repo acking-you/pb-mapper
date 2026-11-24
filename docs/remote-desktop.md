@@ -1149,8 +1149,24 @@ does not require Flutter or a POCOX runtime.
   first and keeping only one that grows the buffer, halving down to 256 KiB and
   never asking for less than it has; Linux caps it at `net.core.rmem_max`, and
   the debug trace `direct UDP receive buffer` records what each socket got.
-  Send buffers, the relay's sockets and congestion control (Quinn's Cubic) are
-  unchanged.
+  Send buffers and the relay's sockets are unchanged.
+- Congestion control is the sender's own and never crosses the wire. The
+  host's end of a direct QUIC session sends its video under
+  `VIDEO_CONGESTION` in `host.rs`, which it passes to the hidden
+  `Client::register_with_sender_congestion`; the viewer's end, relayed
+  sessions and LAN TCP keep their own controllers. It is Quinn's Cubic.
+  BBR was measured against it on loopback
+  ([host direct congestion control](benchmarks/2026-11-24-host-direct-bbr/README.md)):
+  on paths with 0.1–1% random loss and 60 or 120 ms round trips the receipts
+  held its rate at 4.8 to 8.2 Mbit/s against Cubic's 0.7 to 4.8, whose cut
+  on every loss capped them, and in all but one run it shortened the wait
+  for a requested keyframe; but behind a 5 Mbit/s
+  policer it lost more packets and kept a requested keyframe waiting longer
+  (a median 157.8 ms against 111.5), even with the receipts setting the
+  rate: its window grew to megabytes, so Quinn's pacing, which follows the
+  window, no longer spaced a burst. Each end's `DirectLink::congestion`, and
+  the `congestion` field of `session_path_selected` (`os` over TCP), say
+  which controller it sends under.
 - Input binds to a desktop/display generation and to a presentation the viewer
   validated less than two seconds ago. `Viewer::input(generation, &inputs)`
   sends a batch of up to 16, stamps the presented frame and consecutive
@@ -3725,7 +3741,8 @@ write it, users may read it): `pb_mapper_desktop::session`,
 `pb_mapper_desktop::feedback` and `pb_mapper_client::direct` at info, which
 are the session lifecycle above, `desktop_rate_model_latched`,
 `desktop_start_rate_remembered`, and `session_path_selected` with the path,
-the service and the peer address. No other target is written; none of these
+the service, the peer address and the congestion controller the host's end
+sends under (`congestion`). No other target is written; none of these
 logs an invitation, a key or a credential. The once-a-second
 `desktop_feedback_interval` is debug and is not written; the viewer's
 statistics carry those numbers. At 1 MiB the file becomes
@@ -4662,6 +4679,20 @@ first a dwell of 25 ms or less at the median and in all but 5 of the 40
 seconds at 75 FPS or more received, and 75 FPS or more for the second.
 [Encoder throughput cap measurements](benchmarks/2026-11-24-encoder-throughput-cap/README.md)
 has three runs before and after the cap.
+`direct_quic_on_lossy_links` carries the session over one QUIC connection
+with the direct transport instead of the shaped TCP link: the testkit's
+`lossy_quic_pair` through its `lossy_udp` hop, the host's end dialing the
+host's listener for the stream the viewer opens, as a direct provider does,
+and sending under Cubic and then BBR. It runs on 60 and 120 ms round trips
+with 0.1% and 1% random loss each way, and on 60 ms behind a 5 Mbit/s
+policer; after 6 s on a link the viewer asks for an IDR every 2 s for 20 s.
+Each run reports P-frame and IDR latency from capture to the unit received
+whole, the wait from each request to its IDR, the received rate, the host's
+mean sent bitrate and pace and its rate cuts, and quinn's packets sent and
+lost, congestion events and window on the host's end; it asserts only that
+each session stayed up.
+[Host direct congestion control](benchmarks/2026-11-24-host-direct-bbr/README.md)
+has three runs of it.
 
 `video_bench 10 60 --animate --max-width 1920 --max-height 1080` still reaches
 59.9 unique capture and encode FPS at a mean 1.9 ms encode with one unit in

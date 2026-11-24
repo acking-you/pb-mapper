@@ -137,6 +137,42 @@ impl StunOutcome {
     }
 }
 
+/// The congestion controller QUIC sends under on one end of a direct
+/// session. Each end chooses its own: the choice is the sender's alone and
+/// never crosses the wire.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CongestionControl {
+    /// Quinn's default, which every end uses unless told otherwise. It
+    /// shrinks its window on every loss, random loss included.
+    #[default]
+    Cubic,
+    /// BBR, which sizes its window from the delivery rate it measured and
+    /// does not take a loss for congestion.
+    Bbr,
+}
+
+impl CongestionControl {
+    /// Stable label, matching the serialized representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cubic => "cubic",
+            Self::Bbr => "bbr",
+        }
+    }
+
+    /// The controller `connection` sends under, as quinn holds it.
+    #[cfg(feature = "p2p")]
+    pub(crate) fn of_quic(connection: &quinn::Connection) -> Self {
+        let bbr = connection
+            .congestion_state()
+            .into_any()
+            .downcast::<quinn::congestion::Bbr>()
+            .is_ok();
+        if bbr { Self::Bbr } else { Self::Cubic }
+    }
+}
+
 /// How long each stage of a direct setup took on this end, in milliseconds.
 /// A stage this end does not run, such as dialing on the publishing end, is
 /// `None`.
@@ -229,6 +265,10 @@ pub struct DirectLink {
     pub timings: SetupTimings,
     pub candidates: CandidateCounts,
     pub stats: LinkStats,
+    /// The controller this end's QUIC sends under, read from the connection:
+    /// Cubic, unless this end publishes and registered for another. `None`
+    /// over TCP, whose controller is the operating system's.
+    pub congestion: Option<CongestionControl>,
 }
 
 /// Where a direct session's live figures come from.
