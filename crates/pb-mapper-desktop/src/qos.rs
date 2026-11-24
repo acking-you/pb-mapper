@@ -3,7 +3,9 @@
 //! measures downstream queueing; fps follows each sample and bits per frame
 //! follow each 3 s window. Resolution never adapts, and no fps, bitrate or
 //! preset change rebuilds the encoder: the encoder runs at the session's
-//! nominal fps, and capture skips ticks to the pace published here.
+//! nominal fps, and capture skips ticks to the pace published here. An encoder
+//! found to budget per second over the last 2 s of ticks latches the session
+//! to the timestamp rate model.
 //!
 //! Unlike RustDesk, one stalled probe moves nothing: Wi-Fi holds a packet for
 //! hundreds of milliseconds now and then without any queue behind it. The
@@ -51,13 +53,31 @@ pub(crate) const RTT_WINDOW: Duration = Duration::from_secs(60);
 pub(crate) const QOS_TICK: Duration = Duration::from_millis(250);
 /// The bits-per-frame window.
 pub(crate) const RATIO_INTERVAL: Duration = Duration::from_secs(3);
-/// Unique frames a window needs before bits per frame may rise.
+/// Unique frames a window needs before bits per frame may rise, and the
+/// latch's span before it may latch.
 pub(crate) const DYNAMIC_UNIQUE_FRAMES: u64 = 6;
-/// Non-IDR bits above this multiple of bits per frame are an overshoot.
+/// The span the rate-model latch reads: the last ticks covering it.
+pub(crate) const LATCH_SPAN: Duration = Duration::from_secs(2);
+const LATCH_TICKS: usize = (LATCH_SPAN.as_nanos() / QOS_TICK.as_nanos()) as usize;
+/// Non-IDR bits above this multiple of the bits expected for them are an
+/// overshoot ...
 pub(crate) const LATCH_OVERSHOOT: f64 = 1.3;
-/// Consecutive overshoot windows that latch the timestamp rate model.
-pub(crate) const LATCH_WINDOWS: u32 = 2;
-/// The latch looks only at windows paced at most this share of nominal.
+/// ... and, at a reduced pace, above this share of `nominal / mean pace` too,
+/// up to `LATCH_FLOOR_MAX`: an encoder that budgets per second overshoots by
+/// that ratio when its pictures fill the budget, while one that budgets per
+/// frame overshoots only at its content floor, where the moving picture alone
+/// sets the size of each frame.
+pub(crate) const LATCH_PACE_SHARE: f64 = 0.6;
+/// The most the pace term asks for: at a reduced pace, a session whose encoder
+/// sends more than this multiple of the bits expected for its frames latches
+/// whatever the pace, so a per-second encoder whose pictures fill only part of
+/// its budget is still found.
+pub(crate) const LATCH_FLOOR_MAX: f64 = 2.0;
+/// The highest measured content floor of a per-frame encoder, as a multiple
+/// of its budget: NVIDIA's H.264 MFT at pace 5 of a nominal 120 and 4 Mbit/s
+/// (`docs/remote-desktop.md`, "Encoder rate model per GPU").
+pub(crate) const MEASURED_CONTENT_FLOOR: f64 = 1.79;
+/// The latch looks only at ticks paced at most this share of nominal.
 pub(crate) const LATCH_PACE_RATIO: f64 = 0.75;
 /// The startup pace cap after `Accepted` and after `Resume`.
 pub(crate) const STARTUP_HOLD: Duration = Duration::from_secs(1);
@@ -88,6 +108,22 @@ const _: () = assert!(
     "a short path is probed more often"
 );
 const _: () = assert!(DELAY_HISTORY >= 1, "the delay is the median of the history");
+const _: () = assert!(
+    LATCH_TICKS >= 1 && LATCH_TICKS as u128 * QOS_TICK.as_nanos() == LATCH_SPAN.as_nanos(),
+    "the latch's span is whole ticks"
+);
+const _: () = assert!(
+    LATCH_PACE_SHARE < 1.0,
+    "a per-second budget, which overshoots by nominal / pace, must pass the latch"
+);
+const _: () = assert!(
+    LATCH_OVERSHOOT <= LATCH_FLOOR_MAX,
+    "the pace term only ever raises the latch's threshold"
+);
+const _: () = assert!(
+    MEASURED_CONTENT_FLOOR < LATCH_FLOOR_MAX,
+    "a per-frame encoder at its measured content floor must not latch"
+);
 
 /// A preset's fps and bits per frame (at 1080p).
 struct Preset {
@@ -234,6 +270,86 @@ impl RatioWindow {
     }
 }
 
+/// One QoS tick's production, as the rate-model latch reads it.
+#[derive(Clone, Copy, Debug, Default)]
+struct TickBucket {
+    elapsed: Duration,
+    frames: u64,
+    unique: u64,
+    non_idr_frames: u64,
+    non_idr_bits: u64,
+    /// The tick's non-IDR frames × the highest per-frame budget the encoder
+    /// was given during the tick: a cut never makes the frames encoded before
+    /// it look like an overshoot.
+    expected_bits: f64,
+    /// The pace at both ends of the tick was at most `LATCH_PACE_RATIO` ×
+    /// nominal. A slot no tick has filled yet is not.
+    paced_low: bool,
+}
+impl TickBucket {
+    fn add(mut self, other: &Self) -> Self {
+        let Self {
+            elapsed,
+            frames,
+            unique,
+            non_idr_frames,
+            non_idr_bits,
+            expected_bits,
+            paced_low,
+        } = *other;
+        self.elapsed += elapsed;
+        self.frames += frames;
+        self.unique += unique;
+        self.non_idr_frames += non_idr_frames;
+        self.non_idr_bits = self.non_idr_bits.saturating_add(non_idr_bits);
+        self.expected_bits += expected_bits;
+        self.paced_low &= paced_low;
+        self
+    }
+}
+
+/// The last `LATCH_TICKS` ticks' production, in a fixed ring, and where the
+/// tick under way began.
+struct LatchSpan {
+    buckets: [TickBucket; LATCH_TICKS],
+    /// The slot the next tick's bucket replaces.
+    next: usize,
+    since: Instant,
+    produced: ProducedSnapshot,
+    pace: u32,
+    /// The highest per-frame budget in force since the tick under way began:
+    /// every change of bits per frame raises it (`Qos::set_bpf`).
+    peak_budget: f64,
+}
+impl LatchSpan {
+    fn new(since: Instant, pace: u32, budget: f64) -> Self {
+        Self {
+            buckets: [TickBucket::default(); LATCH_TICKS],
+            next: 0,
+            since,
+            produced: ProducedSnapshot::default(),
+            pace,
+            peak_budget: budget,
+        }
+    }
+
+    fn push(&mut self, bucket: TickBucket) {
+        if let Some(slot) = self.buckets.get_mut(self.next) {
+            *slot = bucket;
+        }
+        self.next = (self.next + 1) % LATCH_TICKS;
+    }
+
+    /// The span's totals.
+    fn total(&self) -> TickBucket {
+        let start = TickBucket {
+            paced_low: true,
+            ..TickBucket::default()
+        };
+        self.buckets.iter().fold(start, TickBucket::add)
+    }
+}
+
 pub(crate) struct Qos {
     limits: VideoLimits,
     codec: VideoCodec,
@@ -257,7 +373,8 @@ pub(crate) struct Qos {
     /// Bits per frame at the encoded size.
     bpf: f64,
     rate_model: RateModel,
-    overshoot: u32,
+    /// What the rate-model latch reads, while the model is `Nominal`.
+    span: LatchSpan,
     window: RatioWindow,
     /// An untainted sample was seen this session.
     sampled: bool,
@@ -308,7 +425,7 @@ impl Qos {
             start_high: false,
             bpf: 0.0,
             rate_model,
-            overshoot: 0,
+            span: LatchSpan::new(now, 0, 0.0),
             window: RatioWindow::new(now, ProducedSnapshot::default()),
             sampled: false,
             next_nonce: 1,
@@ -326,6 +443,7 @@ impl Qos {
             receipts: ReceiptRate::new(),
         };
         qos.apply_preset(quality);
+        qos.span = LatchSpan::new(now, qos.pace(now), qos.nominal_budget());
         qos
     }
 
@@ -344,7 +462,7 @@ impl Qos {
         self.scale = (f64::from(self.ceiling_fps) / 30.0).max(1.0);
         self.fps = self.normal_fps;
         self.start_high = quality == QualityPreset::Balanced;
-        self.bpf = p.bpf_start * self.pixel_scale;
+        self.set_bpf(p.bpf_start * self.pixel_scale);
     }
 
     /// A live preset change: fps and bits per frame restart from the preset,
@@ -389,9 +507,9 @@ impl Qos {
     pub fn set_video_size(&mut self, width: u32, height: u32) {
         let scale = pixel_scale(width, height);
         if scale != self.pixel_scale {
-            self.bpf *= scale / self.pixel_scale;
+            let bpf = self.bpf * (scale / self.pixel_scale);
             self.pixel_scale = scale;
-            self.bpf = self.clamp_bpf(self.bpf);
+            self.set_bpf(self.clamp_bpf(bpf));
         }
     }
 
@@ -513,8 +631,12 @@ impl Qos {
         }
     }
 
-    /// Unresponsiveness, and the bits-per-frame window when it is due.
+    /// The rate-model latch, unresponsiveness, and the bits-per-frame window
+    /// when it is due.
     pub fn tick(&mut self, now: Instant, credit: &CreditView, produced: ProducedSnapshot) {
+        if self.rate_model == RateModel::Nominal {
+            self.latch_tick(now, produced);
+        }
         if !self.paused {
             let probe_late = self.outstanding.as_ref().is_some_and(|probe| {
                 now.saturating_duration_since(probe.sent) > UNRESPONSIVE_AFTER
@@ -539,9 +661,17 @@ impl Qos {
         };
         TargetValues {
             pace_fps,
-            encoder_bps: (bps as u32).clamp(ENCODER_BITRATE_MIN, ENCODER_BITRATE_MAX),
+            encoder_bps: encoder_bitrate(bps),
             paused: self.paused,
         }
+    }
+
+    /// The per-frame budget the nominal model hands the encoder: its bitrate
+    /// over the nominal rate, which is bits per frame unless the encoder
+    /// bitrate's bounds clamp it.
+    fn nominal_budget(&self) -> f64 {
+        let nominal = f64::from(self.limits.max_fps.max(1));
+        f64::from(encoder_bitrate(self.bpf * nominal)) / nominal
     }
 
     /// What the viewer is expected to receive: bits per frame at the pace.
@@ -690,33 +820,73 @@ impl Qos {
         };
     }
 
-    /// Close a 3 s window: the rate-model latch, then the bits-per-frame step.
+    /// Close the tick's bucket, then latch the timestamp model for good when
+    /// the last `LATCH_SPAN` shows an encoder that budgets per second: every
+    /// tick paced at most `LATCH_PACE_RATIO` × nominal at both its ends,
+    /// moving content, and non-IDR bits above `max(LATCH_OVERSHOOT,
+    /// min(LATCH_PACE_SHARE × nominal / mean pace, LATCH_FLOOR_MAX))` × the
+    /// bits expected for them, where the mean pace is the frames produced over
+    /// the span's time. The expected bits are integrated tick by tick at the
+    /// highest per-frame budget the encoder was given during each, so a cut
+    /// never compares the frames encoded before it with the budget after it.
+    fn latch_tick(&mut self, now: Instant, produced: ProducedSnapshot) {
+        let elapsed = now.saturating_duration_since(self.span.since);
+        if elapsed < QOS_TICK / 2 {
+            // Too short to read a pace from: the next tick takes it in.
+            return;
+        }
+        let nominal = f64::from(self.limits.max_fps);
+        let low = |pace: u32| f64::from(pace) <= LATCH_PACE_RATIO * nominal;
+        let (pace, start) = (self.pace(now), self.span.produced);
+        let non_idr_frames = produced.non_idr_frames.saturating_sub(start.non_idr_frames);
+        self.span.push(TickBucket {
+            elapsed,
+            frames: produced.frames.saturating_sub(start.frames),
+            unique: produced.unique.saturating_sub(start.unique),
+            non_idr_frames,
+            non_idr_bits: produced
+                .non_idr_bytes
+                .saturating_sub(start.non_idr_bytes)
+                .saturating_mul(8),
+            expected_bits: self.span.peak_budget * non_idr_frames as f64,
+            paced_low: low(self.span.pace) && low(pace),
+        });
+        self.span.since = now;
+        self.span.produced = produced;
+        self.span.pace = pace;
+        // The next tick starts from the budget now, before the 3 s window's
+        // step later in this tick: a raise there lifts it through `set_bpf`,
+        // and after a cut it keeps the budget frames still in the encoder were
+        // given.
+        self.span.peak_budget = self.nominal_budget();
+
+        let span = self.span.total();
+        if !span.paced_low || span.unique < DYNAMIC_UNIQUE_FRAMES || span.frames == 0 {
+            return;
+        }
+        // At least half a tick a bucket, so never zero.
+        let mean_pace = span.frames as f64 / span.elapsed.as_secs_f64();
+        let threshold =
+            LATCH_OVERSHOOT.max((LATCH_PACE_SHARE * nominal / mean_pace).min(LATCH_FLOOR_MAX));
+        if span.non_idr_bits as f64 > threshold * span.expected_bits {
+            self.rate_model = RateModel::Timestamp;
+            tracing::info!(
+                target: "pb_mapper_desktop::feedback",
+                event = "desktop_rate_model_latched",
+                frames = span.non_idr_frames,
+                bits = span.non_idr_bits,
+                expected_bits = span.expected_bits as u64,
+                mean_pace_fps = mean_pace,
+                threshold,
+                bpf = self.bpf as u32,
+            );
+        }
+    }
+
+    /// Close a 3 s window: the bits-per-frame step.
     fn close_window(&mut self, now: Instant, produced: ProducedSnapshot) {
         let start = self.window.produced;
         let dynamic = produced.unique.saturating_sub(start.unique) >= DYNAMIC_UNIQUE_FRAMES;
-        if self.rate_model == RateModel::Nominal && dynamic {
-            // A per-second-budget encoder spends nominal/pace times bits per
-            // frame when the pace drops; a per-frame-budget one does not.
-            let frames = produced.non_idr_frames.saturating_sub(start.non_idr_frames);
-            let bits = produced.non_idr_bytes.saturating_sub(start.non_idr_bytes) * 8;
-            let slow = frames as f64
-                <= LATCH_PACE_RATIO * f64::from(self.limits.max_fps) * RATIO_INTERVAL.as_secs_f64();
-            if slow && bits as f64 > LATCH_OVERSHOOT * self.bpf * frames as f64 {
-                self.overshoot += 1;
-            } else {
-                self.overshoot = 0;
-            }
-            if self.overshoot >= LATCH_WINDOWS {
-                self.rate_model = RateModel::Timestamp;
-                tracing::info!(
-                    target: "pb_mapper_desktop::feedback",
-                    event = "desktop_rate_model_latched",
-                    frames,
-                    bits,
-                    bpf = self.bpf as u32,
-                );
-            }
-        }
         match (self.window.max_delay, self.window.max_tainted) {
             (Some(max_delay), _) => self.step_bpf(max_delay, dynamic, now),
             // Only probes behind IDRs: their delay is mostly the IDRs' own
@@ -757,13 +927,25 @@ impl Qos {
         } else {
             Adaptation::Steady
         };
-        self.bpf = bpf;
+        self.set_bpf(bpf);
     }
 
     fn clamp_bpf(&self, bpf: f64) -> f64 {
         let p = preset(self.preset);
         bpf.clamp(p.bpf_floor * self.pixel_scale, p.bpf_max * self.pixel_scale)
     }
+
+    /// Every change of bits per frame goes through here, so the latch knows
+    /// the highest budget the encoder was given during each tick.
+    fn set_bpf(&mut self, bpf: f64) {
+        self.bpf = bpf;
+        self.span.peak_budget = self.span.peak_budget.max(self.nominal_budget());
+    }
+}
+
+/// The encoder bitrate for `bps`, within its bounds.
+fn encoder_bitrate(bps: f64) -> u32 {
+    (bps as u32).clamp(ENCODER_BITRATE_MIN, ENCODER_BITRATE_MAX)
 }
 
 fn millis(duration: Duration) -> u32 {
@@ -835,6 +1017,97 @@ mod tests {
             outstanding_bytes: 0,
             idr_inflight: None,
             owed_since: None,
+        }
+    }
+
+    /// How a test encoder sizes its frames.
+    #[derive(Clone, Copy, Debug)]
+    enum Budget {
+        /// The per-frame budget it is given when the frame is encoded: the
+        /// encoder bitrate over the nominal rate, as `slow_link`'s `Budget`.
+        PerFrame,
+        /// The encoder bitrate over the frames of a second, of which its
+        /// pictures fill this share.
+        PerSecond(f64),
+        /// These bits whatever the bitrate: an encoder at its content floor.
+        Fixed(f64),
+    }
+    /// An encoder that budgets per second and fills its budget.
+    const PER_SECOND: Budget = Budget::PerSecond(1.0);
+    impl Budget {
+        /// The bits of each frame encoded now, at `rate` frames a second.
+        fn bits(self, qos: &Qos, now: Instant, rate: f64) -> f64 {
+            let encoder_bps = f64::from(qos.targets(now).encoder_bps);
+            match self {
+                Budget::PerFrame => encoder_bps / f64::from(qos.limits.max_fps),
+                Budget::PerSecond(share) => share * encoder_bps / rate,
+                Budget::Fixed(bits) => bits,
+            }
+        }
+    }
+
+    /// An encoder fed a QoS tick at a time: each tick it makes the frames of
+    /// the published pace, or of `rate` when set, every one unique and none an
+    /// IDR, sized by its budget at the targets then, and the controller then
+    /// ticks.
+    struct Ticks {
+        now: Instant,
+        produced: ProducedSnapshot,
+        /// The fraction of a frame the next tick owes.
+        owed: f64,
+        /// Frames a second, when not the pace: pictures that change less often.
+        rate: Option<f64>,
+    }
+    impl Ticks {
+        fn new(now: Instant) -> Self {
+            Self {
+                now,
+                produced: ProducedSnapshot::default(),
+                owed: 0.0,
+                rate: None,
+            }
+        }
+
+        /// `frames` frames of `bits` each, `unique` of them unique, none an
+        /// IDR, within the tick under way.
+        fn produce(&mut self, frames: u64, unique: u64, bits: f64) {
+            let produced = &mut self.produced;
+            produced.frames += frames;
+            produced.unique += unique;
+            produced.non_idr_frames += frames;
+            produced.non_idr_bytes += (frames as f64 * bits / 8.0) as u64;
+        }
+
+        /// The controller's tick, a QoS tick after the last.
+        fn advance(&mut self, qos: &mut Qos) {
+            self.now += QOS_TICK;
+            qos.tick(self.now, &idle(), self.produced);
+        }
+
+        fn tick(&mut self, qos: &mut Qos, budget: Budget) {
+            let rate = self
+                .rate
+                .unwrap_or_else(|| f64::from(qos.targets(self.now).pace_fps));
+            let due = rate * QOS_TICK.as_secs_f64() + self.owed;
+            let frames = due.floor();
+            self.owed = due - frames;
+            let bits = budget.bits(qos, self.now, rate);
+            self.produce(frames as u64, frames as u64, bits);
+            self.advance(qos);
+        }
+
+        fn run(&mut self, qos: &mut Qos, budget: Budget, ticks: usize) {
+            for _ in 0..ticks {
+                self.tick(qos, budget);
+            }
+        }
+
+        /// When the session latched the timestamp model within `ticks`.
+        fn latched(&mut self, qos: &mut Qos, budget: Budget, ticks: usize) -> Option<Instant> {
+            (0..ticks).find_map(|_| {
+                self.tick(qos, budget);
+                (qos.rate_model == RateModel::Timestamp).then_some(self.now)
+            })
         }
     }
 
@@ -1167,35 +1440,23 @@ mod tests {
         // The latch: at full pace an overshoot is no evidence ...
         let mut qos = balanced(t0);
         let bpf = qos.bpf;
-        let window = |n: u64, frames: u64, ratio: f64| {
-            produced(
-                n * frames,
-                n * frames,
-                (n as f64 * frames as f64 * bpf * ratio / 8.0) as u64,
-            )
-        };
-        for n in 1..=3 {
-            qos.tick(s(3 * n), &idle(), window(n, 180, 2.0));
-        }
+        // A short path lifts Balanced to its ceiling.
+        sample(&mut qos, t0, 20, false);
+        let mut ticks = Ticks::new(t0);
+        ticks.run(&mut qos, Budget::Fixed(2.0 * bpf), 40);
         assert_eq!(qos.rate_model, RateModel::Nominal);
         // ... nor is a per-frame budget at a lower pace ...
-        let mut qos = balanced(t0);
-        for n in 1..=3 {
-            qos.tick(s(3 * n), &idle(), window(n, 90, 1.0));
-        }
-        assert_eq!(qos.rate_model, RateModel::Nominal);
-        // ... but two windows at pace 30 spending twice the budget per frame
-        // latch the timestamp model, and the encoder bitrate then follows pace.
-        qos.tick(s(12), &idle(), window(4, 90, 2.0));
-        assert_eq!(qos.rate_model, RateModel::Nominal);
-        qos.tick(s(15), &idle(), window(5, 90, 2.0));
-        assert_eq!(qos.rate_model, RateModel::Timestamp);
         qos.set_viewer_cap(30);
-        assert_eq!(qos.targets(s(16)).encoder_bps, (bpf * 30.0) as u32);
+        ticks.run(&mut qos, Budget::PerFrame, 40);
+        assert_eq!(qos.rate_model, RateModel::Nominal);
+        // ... but a per-second budget at pace 30, twice the budget per frame,
+        // latches the timestamp model, and the encoder bitrate then follows
+        // pace.
+        assert!(ticks.latched(&mut qos, PER_SECOND, 12).is_some());
+        assert_eq!(qos.targets(ticks.now).encoder_bps, (qos.bpf * 30.0) as u32);
         // It never flips back.
-        for n in 6..=9 {
-            qos.tick(s(3 * n), &idle(), window(n, 180, 1.0));
-        }
+        qos.set_viewer_cap(60);
+        ticks.run(&mut qos, Budget::PerFrame, 40);
         assert_eq!(qos.rate_model, RateModel::Timestamp);
 
         // A backend that budgets per second starts there: from the start its
@@ -1216,9 +1477,285 @@ mod tests {
             assert_eq!(targets.pace_fps, pace);
             assert_eq!(targets.encoder_bps, (bpf * f64::from(pace)) as u32);
         }
-        for n in 1..=3 {
-            qos.tick(s(3 * n), &idle(), window(n, 90, 2.0));
-        }
+        Ticks::new(t0).run(&mut qos, Budget::Fixed(4.0 * bpf), 40);
         assert_eq!(qos.view(s(10)).rate_model, RateModel::Timestamp);
+    }
+
+    /// A Balanced session on a short path, at its ceiling of 60.
+    fn short_path(t0: Instant) -> Qos {
+        let mut qos = balanced(t0);
+        sample(&mut qos, t0, 20, false);
+        qos
+    }
+
+    /// An encoder that budgets per second, which the nominal model gives
+    /// `bits per frame × nominal`: at a quarter of the pace each frame gets four
+    /// budgets. The latch must find it within 2.5 s of the pace falling, not
+    /// after two 3 s windows.
+    #[test]
+    fn a_per_second_budget_latches_within_two_and_a_half_seconds() {
+        let t0 = Instant::now();
+        let mut qos = short_path(t0);
+        let mut ticks = Ticks::new(t0);
+        // At full pace both budgets agree: 10 s of it latch nothing.
+        ticks.run(&mut qos, PER_SECOND, 40);
+        assert_eq!(qos.rate_model, RateModel::Nominal);
+        assert_eq!(qos.targets(ticks.now).pace_fps, 60);
+        qos.set_viewer_cap(15);
+        let capped = ticks.now;
+        let latched = ticks.latched(&mut qos, PER_SECOND, 40);
+        let after = latched.map(|latched| latched - capped);
+        assert!(
+            after.is_some_and(|after| after <= Duration::from_millis(2500)),
+            "{after:?}"
+        );
+        // From then on the encoder gets bits per frame × the pace.
+        assert_eq!(qos.targets(ticks.now).encoder_bps, (qos.bpf * 15.0) as u32);
+    }
+
+    /// A per-second encoder whose pictures fill only part of its budget still
+    /// sends that share of `nominal / pace` times what is expected. It latches
+    /// within 2.5 s above `LATCH_PACE_SHARE` of that ratio, and above
+    /// `LATCH_FLOOR_MAX` however low the pace.
+    #[test]
+    fn a_per_second_budget_part_filled_still_latches() {
+        let t0 = Instant::now();
+        // 1.5, 2.4, 3 and 3 times what is expected.
+        for (cap, share) in [(30, 0.75), (15, 0.6), (10, 0.5), (5, 0.25)] {
+            let mut qos = short_path(t0);
+            let mut ticks = Ticks::new(t0);
+            ticks.run(&mut qos, Budget::PerSecond(share), 40);
+            qos.set_viewer_cap(cap);
+            let capped = ticks.now;
+            let after = ticks
+                .latched(&mut qos, Budget::PerSecond(share), 40)
+                .map(|latched| latched - capped);
+            assert!(
+                after.is_some_and(|after| after <= Duration::from_millis(2500)),
+                "cap {cap}, share {share}: {after:?}"
+            );
+        }
+    }
+
+    /// A per-frame budget whose bits per frame are cut in the middle of each
+    /// 3 s window, as a controller that cuts on receipts moves them, and
+    /// raised at its end. Its frames before each cut, at the higher budget,
+    /// are no overshoot of the lower one.
+    #[test]
+    fn bits_per_frame_cuts_within_a_window_never_latch_a_per_frame_budget() {
+        let t0 = Instant::now();
+        let mut qos = short_path(t0);
+        qos.set_viewer_cap(30);
+        let mut ticks = Ticks::new(t0);
+        let high = qos.bpf;
+        for _ in 0..10 {
+            ticks.run(&mut qos, Budget::PerFrame, 6);
+            qos.set_bpf(qos.clamp_bpf(high / 2.0));
+            ticks.run(&mut qos, Budget::PerFrame, 6);
+            qos.set_bpf(high);
+        }
+        assert_eq!(qos.rate_model, RateModel::Nominal);
+        // Cut at every tick to the floor, then raised again: never either.
+        for _ in 0..10 {
+            for _ in 0..8 {
+                qos.set_bpf(qos.clamp_bpf(qos.bpf * 0.8));
+                ticks.tick(&mut qos, Budget::PerFrame);
+            }
+            qos.set_bpf(high);
+        }
+        assert_eq!(qos.rate_model, RateModel::Nominal);
+    }
+
+    /// Bits per frame raised as a tick ends, as the 3 s window raises them,
+    /// and halved part-way through the next tick, as a cut on receipts would:
+    /// each tick holds frames from both sides of a cut. They are measured
+    /// against the higher budget, so a per-frame encoder never latches, though
+    /// both of the tick's ends saw only the lower one.
+    #[test]
+    fn a_cut_part_way_through_a_tick_never_latches_a_per_frame_budget() {
+        let t0 = Instant::now();
+        let mut qos = short_path(t0);
+        qos.set_viewer_cap(30);
+        let mut ticks = Ticks::new(t0);
+        let high = qos.bpf;
+        for _ in 0..40 {
+            qos.set_bpf(high);
+            let bits = Budget::PerFrame.bits(&qos, ticks.now, 30.0);
+            ticks.produce(4, 4, bits);
+            qos.set_bpf(qos.clamp_bpf(high / 2.0));
+            let bits = Budget::PerFrame.bits(&qos, ticks.now, 30.0);
+            ticks.produce(4, 4, bits);
+            ticks.advance(&mut qos);
+        }
+        assert_eq!(qos.rate_model, RateModel::Nominal);
+    }
+
+    /// A viewer's cap set part-way through a tick: the frames before it came
+    /// at the full pace, so that tick is not paced low, and the latch needs
+    /// `LATCH_TICKS` ticks wholly at the lower pace after it. A cap lifted
+    /// part-way through a tick does not let that tick count either.
+    #[test]
+    fn a_tick_at_full_pace_at_either_end_never_counts_toward_the_latch() {
+        let t0 = Instant::now();
+        let mut qos = short_path(t0);
+        let mut ticks = Ticks::new(t0);
+        ticks.run(&mut qos, PER_SECOND, 40);
+        assert_eq!(qos.targets(ticks.now).pace_fps, 60);
+        let bits = PER_SECOND.bits(&qos, ticks.now, 60.0);
+        ticks.produce(8, 8, bits);
+        qos.set_viewer_cap(15);
+        let bits = PER_SECOND.bits(&qos, ticks.now, 15.0);
+        ticks.produce(2, 2, bits);
+        ticks.advance(&mut qos);
+        let mixed = ticks.now;
+        let after = ticks
+            .latched(&mut qos, PER_SECOND, 40)
+            .map(|latched| latched - mixed);
+        assert_eq!(after, Some(QOS_TICK * LATCH_TICKS as u32));
+
+        let mut qos = short_path(t0);
+        let mut ticks = Ticks::new(t0);
+        ticks.run(&mut qos, PER_SECOND, 40);
+        qos.set_viewer_cap(15);
+        // The tick the cap came in, at 60 at its start, and seven wholly at
+        // the lower pace ...
+        ticks.run(&mut qos, PER_SECOND, LATCH_TICKS);
+        assert_eq!(qos.rate_model, RateModel::Nominal);
+        // ... then half a tick at it, the cap lifted, and half at 60.
+        let bits = PER_SECOND.bits(&qos, ticks.now, 15.0);
+        ticks.produce(2, 2, bits);
+        qos.set_viewer_cap(60);
+        let bits = PER_SECOND.bits(&qos, ticks.now, 60.0);
+        ticks.produce(8, 8, bits);
+        ticks.advance(&mut qos);
+        ticks.run(&mut qos, PER_SECOND, 40);
+        assert_eq!(qos.rate_model, RateModel::Nominal);
+    }
+
+    /// Pictures that come slower than the pace, as a screen that changes now
+    /// and then gives them, each span more motion: the mean pace is the
+    /// frames produced, so a per-frame encoder whose sparse frames sit at
+    /// 1.5 times their budget does not latch at a pace of 45. A per-second
+    /// encoder, whose frames then carry a third of a second each, does.
+    #[test]
+    fn sparse_pictures_are_held_to_their_own_rate() {
+        let t0 = Instant::now();
+        let session = |t0| {
+            let mut qos = short_path(t0);
+            qos.set_viewer_cap(45);
+            qos
+        };
+        let mut qos = session(t0);
+        let floor = 1.5 * qos.nominal_budget();
+        let mut ticks = Ticks::new(t0);
+        ticks.rate = Some(20.0);
+        ticks.run(&mut qos, Budget::Fixed(floor), 40);
+        assert_eq!(qos.rate_model, RateModel::Nominal);
+
+        let mut qos = session(t0);
+        let mut ticks = Ticks::new(t0);
+        ticks.rate = Some(20.0);
+        assert!(ticks.latched(&mut qos, PER_SECOND, 12).is_some());
+    }
+
+    /// A still picture, repeated, says nothing of how the encoder budgets:
+    /// fewer than six unique frames in the span latch nothing, however many
+    /// bits they carry. Here a change every other tick carries a per-second
+    /// budget's half second, and the repeats almost nothing.
+    #[test]
+    fn fewer_than_six_unique_frames_never_latch() {
+        let t0 = Instant::now();
+        let mut qos = short_path(t0);
+        qos.set_viewer_cap(15);
+        let mut ticks = Ticks::new(t0);
+        for n in 0..40 {
+            let budget = qos.nominal_budget();
+            if n % 2 == 0 {
+                ticks.produce(1, 1, 30.0 * budget);
+                ticks.produce(3, 0, 0.05 * budget);
+            } else {
+                ticks.produce(4, 0, 0.05 * budget);
+            }
+            ticks.advance(&mut qos);
+        }
+        assert_eq!(qos.rate_model, RateModel::Nominal);
+        // Once the picture moves, the same encoder latches.
+        assert!(ticks.latched(&mut qos, PER_SECOND, 12).is_some());
+    }
+
+    /// A session tick can follow the last one early, after a late one: one
+    /// less than half a QoS tick after the last is folded into the next, so
+    /// the span still covers 2 s and a per-second budget latches no sooner.
+    #[test]
+    fn an_early_tick_is_folded_into_the_next() {
+        let t0 = Instant::now();
+        let mut qos = short_path(t0);
+        let mut ticks = Ticks::new(t0);
+        ticks.run(&mut qos, PER_SECOND, 40);
+        qos.set_viewer_cap(15);
+        let capped = ticks.now;
+        let latched = (0..40).find_map(|_| {
+            ticks.tick(&mut qos, PER_SECOND);
+            let early = ticks.now + Duration::from_millis(10);
+            qos.tick(early, &idle(), ticks.produced);
+            (qos.rate_model == RateModel::Timestamp).then_some(ticks.now)
+        });
+        let after = latched.map(|latched| latched - capped);
+        assert!(
+            after.is_some_and(|after| after > LATCH_SPAN && after <= Duration::from_millis(2500)),
+            "{after:?}"
+        );
+    }
+
+    /// Bits per frame at the preset floor of a small picture ask for less than
+    /// the encoder bitrate's lower bound, which then gives each frame more: a
+    /// per-frame encoder that spends that budget is no overshoot.
+    #[test]
+    fn a_per_frame_budget_the_bitrate_bound_raised_never_latches() {
+        let t0 = Instant::now();
+        let mut qos = Qos::new(
+            limits(30),
+            VideoCodec::H264,
+            QualityPreset::Smooth,
+            false,
+            RateModel::Nominal,
+            t0,
+        );
+        qos.set_video_size(960, 540);
+        qos.set_bpf(qos.clamp_bpf(0.0));
+        assert_eq!(qos.targets(t0).encoder_bps, ENCODER_BITRATE_MIN);
+        assert!(qos.nominal_budget() > 1.7 * qos.bpf, "{}", qos.bpf);
+        qos.set_viewer_cap(15);
+        Ticks::new(t0).run(&mut qos, Budget::PerFrame, 40);
+        assert_eq!(qos.rate_model, RateModel::Nominal);
+    }
+
+    /// NVIDIA's H.264 MFT budgets per frame, but at a nominal 120 FPS and
+    /// 4 Mbit/s its pattern's frames at pace 5 reached 1.79 times their budget:
+    /// the moving picture's floor, not a per-second budget. Such an encoder
+    /// never latches, while one that budgets per second at the same pace,
+    /// 24 times over, still does.
+    #[test]
+    fn a_per_frame_encoder_at_its_content_floor_never_latches() {
+        let t0 = Instant::now();
+        let smooth = |t0| {
+            let mut qos = Qos::new(
+                limits(120),
+                VideoCodec::H264,
+                QualityPreset::Smooth,
+                false,
+                RateModel::Nominal,
+                t0,
+            );
+            qos.set_viewer_cap(5);
+            qos
+        };
+        let mut qos = smooth(t0);
+        let floor = MEASURED_CONTENT_FLOOR * qos.nominal_budget();
+        Ticks::new(t0).run(&mut qos, Budget::Fixed(floor), 120);
+        assert_eq!(qos.rate_model, RateModel::Nominal);
+
+        let mut qos = smooth(t0);
+        assert!(Ticks::new(t0).latched(&mut qos, PER_SECOND, 12).is_some());
     }
 }
