@@ -329,6 +329,10 @@ Nothing in the SDK crates knows it exists.
   - `credit.rs`, `qos.rs`, `idr.rs`, `outgoing.rs`: Receipt credit, delay-based
     QoS (`qos/receipt_rate.rs`, a receipt-rate estimator that is only traced),
     on-demand IDRs, and the hand-off from thread C to B-send
+  - `scale.rs`: How a captured picture becomes the encoded one, pure and
+    tested on every platform: the quarter turn that stands a rotated
+    display's picture upright, the region of the capture each turn keeps,
+    and whether the encoded size is a crop of an odd edge or a scaling
   - `protocol.rs`, `wire.rs`, `invite.rs`, `security.rs`, `auth.rs`: Protocol v2
     (ALPN `pb-mapper/desktop/2`), invitations, certificate pinning, and the
     input authorisation ledger
@@ -384,7 +388,8 @@ Nothing in the SDK crates knows it exists.
     Duplication → D3D11 → Media Foundation H.265 or H.264, the fused
     `VideoSource`: the `Encoder` in `mod.rs`, the Media Foundation encoder in
     `codec.rs`, whose watcher thread waits for the MFT's events and wakes
-    thread C, the D3D11 scaler in `converter.rs`, the per-adapter H.265
+    thread C, the D3D11 video processor in `converter.rs`, which turns,
+    crops or scales each picture into its NV12 sample, the per-adapter H.265
     probe in `probe.rs`; H.265 only for a viewer that lists `h265`, on a GPU
     whose hardware HEVC encoder passes a probe kept per adapter, and one
     encoder failure turns it off for the process; H.264 in a High profile

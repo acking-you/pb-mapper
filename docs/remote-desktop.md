@@ -100,8 +100,10 @@ There is one shared display, which up to four viewers may watch or control at
 once (a fifth connection is refused as busy). Input uses the shared
 display's physical coordinates, DPI, letterboxing and viewer transform,
 including negative monitor origins. A stale screen disables input while
-keeping the texture visible. The Windows GPU capture backend currently rejects
-rotated displays instead of presenting incorrect geometry. The pointer travels
+keeping the texture visible. A Windows host shares a rotated display (portrait,
+or upside down) upright, as its desktop is laid out, where the GPU's video
+processor can rotate; one that cannot refuses it, as every rotated display was
+before. The pointer travels
 beside the video: its position always, and its shape where both ends list
 `cursor_shape` (see [Input and cursor](#input-and-cursor)). On a desktop
 viewer in control, this computer's own pointer takes the host's shape over the
@@ -1461,14 +1463,28 @@ each millisecond of a drain's long poll. An encoder that holds nothing and
 has asked for no input for 2 s after it last took or gave a unit is
 stalled, as one that holds a unit for 2 s is.
 Each duplication frame is released at once, so no update is missed between
-ticks. A new image is dated by `LastPresentTime`, a performance counter
-reading turned into an `Instant` by its age against
-`QueryPerformanceCounter` (one over a second old dates nothing), and the
-presents DXGI folded into it (`AccumulatedFrames`) are summed while it waits
-for the encoder; a fresh picture's sample time and duration follow its
+ticks. A submit takes a free NV12 sample from the encoder's pool first, and
+with none free it captures nothing (`Full`), so DXGI goes on folding the
+desktop's updates into its next frame. A new picture is then converted
+straight from the duplication's surface into that sample by the D3D11 video
+processor, which the GPU is handed (`Flush`) before the frame goes back to
+DXGI and the sample to the encoder: no full-size BGRA copy of the desktop is
+made. A video processor that refuses the duplication's surface (it fails to
+make a view of it or to convert from it) has each picture copied out of it
+first for the rest of that encoder, as every picture was before, and logs
+`desktop_capture_copied` once. The last submitted sample is kept, so a
+repeat on a still desktop (the 250 ms liveness repeat, or a keyframe) copies
+its NV12 picture into a fresh sample instead of converting again; the
+encoder never writes the samples it takes. The pool holds six: four in the
+encoder at most, the last one once it is out, and a spare that a submit
+with nothing to send keeps for the next. A new image is dated by
+`LastPresentTime`, a performance counter reading turned into an `Instant`
+by its age against `QueryPerformanceCounter` (one over a second old dates
+nothing), and carries the presents DXGI folded into it
+(`AccumulatedFrames`); a fresh picture's sample time and duration follow its
 present, kept strictly increasing, and a repeat's follow the submit. The
-first image of a new duplication is copied whatever `LastPresentTime` says,
-and left undated, so a still desktop shows at once. Hosting requires Media
+first image of a new duplication is converted whatever `LastPresentTime`
+says, and left undated, so a still desktop shows at once. Hosting requires Media
 Foundation and a compatible hardware H.264 MFT on the capture GPU, and
 reports an error when that path is unavailable; without Media Foundation
 the capabilities report no host, a host refuses to start, and the app
@@ -1481,7 +1497,27 @@ JPEG. The encoder runs at the session's nominal frame rate (the viewer's
 the bitrate is set live, and sample times follow the real interval between
 presents.
 GPU scaling preserves aspect ratio and never upscales; input and cursor
-coordinates still use the physical `Display` geometry. H.264 is asked for
+coordinates still use the physical `Display` geometry. A rotated display
+(`DXGI_OUTDUPL_DESC::Rotation` 90, 180 or 270; unspecified counts as none)
+is captured as scanned out, its display mode's size, and the video processor
+turns it clockwise by the same angle (`VideoProcessorSetStreamRotation`, as
+Microsoft's Desktop Duplication sample maps the rotation), so the video has
+the upright size the `Display` already describes and its input mapping is
+unchanged; a GPU whose video processor lacks the rotation cap
+(`D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ROTATION`) fails that capture as
+before, and a first frame whose texture is not the mode's size fails it with
+both sizes named. No device has shown each angle upright yet. A desktop one
+pixel over the even encoded size in either dimension, such as 1365×767
+under 1080p bounds, is cropped rather than scaled by a hair under 1, which
+would blur every pixel: the video processor copies it 1:1 and leaves out the
+upright picture's right column or bottom row (`scale::crop_only`). Input and
+the pointer still map the video across the whole display, so in the half of
+the picture nearest that edge a click lands one display pixel further
+towards it. The video processor is asked for
+speed (`D3D11_VIDEO_USAGE_OPTIMAL_SPEED`); quality goes on, for a downscaled
+picture only, per adapter vendor where a device run shows sharper text for
+under 1 ms of processor time, and none has yet. `video_bench --vp-usage
+quality` or `speed` asks for one at every size (`EncoderOptions::vp_usage`). H.264 is asked for
 in a High profile with CABAC, with Baseline as the fallback, and its SPS
 goes out saying that no picture is reordered (see
 [H.265 and H.264](#h265-and-h264)). The encoder takes
@@ -3363,12 +3399,23 @@ each output from its announcement to its collection
 (`have_output_to_collect_us`); `--poll-events` builds the encoder without
 its watcher and drains it every 2 ms, the comparison's baseline. `--text`
 covers the display with a still page of ClearType text; `--h264-profile
-base|high`, `--qvs`, `--scenario display-remoting` and `--gpu-priority`
-build the encoder with those `EncoderOptions`; `--dump-source` writes the
-NV12 picture each submit gave the encoder, the reference for ffmpeg's PSNR
-and SSIM. It prints the encoder's read-back as an `encoder_opened` line,
-with the encoder's own SPS in hex (`encoder_sps`), and each unit's dwell
-and the time from its present to its output at p50 and p95. With
+base|high`, `--qvs`, `--scenario display-remoting`, `--gpu-priority` and
+`--vp-usage quality|speed` build the encoder with those `EncoderOptions`;
+`--dump-source` writes the NV12 picture each submit gave the encoder, the
+reference for ffmpeg's PSNR and SSIM. It prints the encoder's read-back as an
+`encoder_opened` line, with the encoder's own SPS in hex (`encoder_sps`),
+and each unit's dwell and the time from its present to its output at p50
+and p95; and a `capture` line: whether new pictures were converted straight
+from the duplication's surface (`direct`) or copied out of it first
+(`copied`), whether the video processor was asked for quality, and the
+repeats copied from the last picture, with their time apart from the
+submits that converted a capture. `--copy-capture` copies each new picture
+out of the duplication first, as before direct conversion, the baseline of
+that comparison in the same build, and `--gpu-time` brackets each picture's
+GPU work (the conversion, with that copy where there is one, or a repeat's
+copy) with D3D11 timestamp queries and prints their p50, p95 and mean as a
+`gpu_time` line; a video processor on another engine of the GPU may not lie
+wholly inside the span, which GPUView or PIX tells. With
 `RUST_LOG` set (`pb_mapper_desktop::session=info`) the host's own events,
 such as `desktop_gpu_priority`, go to stderr.
 

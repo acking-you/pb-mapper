@@ -1,0 +1,51 @@
+$ RUSTC_WRAPPER= CC_x86_64_pc_windows_msvc=fakecc AR_x86_64_pc_windows_msvc=fakear \
+    cargo +1.100.0 clippy --target x86_64-pc-windows-msvc -p pb-mapper-desktop \
+    --all-features --all-targets -- -D warnings
+error: use of deprecated method `std::sync::atomic::Atomic::<u32>::fetch_update`: renamed to `try_update` for consistency
+   --> crates/pb-mapper-desktop/src/platform/windows/video/codec.rs:862:19
+    |
+862 |     let _ = count.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+    |                   ^^^^^^^^^^^^
+    |
+    = note: `-D deprecated` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(deprecated)]`
+help: replace the use of the deprecated method
+    |
+862 -     let _ = count.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+862 +     let _ = count.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+    |
+
+error: the loop variable `idx` is only used to index `self.slots`
+  --> crates/pb-mapper-desktop/src/worker/cursor.rs:95:20
+   |
+95 |         for idx in 0..MAX_VIEWERS {
+   |                    ^^^^^^^^^^^^^^
+   |
+note: for this index operation
+  --> crates/pb-mapper-desktop/src/worker/cursor.rs:96:35
+   |
+96 |             let Some(slot) = &mut self.slots[idx] else {
+   |                                   ^^^^^^^^^^^^^^^
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.100.0/index.html#needless_range_loop
+   = note: `-D clippy::needless-range-loop` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::needless_range_loop)]`
+help: consider using an iterator
+   |
+95 -         for idx in 0..MAX_VIEWERS {
+95 +         for <item> in self.slots.iter_mut().take(MAX_VIEWERS) {
+   |
+
+error: could not compile `pb-mapper-desktop` (lib) due to 2 previous errors
+error: could not compile `pb-mapper-desktop` (lib test) due to 2 previous errors
+exit status 101
+
+$ (the same) -- -D warnings -A deprecated -A clippy::needless_range_loop
+    Checking pb-mapper-desktop v0.12.1 (<worktree>/crates/pb-mapper-desktop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.67s
+exit status 0
+
+$ RUSTC_WRAPPER= RUSTDOCFLAGS="-D warnings" CC_x86_64_pc_windows_msvc=fakecc AR_x86_64_pc_windows_msvc=fakear \
+    cargo +1.100.0 doc --target x86_64-pc-windows-msvc -p pb-mapper-desktop --no-deps
+ Documenting pb-mapper-desktop v0.12.1 (<worktree>/crates/pb-mapper-desktop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.92s
+exit status 0
