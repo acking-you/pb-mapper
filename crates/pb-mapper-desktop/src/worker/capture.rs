@@ -58,6 +58,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 self.fail(failure, now);
                 return false;
             }
+            self.reset_throughput();
         }
         if changed {
             // On a context change only, never per frame: the owner's own
@@ -285,13 +286,15 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             // A retry too: a backend may keep its source for new limits, and
             // only the same limits again tell it that the recovery below
             // must build a fresh one.
-            if self.context.is_some()
-                && let Err(failure) = self
+            if self.context.is_some() {
+                if let Err(failure) = self
                     .backend
                     .configure_video(self.limits, self.limits.max_fps)
-            {
-                self.fail(failure, now);
-                return;
+                {
+                    self.fail(failure, now);
+                    return;
+                }
+                self.reset_throughput();
             }
         }
         if self.check_due(now) && !self.geometry(now) {

@@ -1317,14 +1317,17 @@ fn encoder_latency_of_45ms_keeps_60() {
 /// picture each 11 ms, one at a time, while it takes up to thread C's four,
 /// as a Media Foundation encoder slower than the pace does; then one that
 /// keeps each picture 45 ms but takes many at once. Reports for each, from
-/// 8 s to 18 s, the encoder's dwell, the received fps, the pace and the
-/// skipped ticks a second, then every change of the host's cap at the
-/// encoder's throughput (`desktop_encoder_cap`). Once both have run, the
-/// serial encoder's units must wait no more than about two service times at
-/// the median (25 ms, with thread C's 2 ms drain poll) at 75 fps or more
-/// received; the pipelined one, whose cap the guard lifts, keeps 75 or more.
+/// 8 s to 48 s (past the serial encoder's first probe, about 30 s after its
+/// cap, and the pipelined one's second cap, 30 s after the first), the
+/// encoder's dwell, the received fps, the pace and the skipped ticks a
+/// second, then every change of the host's cap at the encoder's throughput
+/// (`desktop_encoder_cap`). Once both have run, the serial encoder's units
+/// must wait no more than about two service times (25 ms, with thread C's
+/// 2 ms drain poll) at the median and in all but 5 of the 40 seconds, at
+/// 75 fps or more received; the pipelined one, whose cap the guard lifts,
+/// keeps 75 or more.
 #[test]
-#[ignore = "explicit ~40-second 120 fps slow encoder measurement"]
+#[ignore = "explicit ~100-second 120 fps slow encoder measurement"]
 fn lan_rtt_keeps_120() {
     /// What one encoder's run left for the assertions.
     struct Outcome {
@@ -1351,7 +1354,7 @@ fn lan_rtt_keeps_120() {
             tokio::time::sleep(Duration::from_secs(8)).await;
             let (mut received, mut dwell, mut pace, mut skipped) =
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            for _ in 0..10 {
+            for _ in 0..40 {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let stats = rig.viewer.status().stats;
                 received.push(stats.received_fps);
@@ -1365,9 +1368,12 @@ fn lan_rtt_keeps_120() {
             let mut sorted = dwell.clone();
             sorted.sort_unstable();
             let dwell_p50 = sorted[sorted.len() / 2];
+            let over = dwell.iter().filter(|&&ms| ms > 25).count();
             println!(
-                "lan_rtt_keeps_120 encoder={case} one_way_ms={SHORT_PATH_MS} seconds=8..18 received_fps_mean={:.1} encoder_dwell_ms_p50={dwell_p50} encoder_dwell_ms={dwell:?} received_fps={received:?} pace_fps={pace:?} skipped_per_s={skipped:?} expired_encoder_outputs={} state={:?}",
+                "lan_rtt_keeps_120 encoder={case} one_way_ms={SHORT_PATH_MS} seconds=8..48 received_fps_mean={:.1} encoder_dwell_ms_p50={dwell_p50} encoder_dwell_ms_mean={:.1} seconds_over_25ms={over} skipped_per_s_mean={:.1} encoder_dwell_ms={dwell:?} received_fps={received:?} pace_fps={pace:?} skipped_per_s={skipped:?} expired_encoder_outputs={} state={:?}",
                 mean(&received),
+                dwell.iter().map(|&ms| f64::from(ms)).sum::<f64>() / dwell.len() as f64,
+                mean(&skipped),
                 rig.expired(),
                 status.state
             );
@@ -1399,6 +1405,10 @@ fn lan_rtt_keeps_120() {
         assert_eq!(state, ViewerState::Streaming, "{message}");
         if serial {
             assert!(dwell_p50 <= 25, "{dwell:?}");
+            assert!(
+                dwell.iter().filter(|&&ms| ms > 25).count() <= 5,
+                "{dwell:?}"
+            );
             assert!(mean(&received) >= 75.0, "{received:?}");
         } else {
             assert!(mean(&received) >= 75.0, "{received:?}");

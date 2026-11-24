@@ -607,11 +607,12 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if codec != self.codec {
             self.codec = codec;
             self.keyframe = true;
-            if let Err(failure) = self
+            match self
                 .backend
                 .configure_video(self.limits, self.limits.max_fps)
             {
-                self.fail(failure, self.clock.now());
+                Ok(()) => self.reset_throughput(),
+                Err(failure) => self.fail(failure, self.clock.now()),
             }
         }
         let allowed = self.room.policy.allowed();
