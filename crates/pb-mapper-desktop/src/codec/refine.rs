@@ -139,8 +139,8 @@ impl Repeats {
 
     /// A fresh picture, a new one or a keyframe, went to the encoder at
     /// `at`: a burst under way ends, and the picture refines once it has
-    /// stood `REFINE_AFTER`, if a fresh unit since the last one refined was
-    /// limited by its budget. A burst a new picture interrupts did not
+    /// stood `REFINE_AFTER`, if a fresh unit since the picture last finished
+    /// refining filled its budget. A burst a new picture interrupts did not
     /// finish its picture, which therefore still refines, within what is
     /// left of `REFINE_MAX`.
     pub(crate) fn fresh(&mut self, at: Instant) {
