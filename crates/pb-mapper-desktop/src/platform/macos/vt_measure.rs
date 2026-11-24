@@ -48,7 +48,7 @@ enum Content {
 /// Rows the content scrolls a picture.
 const SCROLL: usize = 4;
 /// Pictures before the document scrolls back to its top.
-const SCROLLED: usize = 600;
+const SCROLLED: usize = 1000;
 /// Grain fields the busy pattern cycles through.
 const GRAINS: usize = 16;
 /// Surfaces a source paints its pictures into in turn, as ScreenCaptureKit
@@ -791,17 +791,21 @@ impl Emulated {
 
 /// What VideoToolbox sustains at a nominal 120 FPS at a Mac's own sizes, on
 /// the settings a Mac host encodes with (presentation times from the wall
-/// clock, the submit thread, two units in flight), each codec, low latency
-/// against standard rate control with and without DataRateLimits, at the
-/// target and at 0.85 and 0.75 of it, on scrolling text and the busy
-/// pattern. The target is Smooth's starting bits per frame scaled by the
-/// size, times the pace under the `timestamp` rate model, times the nominal
-/// rate under `nominal`; pace 120 is both. Each case runs 1 s and is
-/// measured over the next 2 s: units a second, VideoToolbox's drops, the
-/// dwell (p50, p95), the encode call on the submit thread (p50), what it
-/// produced against the target, and PSNR.
+/// clock, the submit thread, two units in flight), each codec: low latency
+/// with the QP bound and without (`ll_default_qp`, as before it), and
+/// standard rate control with the data-rate cap (`std_capped`) and without
+/// it at the target and, for H.265, at 0.85 and 0.75 of it (`std_1.00`,
+/// `std_0.85`, `std_0.75`), on scrolling text and the busy pattern. The
+/// target is Smooth's starting bits per frame scaled by the size, times the
+/// pace under the `timestamp` rate model, times the nominal rate under
+/// `nominal`; pace 120 is both. Each case runs 1 s and is measured over the
+/// next 2 s (`early`) and the 3 s after (`late`), since standard rate
+/// control settles slowly: pictures handed over and units out a second,
+/// VideoToolbox's drops, the dwell (p50, p95), the encode call on the submit
+/// thread (p50), what it produced against the target, PSNR, and how long
+/// painting a picture took the pacing thread (p50).
 #[test]
-#[ignore = "a measurement: about 11 minutes of encoding, in release mode"]
+#[ignore = "a measurement: about 25 minutes of encoding, in release mode"]
 fn video_toolbox_120() {
     for (width, height) in [(2560, 1440), (2560, 1664), (3024, 1964), (3840, 2160)] {
         for content in [Content::Text, Content::Busy] {
@@ -824,6 +828,7 @@ struct Mode {
     name: &'static str,
     low_latency: bool,
     capped: bool,
+    /// The share of the target the session is set to.
     factor: f64,
     max_qp: bool,
 }
@@ -856,6 +861,10 @@ fn modes(codec: VideoCodec) -> Vec<Mode> {
 
 /// `video_toolbox_120`'s nominal rate.
 const NOMINAL_120: u32 = 120;
+/// When a 120 FPS case's early window starts, its late one, and its end.
+const WARM_120: Duration = Duration::from_secs(1);
+const EARLY_120: Duration = Duration::from_secs(3);
+const LATE_120: Duration = Duration::from_secs(6);
 
 fn case_120(
     codec: VideoCodec,
@@ -895,28 +904,29 @@ fn case_120(
         return;
     };
     let start = Instant::now();
-    let (from, to) = (
-        start + Duration::from_secs(1),
-        start + Duration::from_secs(3),
-    );
-    rig.run(pace, from);
-    let (submitted, dropped) = (rig.submitted, rig.dropped());
-    rig.encoder.probe(|probe| probe.calls.clear());
-    rig.run(pace, to);
-    let mut calls = rig.encoder.probe(|probe| std::mem::take(&mut probe.calls));
-    let window = rig.window(from, to);
-    report(format_args!(
-        "{label} bitrate={bitrate} submitted_per_s={:.1} units_per_s={:.1} dropped={} dwell_p50_ms={:.2} dwell_p95_ms={:.2} call_p50_ms={:.2} produced_over_target={:.2} psnr={:.2} paint_p50_us={}",
-        window.per_second((rig.submitted - submitted) as f64),
-        window.per_second(window.units as f64),
-        rig.dropped() - dropped,
-        window.dwell_p50_ms,
-        window.dwell_p95_ms,
-        f64::from(quantile(&mut calls, 0.5)) / 1000.0,
-        window.per_second(window.bits as f64) / target,
-        window.psnr,
-        quantile(&mut rig.paints, 0.5),
-    ));
+    rig.run(pace, start + WARM_120);
+    for (name, from, to) in [
+        ("early", start + WARM_120, start + EARLY_120),
+        ("late", start + EARLY_120, start + LATE_120),
+    ] {
+        let (submitted, dropped) = (rig.submitted, rig.dropped());
+        rig.encoder.probe(|probe| probe.calls.clear());
+        rig.run(pace, to);
+        let mut calls = rig.encoder.probe(|probe| std::mem::take(&mut probe.calls));
+        let window = rig.window(from, to);
+        report(format_args!(
+            "{label} bitrate={bitrate} window={name} submitted_per_s={:.1} units_per_s={:.1} dropped={} dwell_p50_ms={:.2} dwell_p95_ms={:.2} call_p50_ms={:.2} produced_over_target={:.2} psnr={:.2} paint_p50_us={}",
+            window.per_second((rig.submitted - submitted) as f64),
+            window.per_second(window.units as f64),
+            rig.dropped() - dropped,
+            window.dwell_p50_ms,
+            window.dwell_p95_ms,
+            f64::from(quantile(&mut calls, 0.5)) / 1000.0,
+            window.per_second(window.bits as f64) / target,
+            window.psnr,
+            quantile(&mut rig.paints, 0.5),
+        ));
+    }
 }
 
 /// How low-latency rate control answers a bitrate cut and its return: each
