@@ -209,8 +209,14 @@ pub(crate) trait VideoSource: Sized {
     /// desktop is active and a period later while it is still. A source whose
     /// encoder is full returns
     /// `true`, which spends the tick as backpressure, and keeps the IDR
-    /// request.
+    /// request; one that can tell before it captures says so in `full`.
     fn submit(&mut self, keyframe: bool) -> Result<bool>;
+    /// The encoder holds as many units as this source lets it, fewer than
+    /// thread C's own bound: thread C skips the due tick without a `submit`,
+    /// and counts it, as for its own bound (`Backend::video_full`).
+    fn full(&self) -> bool {
+        false
+    }
     /// When the display presented the picture the last `submit` submitted,
     /// and the presents it covers; `None` when it submitted nothing, a
     /// repeat, or a picture it cannot date (`Backend::submitted_picture`).

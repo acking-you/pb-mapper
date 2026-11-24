@@ -3,17 +3,26 @@
 //! live. It reads the capture's IOSurface in place. Its output callback, on
 //! VideoToolbox's thread, turns each length-prefixed sample into Annex B,
 //! a keyframe's parameter sets in front, queues it and wakes thread C.
+//!
+//! Once the session is prepared, every call on it is made by the encoder's
+//! own submit thread, one at a time: thread C only hands it a picture, or a
+//! bitrate, through a one-slot mailbox and goes back to its input lane. A
+//! session whose size is a multiple of 16 encodes inside
+//! `VTCompressionSessionEncodeFrame` and calls back before it returns, so
+//! the call took as long as the encode, and input queued on thread C waited
+//! it out. The submit thread wakes thread C when it finishes a call that a
+//! submit found it busy with, and when a call fails.
 
 use super::cf;
 use crate::{
     EncodedFrame, Result, VideoCodec, VideoFormat, Waker,
     codec::{
         avcc::annex_b,
-        pipeline::{OUTPUT_WAIT, codec_error, late},
+        pipeline::{LATE_OUTPUT, OUTPUT_WAIT, codec_error, late},
     },
     error,
 };
-use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType};
+use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, Type};
 use objc2_core_media::{
     CMFormatDescription, CMSampleBuffer, CMTime, CMVideoCodecType,
     CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
@@ -37,13 +46,14 @@ use objc2_video_toolbox::{
     kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
 };
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::{
     collections::VecDeque,
     ffi::{c_int, c_void},
     ptr::NonNull,
     sync::{Arc, OnceLock},
-    time::Instant,
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
 
 /// A unit submitted and not yet output.
@@ -70,27 +80,137 @@ struct State {
     keyframe_due: bool,
     /// What the output callback converts into, reused.
     sample: Vec<u8>,
+    /// The picture handed over and not yet taken by the submit thread; its
+    /// `Pending` is already queued.
+    job: Option<Job>,
+    /// The bitrate the submit thread sets before its next encode, or at once
+    /// when idle: the latest asked for.
+    rate: Option<u32>,
+    /// The submit thread is inside a call on the session.
+    in_call: bool,
+    /// A submit found the submit thread busy: thread C waits for its wake.
+    c_waiting: bool,
+    /// The encoder is going: the submit thread makes no further call.
+    stop: bool,
+    /// The submit thread invalidated the session and is ending.
+    exited: bool,
+    /// Thread C's side of `macos_encoder_load`, since its last line.
+    gate: GateCounts,
+    /// The submit thread takes nothing while set: a test's way to keep a
+    /// picture in the mailbox.
+    #[cfg(test)]
+    held: bool,
+    /// The submit thread tears the session down before its next call: a
+    /// test's way to have VideoToolbox refuse an encode.
+    #[cfg(test)]
+    tear_down: bool,
+    /// The submit thread stays in its next call once VideoToolbox returns,
+    /// while set: a test's way to keep it busy after any output came.
+    #[cfg(test)]
+    park: bool,
+    /// The submit thread stays in its call (`park`).
+    #[cfg(test)]
+    parked: bool,
 }
+impl State {
+    /// Units handed over and not yet out: in VideoToolbox, or in the
+    /// mailbox, whose `Pending` is queued with it. A finished unit waiting
+    /// to be drained, and a failure, are not in flight.
+    fn in_flight(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// The submit thread holds a picture or is inside a call.
+    fn busy(&self) -> bool {
+        self.job.is_some() || self.in_call
+    }
+
+    /// Forget unit `token`, which never reached VideoToolbox or which it
+    /// refused.
+    fn forget(&mut self, token: u64) {
+        if let Some(index) = self
+            .pending
+            .iter()
+            .rposition(|pending| pending.token == token)
+        {
+            self.pending.remove(index);
+        }
+    }
+}
+
+/// What thread C's submits found, for `macos_encoder_load`.
+#[derive(Clone, Copy, Default)]
+struct GateCounts {
+    /// Due ticks that found the limit's worth of units in flight
+    /// (`Encoder::full`, `Admit::Full`).
+    full: u32,
+    /// Submits that found the submit thread busy and left their tick armed
+    /// (`Admit::Busy`).
+    busy: u32,
+    /// The most units in flight at a hand-off.
+    peak_in_flight: usize,
+}
+
+/// A picture for the submit thread to encode.
+struct Job {
+    picture: CFRetained<CVPixelBuffer>,
+    pts_us: u64,
+    keyframe: bool,
+    token: u64,
+}
+// SAFETY: a pixel buffer is reference counted atomically; the job only
+// carries it to the submit thread, which hands it to VideoToolbox to read,
+// and nothing writes the picture while it is held.
+unsafe impl Send for Job {}
 
 struct Shared {
     state: Mutex<State>,
+    /// Wakes the submit thread for a job, a bitrate or the stop, and the
+    /// encoder's drop once the submit thread has ended.
+    signal: Condvar,
     waker: Waker,
     codec: VideoCodec,
     size: (u32, u32),
     gop: u32,
 }
 
-/// A running compression session.
-pub(crate) struct Encoder {
+/// What the submit thread owns: the session and the keyframe option.
+struct SendSession {
     session: CFRetained<VTCompressionSession>,
+    /// `{ForceKeyFrame: true}`, made once.
+    keyframe: CFRetained<CFDictionary>,
+}
+// SAFETY: CF objects are retained and released atomically, and from the
+// moment this moves to the submit thread every VideoToolbox call on the
+// session is made there, one at a time, until that thread invalidates it.
+unsafe impl Send for SendSession {}
+
+/// Whether thread C may hand the encoder a picture now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Admit {
+    /// The limit's worth of units is in flight: backpressure, which spends
+    /// the tick (thread C asks `full` first and skips it).
+    Full,
+    /// The submit thread holds a picture or is inside a call: the tick stays
+    /// armed, and the thread wakes thread C once it is free.
+    Busy,
+    /// `encode` hands the picture over at once.
+    Free,
+}
+
+/// A running compression session, and the thread that calls it.
+pub(crate) struct Encoder {
     shared: Arc<Shared>,
     bitrate: u32,
     created: Instant,
     /// The last presentation time, which only grows.
     pts_us: u64,
     next_token: u64,
-    /// `{ForceKeyFrame: true}`, made once.
-    keyframe: CFRetained<CFDictionary>,
+    /// The submit thread, joined on drop.
+    submit: Option<JoinHandle<()>>,
+    /// The session, for a test to read back while the submit thread idles.
+    #[cfg(test)]
+    session: CFRetained<VTCompressionSession>,
 }
 
 fn codec_type(codec: VideoCodec) -> Result<CMVideoCodecType> {
@@ -277,6 +397,7 @@ impl Encoder {
         // callback reads `shared`, which therefore exists first.
         let mut shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
+            signal: Condvar::new(),
             waker: waker.clone(),
             codec,
             size: (width, height),
@@ -392,14 +513,37 @@ impl Encoder {
         let keyframe = unsafe {
             cf::dictionary(&[(kVTEncodeFrameOptionKey_ForceKeyFrame, cf::boolean(true))])
         };
+        // From here on the submit thread makes every call on the session.
+        // It runs at the default QoS class, as thread C does: on macOS a new
+        // thread does not take its creator's class, and neither sets one.
+        let owned = SendSession {
+            session: session.clone(),
+            keyframe,
+        };
+        let spawned = std::thread::Builder::new()
+            .name("pb-mapper-vt-submit".into())
+            .spawn({
+                let shared = Arc::clone(&shared);
+                move || serve(owned, &shared)
+            });
+        let submit = match spawned {
+            Ok(submit) => submit,
+            Err(failure) => {
+                // SAFETY: invalidated once, before `shared` can go: the
+                // thread never ran.
+                unsafe { session.invalidate() };
+                return Err(failure);
+            }
+        };
         Ok(Self {
-            session,
             shared,
             bitrate,
             created: Instant::now(),
             pts_us: 0,
             next_token: 0,
-            keyframe,
+            submit: Some(submit),
+            #[cfg(test)]
+            session,
         })
     }
 
@@ -407,34 +551,55 @@ impl Encoder {
         self.shared.codec
     }
 
-    /// The mean bitrate, live; nothing else changes, nothing rebuilds.
-    pub(crate) fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
+    /// The mean bitrate, live; nothing else changes, nothing rebuilds. The
+    /// submit thread sets it before its next encode, or at once when idle,
+    /// and a refusal reaches `drain` as the codec's failure.
+    pub(crate) fn set_bitrate(&mut self, bitrate: u32) {
         if bitrate == self.bitrate {
-            return Ok(());
+            return;
         }
-        // SAFETY: static keys.
-        unsafe {
-            set(
-                &self.session,
-                kVTCompressionPropertyKey_AverageBitRate,
-                &cf::number(i64::from(bitrate)),
-            )
-            .map_err(|failure| codec_error(self.shared.codec, failure))?;
-            let _ = set(
-                &self.session,
-                kVTCompressionPropertyKey_DataRateLimits,
-                &data_rate_limits(bitrate),
-            );
-        }
+        self.shared.state.lock().rate = Some(bitrate);
+        self.shared.signal.notify_all();
         self.bitrate = bitrate;
-        Ok(())
     }
 
-    /// Units submitted and not yet drained, or a callback failure waiting
-    /// for `drain` to surface.
+    /// Units submitted and not yet drained (the mailbox's among them), or a
+    /// failure waiting for `drain` to surface.
     pub(crate) fn pending(&self) -> usize {
         let state = self.shared.state.lock();
         state.pending.len() + state.ready.len() + usize::from(state.failure.is_some())
+    }
+
+    /// Whether `limit` units are in flight, for a due tick, which thread C
+    /// then skips: counted as a gate tick.
+    pub(crate) fn full(&self, limit: usize) -> bool {
+        let mut state = self.shared.state.lock();
+        let full = state.in_flight() >= limit;
+        state.gate.full += u32::from(full);
+        full
+    }
+
+    /// Whether a picture may be handed over now: not while `limit` units
+    /// are in flight, which spends the tick, nor while the submit thread is
+    /// busy, which leaves it armed until the thread wakes thread C.
+    pub(crate) fn admit(&self, limit: usize) -> Admit {
+        let mut state = self.shared.state.lock();
+        if state.in_flight() >= limit {
+            state.gate.full += 1;
+            Admit::Full
+        } else if state.busy() {
+            state.c_waiting = true;
+            state.gate.busy += 1;
+            Admit::Busy
+        } else {
+            Admit::Free
+        }
+    }
+
+    /// A submit found the submit thread busy, which has yet to wake thread
+    /// C: until it does, nothing can be handed over.
+    pub(crate) fn waiting(&self) -> bool {
+        self.shared.state.lock().c_waiting
     }
 
     /// A keyframe was asked for and lost: the next submit carries one.
@@ -446,7 +611,10 @@ impl Encoder {
         self.shared.state.lock().keyframe_due
     }
 
-    /// Encode `picture`; `duplicate` when it is the last one again.
+    /// Hand `picture` to the submit thread to encode; `duplicate` when it is
+    /// the last one again. Never waits; a picture the thread has yet to take
+    /// refuses it (`admit` says `Busy` first). A failure of the encode
+    /// itself reaches `drain`.
     pub(crate) fn encode(
         &mut self,
         picture: &CVPixelBuffer,
@@ -454,50 +622,37 @@ impl Encoder {
         duplicate: bool,
     ) -> Result<()> {
         let now = Instant::now();
+        let mut state = self.shared.state.lock();
+        if state.job.is_some() {
+            return Err(error("the hardware video encoder holds a picture already"));
+        }
         let pts_us = (now.duration_since(self.created).as_micros() as u64).max(self.pts_us + 1);
         self.pts_us = pts_us;
         self.next_token += 1;
         let token = self.next_token;
-        // Queued before the call: a synchronous encoder outputs inside it.
-        self.shared.state.lock().pending.push_back(Pending {
+        // Queued with the job: its dwell, lateness and stall count from now,
+        // and a synchronous encoder outputs inside the thread's call.
+        state.pending.push_back(Pending {
             token,
             at: now,
             duplicate,
             keyframe,
             pts_us,
         });
-        let mut flags = VTEncodeInfoFlags(0);
-        // SAFETY: an IOSurface-backed picture the session retains while it
-        // reads; the token is an opaque number handed back to the callback.
-        let status = unsafe {
-            self.session.encode_frame(
-                picture,
-                CMTime::new(pts_us as i64, 1_000_000),
-                kCMTimeInvalid,
-                keyframe.then_some(&*self.keyframe),
-                token as usize as *mut c_void,
-                &mut flags,
-            )
-        };
-        if status != 0 {
-            let mut state = self.shared.state.lock();
-            if state
-                .pending
-                .back()
-                .is_some_and(|pending| pending.token == token)
-            {
-                state.pending.pop_back();
-            }
-            return Err(codec_error(
-                self.shared.codec,
-                cf::status("hardware video encoding", status),
-            ));
-        }
+        state.gate.peak_in_flight = state.gate.peak_in_flight.max(state.in_flight());
+        state.job = Some(Job {
+            picture: picture.retain(),
+            pts_us,
+            keyframe,
+            token,
+        });
+        drop(state);
+        self.shared.signal.notify_all();
         Ok(())
     }
 
-    /// The next unit, if one is out. A failure the callback saw, or a unit
-    /// held too long, is the codec's.
+    /// The next unit, if one is out. A failure the callback or the submit
+    /// thread saw, or a unit held too long, is the codec's.
     pub(crate) fn drain(&mut self) -> Result<Option<EncodedFrame>> {
         let mut state = self.shared.state.lock();
         if let Some(failure) = &state.failure {
@@ -515,13 +670,312 @@ impl Encoder {
         }
         Ok(state.ready.pop_front())
     }
+
+    /// Keep the submit thread from taking anything, or let it.
+    #[cfg(test)]
+    pub(super) fn hold(&self, held: bool) {
+        self.shared.state.lock().held = held;
+        self.shared.signal.notify_all();
+    }
+
+    /// Have the submit thread tear the session down before its next call,
+    /// as VideoToolbox does to a session whose media server went away.
+    #[cfg(test)]
+    pub(super) fn tear_down(&self) {
+        self.shared.state.lock().tear_down = true;
+    }
+
+    /// Keep the submit thread in its next call once VideoToolbox returns
+    /// (`parked` says it is there), or let it finish.
+    #[cfg(test)]
+    pub(super) fn park(&self, park: bool) {
+        self.shared.state.lock().park = park;
+        self.shared.signal.notify_all();
+    }
+
+    /// The submit thread stays in a call that VideoToolbox returned from.
+    #[cfg(test)]
+    pub(super) fn parked(&self) -> bool {
+        self.shared.state.lock().parked
+    }
+
+    /// The submit thread is inside a call on the session.
+    #[cfg(test)]
+    pub(super) fn in_call(&self) -> bool {
+        self.shared.state.lock().in_call
+    }
+
+    /// The submit thread holds nothing: no picture, no bitrate, no call.
+    #[cfg(test)]
+    pub(super) fn idle(&self) -> bool {
+        let state = self.shared.state.lock();
+        !state.busy() && state.rate.is_none()
+    }
+
+    /// Whether anything still holds what the callback reads.
+    #[cfg(test)]
+    pub(super) fn alive(&self) -> impl Fn() -> bool + use<> {
+        let shared = Arc::downgrade(&self.shared);
+        move || shared.strong_count() > 0
+    }
+
+    /// The session's mean bitrate, read back while the submit thread idles.
+    #[cfg(test)]
+    pub(super) fn average_bitrate(&self) -> Option<i64> {
+        // SAFETY: a static key.
+        get::<CFNumber>(&self.session, unsafe {
+            kVTCompressionPropertyKey_AverageBitRate
+        })
+        .and_then(|bitrate| bitrate.as_i64())
+    }
 }
 
 impl Drop for Encoder {
-    /// No callback runs once this returns; what was in flight is dropped.
+    /// The submit thread finishes the call it is in, drops a picture still
+    /// in the mailbox, invalidates the session and ends: no callback runs
+    /// once this returns, and what was in flight is dropped. A thread still
+    /// inside a call after `LATE_OUTPUT` is left to finish on its own; it
+    /// holds the session and `Shared`, which outlive its callbacks.
     fn drop(&mut self) {
-        // SAFETY: invalidated once; `shared` drops after.
-        unsafe { self.session.invalidate() };
+        let Some(submit) = self.submit.take() else {
+            return;
+        };
+        let deadline = Instant::now() + LATE_OUTPUT;
+        let mut state = self.shared.state.lock();
+        state.stop = true;
+        self.shared.signal.notify_all();
+        while !state.exited {
+            if self
+                .shared
+                .signal
+                .wait_until(&mut state, deadline)
+                .timed_out()
+            {
+                break;
+            }
+        }
+        let exited = state.exited;
+        drop(state);
+        if exited {
+            // It has only to return.
+            let _ = submit.join();
+        } else {
+            tracing::warn!(
+                target: "pb_mapper_desktop::session",
+                event = "macos_encoder_left_running",
+                waited_ms = LATE_OUTPUT.as_millis() as u64,
+            );
+        }
+    }
+}
+
+/// The submit thread: every call on the session, one at a time, until the
+/// encoder goes; then it invalidates the session, after which no callback
+/// runs. No lock is held across a call.
+fn serve(owned: SendSession, shared: &Shared) {
+    let SendSession { session, keyframe } = owned;
+    let mut load = Load::new(Instant::now());
+    let mut state = shared.state.lock();
+    loop {
+        if state.stop {
+            break;
+        }
+        #[cfg(test)]
+        if state.held {
+            shared.signal.wait(&mut state);
+            continue;
+        }
+        let (rate, job) = (state.rate.take(), state.job.take());
+        if rate.is_none() && job.is_none() {
+            shared.signal.wait(&mut state);
+            continue;
+        }
+        if state.failure.is_some() {
+            // The session is spent: nothing more is encoded, and `drain`
+            // says so.
+            if let Some(job) = job {
+                state.forget(job.token);
+            }
+            if std::mem::take(&mut state.c_waiting) {
+                MutexGuard::unlocked(&mut state, || shared.waker.wake());
+            }
+            continue;
+        }
+        state.in_call = true;
+        let token = job.as_ref().map(|job| job.token);
+        #[cfg(test)]
+        if std::mem::take(&mut state.tear_down) {
+            // SAFETY: on this thread, between calls; every later call fails
+            // as on a session VideoToolbox tore down itself.
+            unsafe { session.invalidate() };
+        }
+        let (refused, encoded) = MutexGuard::unlocked(&mut state, || {
+            // Off the main thread, with no pool of its own: VideoToolbox may
+            // autorelease.
+            objc2::rc::autoreleasepool(|_| {
+                let refused = rate.and_then(|bitrate| apply(&session, bitrate).err());
+                let encoded = job.filter(|_| refused.is_none()).map(|job| {
+                    let started = Instant::now();
+                    let status = encode_job(&session, &keyframe, &job);
+                    (status, started.elapsed())
+                });
+                (refused, encoded)
+            })
+        });
+        #[cfg(test)]
+        if state.park {
+            state.parked = true;
+            while state.park && !state.stop {
+                shared.signal.wait(&mut state);
+            }
+            state.parked = false;
+        }
+        state.in_call = false;
+        let mut wake = std::mem::take(&mut state.c_waiting);
+        let failure = match (refused, encoded) {
+            (Some(refused), _) => Some(refused),
+            (None, Some((status, _))) if status != 0 => {
+                Some(cf::status("hardware video encoding", status))
+            }
+            (None, Some((_, took))) => {
+                load.call(took);
+                None
+            }
+            (None, None) => None,
+        };
+        if let Some(failure) = failure {
+            // The job never reached VideoToolbox, or VideoToolbox refused it:
+            // no callback comes for it.
+            if let Some(token) = token {
+                state.forget(token);
+            }
+            state.failure.get_or_insert_with(|| failure.to_string());
+            wake = true;
+        }
+        if wake {
+            MutexGuard::unlocked(&mut state, || shared.waker.wake());
+        }
+        let now = Instant::now();
+        if load.due(now) {
+            let gate = std::mem::take(&mut state.gate);
+            MutexGuard::unlocked(&mut state, || load.roll(now, gate));
+        }
+    }
+    // A picture never taken goes with the session.
+    state.job = None;
+    drop(state);
+    // SAFETY: after the last call, and once outside a test's `tear_down`;
+    // `shared` and the session stay alive until this thread returns.
+    unsafe { session.invalidate() };
+    let mut state = shared.state.lock();
+    state.exited = true;
+    shared.signal.notify_all();
+}
+
+/// Set the mean bitrate and its cap, on the submit thread. A session that
+/// refuses the cap still holds the mean.
+fn apply(session: &VTCompressionSession, bitrate: u32) -> Result<()> {
+    // SAFETY: static keys.
+    unsafe {
+        set(
+            session,
+            kVTCompressionPropertyKey_AverageBitRate,
+            &cf::number(i64::from(bitrate)),
+        )?;
+        let _ = set(
+            session,
+            kVTCompressionPropertyKey_DataRateLimits,
+            &data_rate_limits(bitrate),
+        );
+    }
+    Ok(())
+}
+
+/// Encode `job`, on the submit thread: its status.
+fn encode_job(session: &VTCompressionSession, keyframe: &CFDictionary, job: &Job) -> i32 {
+    let mut flags = VTEncodeInfoFlags(0);
+    // SAFETY: an IOSurface-backed picture the session retains while it reads;
+    // the token is an opaque number handed back to the callback.
+    unsafe {
+        session.encode_frame(
+            &job.picture,
+            CMTime::new(job.pts_us as i64, 1_000_000),
+            kCMTimeInvalid,
+            job.keyframe.then_some(keyframe),
+            job.token as usize as *mut c_void,
+            &mut flags,
+        )
+    }
+}
+
+/// Where `macos_encoder_load` goes: with thread C's pacing.
+const LOAD_TARGET: &str = "pb_mapper_desktop::feedback";
+/// Encode calls timed per second.
+const LOAD_SAMPLES: usize = 256;
+
+/// The submit thread's debug figures, `macos_encoder_load`, after the first
+/// call a second or more after the last line: the window's length, how long
+/// its encode calls took (p50, p99), which thread C waited out before it
+/// had this thread, and the units it encoded; and, from thread C's ticks,
+/// those skipped for units in flight (`gate_ticks`), the submits
+/// that found this thread busy and left their tick armed
+/// (`armed_refusals`), and the most units in flight at a hand-off. Nothing
+/// allocated.
+struct Load {
+    started: Instant,
+    calls: [u32; LOAD_SAMPLES],
+    len: usize,
+    units: u32,
+}
+impl Load {
+    fn new(now: Instant) -> Self {
+        Self {
+            started: now,
+            calls: [0; LOAD_SAMPLES],
+            len: 0,
+            units: 0,
+        }
+    }
+
+    /// An encode call that took `took`.
+    fn call(&mut self, took: Duration) {
+        self.units += 1;
+        if let Some(slot) = self.calls.get_mut(self.len) {
+            *slot = u32::try_from(took.as_micros()).unwrap_or(u32::MAX);
+            self.len += 1;
+        }
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.started) >= Duration::from_secs(1)
+    }
+
+    /// Trace the second that ended at `now`, with what thread C counted, and
+    /// start the next.
+    fn roll(&mut self, now: Instant, gate: GateCounts) {
+        if tracing::enabled!(target: LOAD_TARGET, tracing::Level::DEBUG) {
+            let calls = self.calls.get_mut(..self.len).unwrap_or_default();
+            calls.sort_unstable();
+            let at = |quantile: usize| {
+                calls
+                    .get((calls.len() * quantile / 100).min(calls.len().saturating_sub(1)))
+                    .copied()
+            };
+            tracing::debug!(
+                target: LOAD_TARGET,
+                event = "macos_encoder_load",
+                seconds = now.saturating_duration_since(self.started).as_secs_f64(),
+                call_p50_us = at(50),
+                call_p99_us = at(99),
+                units = self.units,
+                gate_ticks = gate.full,
+                armed_refusals = gate.busy,
+                peak_in_flight = gate.peak_in_flight,
+            );
+        }
+        self.started = now;
+        self.len = 0;
+        self.units = 0;
     }
 }
 

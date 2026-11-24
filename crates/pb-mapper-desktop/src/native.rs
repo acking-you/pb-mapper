@@ -286,6 +286,9 @@ impl<P: Platform> Backend for PlatformBackend<P> {
     fn pending_video(&self) -> usize {
         self.video.as_ref().map_or(0, |(_, video)| video.pending())
     }
+    fn video_full(&self) -> bool {
+        self.video.as_ref().is_some_and(|(_, video)| video.full())
+    }
     fn drain_poll(&self) -> Option<Duration> {
         self.video
             .as_ref()
@@ -531,6 +534,9 @@ impl Backend for NativeBackend {
     }
     fn pending_video(&self) -> usize {
         self.0.pending_video()
+    }
+    fn video_full(&self) -> bool {
+        self.0.video_full()
     }
     fn drain_poll(&self) -> Option<Duration> {
         self.0.drain_poll()
