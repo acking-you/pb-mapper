@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     CursorPosition, DRAIN_POLL, Display, EncodedFrame, Input, InputEvent, KeyframeReason,
     VideoFormat, VideoRate,
-    codec::present_waiter::{Idle, Status},
+    codec::present_waiter::{FRESH_FOR, Idle, Status},
     error,
     idr::IdrReason,
     lane::LANE_CAPACITY,
@@ -375,6 +375,8 @@ impl Backend for Fake {
 /// at once.
 struct Armed {
     status: Status,
+    /// When the picture that waits was published.
+    published_at: Option<Instant>,
     created: Instant,
     last_submit: Option<Instant>,
     keyframe: bool,
@@ -392,6 +394,7 @@ impl Armed {
     fn new(created: Instant) -> Self {
         Self {
             status: Status::default(),
+            published_at: None,
             created,
             last_submit: None,
             keyframe: false,
@@ -406,20 +409,26 @@ impl Armed {
             created: self.created,
             last_submit: self.last_submit,
             keyframe: self.keyframe,
-            look: Duration::from_millis(32),
+            look: Self::LOOK,
         }
     }
+    const LOOK: Duration = Duration::from_millis(32);
 
-    /// The thread converted a present and published it, which disarms it.
-    fn publish(&mut self) {
+    /// The thread converted a present and published it at `at`, which
+    /// disarms it.
+    fn publish(&mut self, at: Instant) {
         self.status = Status {
             published: true,
+            held: self.status.held,
             ..Status::default()
         };
+        self.published_at = Some(at);
     }
 
-    /// As the encoder's submit: the published picture, else a due repeat
-    /// once the thread found nothing newer, else arm the thread.
+    /// As the encoder's submit: the published picture, unless it waited
+    /// `FRESH_FOR`, when it is held back while the thread looks past it,
+    /// and goes once the look answered; else a due repeat once the thread
+    /// found nothing newer; else arm the thread.
     fn submit(
         &mut self,
         now: Instant,
@@ -428,7 +437,16 @@ impl Armed {
         submitted: &mut bool,
     ) -> Option<EncodedFrame> {
         self.keyframe |= keyframe;
-        let call = if self.status.published {
+        let waited = self
+            .published_at
+            .is_some_and(|at| now.saturating_duration_since(at) >= FRESH_FOR);
+        if self.status.published && !self.status.held && waited {
+            self.status.published = false;
+            self.status.held = true;
+        }
+        let call = if self.status.published
+            || (self.status.held && self.status.answered(now, Self::LOOK))
+        {
             Call::Fresh
         } else if self.rule().repeat_now(now) {
             Call::Repeat
@@ -443,6 +461,7 @@ impl Armed {
             return None;
         }
         self.status = Status::default();
+        self.published_at = None;
         self.last_submit = Some(now);
         let keyframe = std::mem::take(&mut self.keyframe);
         Some(EncodedFrame {
@@ -1839,7 +1858,8 @@ fn a_pushing_encoder_with_a_pulled_capture_still_polls_armed_ticks_while_active(
 /// the thread publishes it. On a still desktop thread C then calls only to
 /// arm it again after each 250 ms repeat, never spinning; a present the
 /// armed thread publishes is taken the moment it lands; and one published
-/// right after a repeat waits for the next tick.
+/// right after a repeat waits for the next tick, which, as it waited, arms
+/// the thread to look past it first and sends it once the look answered.
 #[test]
 fn an_armed_capture_thread_is_taken_as_it_publishes_and_never_polled() {
     use crate::codec::pipeline::LIVENESS_INTERVAL;
@@ -1856,7 +1876,7 @@ fn an_armed_capture_thread_is_taken_as_it_publishes_and_never_polled() {
             .unwrap()
     };
     let last = |h: &Harness| calls(h).last().copied();
-    let publish = |h: &Harness| h.fake.armed.lock().as_mut().unwrap().publish();
+    let publish = |h: &Harness| h.fake.armed.lock().as_mut().unwrap().publish(h.now());
 
     // Armed by the first tick, until the first picture's deadline.
     assert!(h.step() > start);
@@ -1900,7 +1920,7 @@ fn an_armed_capture_thread_is_taken_as_it_publishes_and_never_polled() {
     assert!(!h.sent()[0].duplicate);
 
     // A repeat spends the tick: a present published right after it waits
-    // for the next.
+    // for the next, which looks past it before it sends it, at that tick.
     let armed = h.next_capture();
     assert_eq!(last(&h), Some((armed, Call::Arm)));
     let repeated = h.next_capture();
@@ -1915,7 +1935,10 @@ fn an_armed_capture_thread_is_taken_as_it_publishes_and_never_polled() {
         "{:?}",
         taken - repeated
     );
+    assert_eq!(last(&h), Some((taken, Call::Arm)));
+    assert_eq!(h.next_capture(), taken);
     assert_eq!(last(&h), Some((taken, Call::Fresh)));
+    assert!(!h.sent().last().unwrap().duplicate);
 }
 
 #[test]

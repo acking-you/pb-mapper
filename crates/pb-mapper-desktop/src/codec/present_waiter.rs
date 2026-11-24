@@ -12,6 +12,13 @@
 //! published, and ends it. Dropping it stops and joins it, at most
 //! `STOP_WAIT`.
 //!
+//! A picture that waited `FRESH_FOR` or longer before thread C takes it
+//! (thread C skipped ticks, every viewer paused, or a repeat went first) may
+//! have a newer present behind it that nobody looked for: thread C holds it
+//! back and arms the thread to look past it first. An armed thread that
+//! thread C has not asked again within its source's `ASKED_WITHIN` stops
+//! looking, as when its caller paused without saying so.
+//!
 //! Neutral, and tested everywhere with a stub source.
 
 use crate::{
@@ -31,6 +38,25 @@ use std::{
 /// rather than holding thread C.
 const STOP_WAIT: Duration = Duration::from_millis(100);
 
+/// A published picture this old or older when thread C takes it is looked
+/// past first: it waited beyond the wake its publish gave thread C, and
+/// the thread, disarmed as it published, has not looked for what the
+/// display presented since. Thread C's poll interval while the desktop was
+/// active, which a present waited at most for when thread C polled the
+/// source itself.
+pub(crate) const FRESH_FOR: Duration = DRAIN_POLL;
+
+/// How long an armed thread that thread C has not asked again goes on
+/// looking: past the slowest pace's period (1 s), at which a privileged
+/// helper's host asks, and past the liveness repeat, by which thread C
+/// asks in process, so that only a caller that stopped asking (every viewer
+/// paused, or the host went) trips it.
+pub(crate) const ASKED_WITHIN: Duration = Duration::from_secs(2);
+const _: () = assert!(
+    ASKED_WITHIN.as_millis() > 1_000 && ASKED_WITHIN.as_millis() > LIVENESS_INTERVAL.as_millis(),
+    "a caller that asks at its pace, or repeats, keeps the thread armed"
+);
+
 /// What a capture thread captures from.
 pub(crate) trait PresentSource: Send + 'static {
     /// What a picture is converted into, which thread C hands over before
@@ -41,6 +67,9 @@ pub(crate) trait PresentSource: Send + 'static {
     /// The longest one look waits for a present: what bounds how long the
     /// thread takes to see that it was stopped or disarmed.
     const WAIT: Duration;
+    /// How long the thread, armed, goes on looking without thread C asking
+    /// again (`PresentWaiter::arm`).
+    const ASKED_WITHIN: Duration = ASKED_WITHIN;
     /// On the capture thread, before anything else.
     fn start(&mut self) -> Result<()>;
     /// Wait at most `wait` for a new picture, and convert it into the
@@ -52,6 +81,10 @@ pub(crate) trait PresentSource: Send + 'static {
         wait: Duration,
         take: impl FnOnce() -> Option<Self::Target>,
     ) -> Result<Option<Self::Picture>>;
+    /// `newer` replaces `older`, a picture thread C held back and never
+    /// sent: what `older` covered (its presents) counts for `newer`, and
+    /// `older`'s target goes.
+    fn fold(older: Self::Picture, newer: &mut Self::Picture);
 }
 
 /// What one [`PresentWaiter::arm`] did.
@@ -70,17 +103,33 @@ pub(crate) enum Arm {
 pub(crate) struct Status {
     /// A picture or a failure waits to be taken.
     pub(crate) published: bool,
-    /// Since when the thread is armed, while it is.
+    /// Since when the thread is armed, while it is, or since it began
+    /// converting a present it found: what thread C, waiting for its
+    /// answer, waits at most `look` after.
     pub(crate) armed: Option<Instant>,
     /// Armed, and a look since found no new picture: a repeat now repeats
     /// what the display still shows.
     pub(crate) idle: bool,
+    /// Thread C holds back a picture that waited, while the thread looks
+    /// past it (`PresentWaiter::next_picture`).
+    pub(crate) held: bool,
+}
+impl Status {
+    /// Whether thread C, waiting for the armed thread's answer, has it or
+    /// has waited long enough: a look found nothing new, or `look` passed
+    /// since the arming (or since the thread began converting a present).
+    pub(crate) fn answered(&self, now: Instant, look: Duration) -> bool {
+        self.idle || self.armed.is_some_and(|at| now >= at + look)
+    }
 }
 
 struct State<T, P> {
     stop: bool,
-    /// Since when thread C wants a picture, while it does.
+    /// Since when thread C wants a picture, while it does; then since the
+    /// thread began converting the present it found.
     armed: Option<Instant>,
+    /// When thread C last armed the thread, or found it armed.
+    asked: Instant,
     /// Counts the armings, so that the thread tells a new one from the one
     /// it looked for.
     arming: u64,
@@ -91,7 +140,8 @@ struct State<T, P> {
     /// taken back, so that a thread that is told to stop looking while it
     /// holds a new picture still has one to convert it into.
     target: Option<T>,
-    picture: Option<P>,
+    /// The picture published, and when.
+    picture: Option<(P, Instant)>,
     failure: Option<std::io::Error>,
     /// The thread ended, after a failure.
     ended: bool,
@@ -109,6 +159,15 @@ impl<T, P> State<T, P> {
     fn published(&self) -> bool {
         self.picture.is_some() || self.failure.is_some() || self.ended
     }
+
+    fn status(&self, held: bool) -> Status {
+        Status {
+            published: self.published(),
+            armed: self.armed,
+            idle: self.idle,
+            held,
+        }
+    }
 }
 
 struct Shared<T, P> {
@@ -117,12 +176,23 @@ struct Shared<T, P> {
     armed: Condvar,
 }
 impl<T, P> Shared<T, P> {
+    /// The target for a present the thread found: from now on a due repeat
+    /// waits for the picture it becomes, at most `look` past now.
+    fn take_target(&self) -> Option<T> {
+        let mut state = self.state.lock();
+        state.idle = false;
+        if state.armed.is_some() {
+            state.armed = Some(Instant::now());
+        }
+        state.target.take()
+    }
+
     /// A new picture: the newer replaces one not taken yet, as it shows
     /// the display as it is now.
     fn publish(&self, picture: P, waker: &Waker) {
         {
             let mut state = self.state.lock();
-            state.picture = Some(picture);
+            state.picture = Some((picture, Instant::now()));
             state.disarm();
         }
         waker.wake();
@@ -160,6 +230,9 @@ pub(crate) struct PresentWaiter<S: PresentSource> {
     thread: Option<JoinHandle<()>>,
     /// Disconnects once the thread is done, its source dropped on it.
     ended: mpsc::Receiver<()>,
+    /// Thread C's: a published picture that waited, held back while the
+    /// thread looks past it.
+    held: Option<S::Picture>,
 }
 impl<S: PresentSource> PresentWaiter<S> {
     /// Start `source`'s thread, `name`d, which wakes `waker` for what it
@@ -169,6 +242,7 @@ impl<S: PresentSource> PresentWaiter<S> {
             state: Mutex::new(State {
                 stop: false,
                 armed: None,
+                asked: Instant::now(),
                 arming: 0,
                 idle: false,
                 verdict: false,
@@ -195,12 +269,47 @@ impl<S: PresentSource> PresentWaiter<S> {
             shared,
             thread: Some(thread),
             ended,
+            held: None,
         })
     }
 
-    /// The picture the thread published, if one waits.
-    pub(crate) fn take(&self) -> Option<S::Picture> {
-        self.shared.state.lock().picture.take()
+    /// The picture thread C submits now, as of `now`, if any.
+    ///
+    /// The one the thread published, unless it waited `FRESH_FOR` or
+    /// longer: then it is held back (`Status::held`), and thread C arms the
+    /// thread to look past it, asking for the answer. The look decides: a
+    /// newer picture, which this returns with the held one folded into it;
+    /// or, once the look found nothing newer, or `look` passed since the
+    /// arming without an answer, the held one.
+    pub(crate) fn next_picture(&mut self, now: Instant, look: Duration) -> Option<S::Picture> {
+        let (published, status) = {
+            let mut state = self.shared.state.lock();
+            let status = state.status(self.held.is_some());
+            (state.picture.take(), status)
+        };
+        if let Some((mut picture, at)) = published {
+            // A picture published while one is held answers the look past
+            // it: published later, it shows what came after.
+            if let Some(older) = self.held.take() {
+                S::fold(older, &mut picture);
+                return Some(picture);
+            }
+            if now.saturating_duration_since(at) < FRESH_FOR {
+                return Some(picture);
+            }
+            self.held = Some(picture);
+            return None;
+        }
+        if status.held && status.answered(now, look) {
+            return self.held.take();
+        }
+        None
+    }
+
+    /// The picture held back, whatever the look: for a thread that cannot
+    /// be armed to look past it.
+    pub(crate) fn take_held(&mut self) -> Option<S::Picture> {
+        self.held.take()
     }
 
     /// The failure that ended the thread, once; then that it ended.
@@ -216,9 +325,10 @@ impl<S: PresentSource> PresentWaiter<S> {
     }
 
     /// Arm the thread for the next picture, unless one waits to be taken,
-    /// handing it a target first when it has none: `target` makes one, or
-    /// none when its pool is empty. With `verdict`, thread C waits for the
-    /// thread's look: it is woken once that found nothing new.
+    /// handing it a target first when it has none and is not converting a
+    /// present into the one it had: `target` makes one, or none when its
+    /// pool is empty. With `verdict`, thread C waits for the thread's look:
+    /// it is woken once that found nothing new.
     pub(crate) fn arm(
         &self,
         verdict: bool,
@@ -229,7 +339,9 @@ impl<S: PresentSource> PresentWaiter<S> {
             if state.published() {
                 return Ok(Arm::Published);
             }
-            if state.target.is_some() {
+            // Armed without a target, the thread is converting the present
+            // it found into the one it had, and publishes that next.
+            if state.target.is_some() || state.armed.is_some() {
                 return Ok(self.armed(state, verdict));
             }
         }
@@ -251,9 +363,11 @@ impl<S: PresentSource> PresentWaiter<S> {
         mut state: parking_lot::MutexGuard<'_, State<S::Target, S::Picture>>,
         verdict: bool,
     ) -> Arm {
+        let now = Instant::now();
+        state.asked = now;
         let newly = state.armed.is_none();
         if newly {
-            state.armed = Some(Instant::now());
+            state.armed = Some(now);
             state.arming += 1;
             state.idle = false;
         }
@@ -265,20 +379,15 @@ impl<S: PresentSource> PresentWaiter<S> {
         Arm::Armed
     }
 
-    /// Thread C took the tick otherwise (a repeat, backpressure): the next
-    /// present waits for the next arming. A look under way still publishes
-    /// what it finds.
+    /// Thread C took the tick otherwise (a repeat, a full encoder, every
+    /// viewer paused): the next present waits for the next arming. A look
+    /// under way still publishes what it finds.
     pub(crate) fn disarm(&self) {
         self.shared.state.lock().disarm();
     }
 
     pub(crate) fn status(&self) -> Status {
-        let state = self.shared.state.lock();
-        Status {
-            published: state.published(),
-            armed: state.armed,
-            idle: state.idle,
-        }
+        self.shared.state.lock().status(self.held.is_some())
     }
 }
 impl<S: PresentSource> Drop for PresentWaiter<S> {
@@ -310,7 +419,8 @@ impl<S: PresentSource> Drop for PresentWaiter<S> {
 }
 
 /// The capture thread: start the source, then, while armed, look for each
-/// new picture and publish it, until stopped or a failure.
+/// new picture and publish it, until stopped or a failure. Armed and not
+/// asked again within `S::ASKED_WITHIN`, it disarms itself.
 fn run<S: PresentSource>(mut source: S, shared: &Shared<S::Target, S::Picture>, waker: &Waker) {
     if let Err(failure) = source.start() {
         shared.fail(failure, waker);
@@ -326,7 +436,12 @@ fn run<S: PresentSource>(mut source: S, shared: &Shared<S::Target, S::Picture>, 
                     return;
                 }
                 if state.armed.is_some() {
-                    break;
+                    if Instant::now() < state.asked + S::ASKED_WITHIN {
+                        break;
+                    }
+                    // Thread C stopped asking: its caller paused, or went,
+                    // without saying so, as a privileged helper's host does.
+                    state.disarm();
                 }
                 #[cfg(test)]
                 {
@@ -340,7 +455,7 @@ fn run<S: PresentSource>(mut source: S, shared: &Shared<S::Target, S::Picture>, 
         };
         // A new arming first takes what came meanwhile, without waiting.
         let wait = if first { Duration::ZERO } else { S::WAIT };
-        match source.next(wait, || shared.state.lock().target.take()) {
+        match source.next(wait, || shared.take_target()) {
             Ok(Some(picture)) => shared.publish(picture, waker),
             Ok(None) if idle != seen => {
                 idle = seen;
@@ -370,7 +485,7 @@ pub(crate) struct Idle {
     /// A keyframe was asked for and not sent yet.
     pub(crate) keyframe: bool,
     /// How long after arming the thread thread C waits for its look before
-    /// it repeats anyway.
+    /// it repeats anyway, or sends what it held back.
     pub(crate) look: Duration,
 }
 impl Idle {
@@ -381,13 +496,19 @@ impl Idle {
             .is_some_and(|at| self.keyframe || now >= at + LIVENESS_INTERVAL)
     }
 
-    /// Whether a due repeat goes now: the thread looked and found nothing
-    /// new, or has not said so within `look` of its arming. Otherwise a new
-    /// picture may already wait in the operating system, which the repeat
-    /// would hold back a tick.
+    /// Whether thread C waits for the armed thread's look: it holds a
+    /// picture back, or a repeat is due.
+    pub(crate) fn wants_answer(&self, now: Instant) -> bool {
+        self.status.held || self.repeat_due(now)
+    }
+
+    /// Whether a due repeat goes now: nothing is held back, which goes
+    /// instead, and the thread looked and found nothing new, or has not
+    /// said so within `look` of its arming. Otherwise a new picture may
+    /// already wait in the operating system, which the repeat would hold
+    /// back a tick.
     pub(crate) fn repeat_now(&self, now: Instant) -> bool {
-        self.repeat_due(now)
-            && (self.status.idle || self.status.armed.is_some_and(|at| now >= at + self.look))
+        !self.status.held && self.repeat_due(now) && self.status.answered(now, self.look)
     }
 
     /// When thread C needs the source again, if not at its next tick
@@ -397,10 +518,11 @@ impl Idle {
     ///   C, which retries `DRAIN_POLL` after that submit meanwhile.
     /// - A picture or failure published, or the thread unarmed (the tick
     ///   arms it): the tick.
+    /// - Armed with a picture held back or a repeat due: the tick once the
+    ///   thread found nothing new, its wake or `look` after the arming
+    ///   before.
     /// - Armed before the first picture: the wake, or the first picture's
     ///   deadline.
-    /// - Armed with a repeat due: the tick once the thread found nothing
-    ///   new, its wake or `look` after the arming before.
     /// - Otherwise the wake, or the next repeat: liveness, or the keyframe
     ///   due.
     pub(crate) fn until(&self, now: Instant, keyframe_due: Option<Instant>) -> Option<Instant> {
@@ -411,12 +533,12 @@ impl Idle {
             return None;
         }
         let armed = self.status.armed?;
+        if self.wants_answer(now) {
+            return (!self.status.answered(now, self.look)).then_some(armed + self.look);
+        }
         let Some(last) = self.last_submit else {
             return Some(self.created + FIRST_SUBMIT_WAIT);
         };
-        if self.repeat_due(now) {
-            return (!self.repeat_now(now)).then_some(armed + self.look);
-        }
         let liveness = last + LIVENESS_INTERVAL;
         Some(keyframe_due.map_or(liveness, |due| due.min(liveness)))
     }
@@ -434,6 +556,8 @@ mod tests {
     /// What the stub display does next.
     enum Event {
         Present(u32),
+        /// A present whose conversion takes this long.
+        Slow(u32, Duration),
         Pointer,
         Fail,
     }
@@ -449,7 +573,7 @@ mod tests {
 
     /// A display whose presents a test sends, a look waiting at most `MS`
     /// for each; a present is converted by writing its number into the
-    /// target.
+    /// target, and a held picture folds into the next by going before it.
     struct Stub<const MS: u64> {
         events: mpsc::Receiver<Event>,
         log: Arc<Mutex<Log>>,
@@ -459,6 +583,7 @@ mod tests {
         type Target = Vec<u32>;
         type Picture = Vec<u32>;
         const WAIT: Duration = Duration::from_millis(MS);
+        const ASKED_WITHIN: Duration = Duration::from_millis(MS * 8);
         fn start(&mut self) -> Result<()> {
             self.log.lock().started = Some(std::thread::current().id());
             if self.fail_start {
@@ -472,19 +597,23 @@ mod tests {
             take: impl FnOnce() -> Option<Vec<u32>>,
         ) -> Result<Option<Vec<u32>>> {
             self.log.lock().looks.push(wait);
-            match self.events.recv_timeout(wait) {
-                Ok(Event::Present(n)) => {
-                    let mut target = take().ok_or_else(|| error("armed without a target"))?;
-                    target.push(n);
-                    Ok(Some(target))
-                }
-                Ok(Event::Pointer) | Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
-                Ok(Event::Fail) => Err(error("access lost")),
+            let (present, converting) = match self.events.recv_timeout(wait) {
+                Ok(Event::Present(n)) => (n, Duration::ZERO),
+                Ok(Event::Slow(n, converting)) => (n, converting),
+                Ok(Event::Pointer) | Err(mpsc::RecvTimeoutError::Timeout) => return Ok(None),
+                Ok(Event::Fail) => return Err(error("access lost")),
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     std::thread::sleep(wait);
-                    Ok(None)
+                    return Ok(None);
                 }
-            }
+            };
+            let mut target = take().ok_or_else(|| error("armed without a target"))?;
+            std::thread::sleep(converting);
+            target.push(present);
+            Ok(Some(target))
+        }
+        fn fold(older: Vec<u32>, newer: &mut Vec<u32>) {
+            newer.splice(0..0, older);
         }
     }
     impl<const MS: u64> Drop for Stub<MS> {
@@ -498,9 +627,13 @@ mod tests {
         display: mpsc::Sender<Event>,
         log: Arc<Mutex<Log>>,
         woken: Waiter,
+        /// Before anything was published: thread C taking a picture as of
+        /// then takes it the moment its publish woke it.
+        start: Instant,
     }
     impl<const MS: u64> Rig<MS> {
         fn new(fail_start: bool) -> Self {
+            let start = Instant::now();
             let (display, events) = mpsc::channel();
             let log = Arc::new(Mutex::new(Log::default()));
             let wake = Wake::new();
@@ -516,6 +649,7 @@ mod tests {
                 display,
                 log,
                 woken,
+                start,
             }
         }
         fn looks(&self) -> usize {
@@ -524,7 +658,12 @@ mod tests {
         fn parks(&self) -> u64 {
             self.waiter.shared.state.lock().parks
         }
+        /// What thread C takes as its publish wakes it.
+        fn take(&mut self) -> Option<Vec<u32>> {
+            self.waiter.next_picture(self.start, LOOK)
+        }
     }
+    const LOOK: Duration = Duration::from_secs(1);
     fn soon() -> Instant {
         Instant::now() + Duration::from_secs(5)
     }
@@ -551,11 +690,11 @@ mod tests {
     /// a picture waits to be taken, and an empty pool leaves it unarmed.
     #[test]
     fn an_armed_thread_publishes_the_next_present_and_wakes_thread_c() {
-        let rig = Rig::<16>::new(false);
+        let mut rig = Rig::<16>::new(false);
         rig.display.send(Event::Present(1)).unwrap();
         until(|| rig.parks() > 0);
         assert_eq!(rig.looks(), 0, "unarmed, it never looks");
-        assert!(rig.waiter.take().is_none());
+        assert!(rig.take().is_none());
         assert_eq!(rig.waiter.status(), Status::default());
 
         let mut made = 0;
@@ -572,7 +711,7 @@ mod tests {
             Arm::Published
         );
         assert_eq!(made, 1);
-        assert_eq!(rig.waiter.take(), Some(vec![1]));
+        assert_eq!(rig.take(), Some(vec![1]));
         assert!(!rig.waiter.status().published);
         rig.waiter.failed().unwrap();
 
@@ -587,7 +726,7 @@ mod tests {
         assert_eq!(made, 2);
         rig.display.send(Event::Present(2)).unwrap();
         assert!(rig.woken.wait(soon()).unwrap());
-        assert_eq!(rig.waiter.take(), Some(vec![2]));
+        assert_eq!(rig.take(), Some(vec![2]));
         assert_eq!(rig.waiter.arm(false, || Ok(None)).unwrap(), Arm::Empty);
         assert_eq!(rig.waiter.status().armed, None);
     }
@@ -598,7 +737,7 @@ mod tests {
     /// new arming looks at once again.
     #[test]
     fn a_look_that_finds_nothing_marks_the_thread_idle_and_answers_only_when_asked() {
-        let rig = Rig::<5_000>::new(false);
+        let mut rig = Rig::<5_000>::new(false);
         let mut made = 0;
         rig.display.send(Event::Pointer).unwrap();
         until(|| rig.parks() > 0);
@@ -628,7 +767,7 @@ mod tests {
         assert_eq!(made, 1, "the target waits for the next picture");
         rig.display.send(Event::Present(7)).unwrap();
         assert!(rig.woken.wait(soon()).unwrap());
-        assert_eq!(rig.waiter.take(), Some(vec![7]));
+        assert_eq!(rig.take(), Some(vec![7]));
     }
 
     /// A present found by the look under way when thread C disarmed the
@@ -636,14 +775,126 @@ mod tests {
     /// display shows it, and no later look would find it again.
     #[test]
     fn a_present_found_after_a_disarm_is_still_published() {
-        let rig = Rig::<5_000>::new(false);
+        let mut rig = Rig::<5_000>::new(false);
         let mut made = 0;
         rig.waiter.arm(false, target(&mut made)).unwrap();
         until(|| rig.looks() == 2);
         rig.waiter.disarm();
         rig.display.send(Event::Present(3)).unwrap();
         assert!(rig.woken.wait(soon()).unwrap());
-        assert_eq!(rig.waiter.take(), Some(vec![3]));
+        assert_eq!(rig.take(), Some(vec![3]));
+        assert_eq!(made, 1);
+    }
+
+    /// A picture that waited `FRESH_FOR` before thread C takes it (skipped
+    /// ticks, a pause) is held back while the thread, armed again, looks
+    /// past it: with nothing newer it goes once that look answers, and a
+    /// newer present goes instead, carrying the held picture's presents.
+    #[test]
+    fn a_picture_that_waited_goes_only_once_the_thread_looked_past_it() {
+        /// Arm the thread, and take the present it publishes `FRESH_FOR`
+        /// after the wake.
+        fn stale(rig: &mut Rig<5_000>, made: &mut u32, present: u32) {
+            rig.waiter.arm(false, target(made)).unwrap();
+            rig.display.send(Event::Present(present)).unwrap();
+            assert!(rig.woken.wait(soon()).unwrap());
+            let late = Instant::now() + FRESH_FOR;
+            assert_eq!(rig.waiter.next_picture(late, LOOK), None);
+            let status = rig.waiter.status();
+            assert!(status.held && !status.published && status.armed.is_none());
+            // Unarmed, nothing answers.
+            assert_eq!(rig.waiter.next_picture(late + LOOK, LOOK), None);
+        }
+        let mut rig = Rig::<5_000>::new(false);
+        let mut made = 0;
+
+        // Nothing newer: the look's answer wakes thread C, which takes the
+        // held picture, then nothing.
+        stale(&mut rig, &mut made, 1);
+        rig.waiter.arm(true, target(&mut made)).unwrap();
+        assert!(rig.woken.wait(soon()).unwrap());
+        let status = rig.waiter.status();
+        assert!(status.held && status.idle && !status.published);
+        assert_eq!(rig.take(), Some(vec![1]));
+        assert_eq!(rig.take(), None);
+        assert!(!rig.waiter.status().held);
+
+        // A newer present came meanwhile: the look takes it at once, and it
+        // goes in the held one's place, however late it is taken.
+        rig.waiter.disarm();
+        stale(&mut rig, &mut made, 2);
+        rig.display.send(Event::Present(3)).unwrap();
+        rig.waiter.arm(true, target(&mut made)).unwrap();
+        assert!(rig.woken.wait(soon()).unwrap());
+        let late = Instant::now() + FRESH_FOR;
+        assert_eq!(rig.waiter.next_picture(late, LOOK), Some(vec![2, 3]));
+        assert_eq!(rig.waiter.status(), Status::default());
+
+        // A held picture the thread cannot look past goes as it is.
+        stale(&mut rig, &mut made, 4);
+        assert_eq!(rig.waiter.take_held(), Some(vec![4]));
+        assert!(!rig.waiter.status().held);
+    }
+
+    /// A present the thread found and is converting keeps a due repeat
+    /// waiting: the thread is no longer idle, and `look` counts from the
+    /// conversion's start, not from the arming long before. No second
+    /// target is handed to a thread converting into its own.
+    #[test]
+    fn a_due_repeat_waits_for_the_present_the_thread_is_converting() {
+        let mut rig = Rig::<5_000>::new(false);
+        let mut made = 0;
+        rig.waiter.arm(false, target(&mut made)).unwrap();
+        until(|| rig.waiter.status().idle);
+        let armed = rig.waiter.status().armed.unwrap();
+        until(|| rig.looks() == 2);
+        let look = Duration::from_millis(200);
+        let converting = Instant::now();
+        rig.display
+            .send(Event::Slow(5, Duration::from_millis(500)))
+            .unwrap();
+        until(|| !rig.waiter.status().idle);
+        let status = rig.waiter.status();
+        let since = status.armed.unwrap();
+        assert!(since > armed && since >= converting, "{status:?}");
+        assert!(!status.answered(since, look));
+        let repeat = Idle {
+            waiting: None,
+            status,
+            created: armed,
+            last_submit: Some(armed),
+            keyframe: true,
+            look,
+        };
+        assert!(repeat.repeat_due(since) && !repeat.repeat_now(since));
+        assert_eq!(repeat.until(since, None), Some(since + look));
+        // Asked again meanwhile, it is armed, with no new target.
+        assert_eq!(rig.waiter.arm(true, || Ok(None)).unwrap(), Arm::Armed);
+        assert!(rig.woken.wait(soon()).unwrap());
+        assert_eq!(rig.take(), Some(vec![5]));
+        assert_eq!(made, 1);
+    }
+
+    /// An armed thread that thread C does not ask again within its
+    /// source's `ASKED_WITHIN` stops looking, as a paused host behind the
+    /// helper never says it paused; the next arming looks at once again.
+    #[test]
+    fn an_armed_thread_not_asked_again_stops_looking() {
+        let rig = Rig::<16>::new(false);
+        let mut made = 0;
+        until(|| rig.parks() > 0);
+        rig.waiter.arm(false, target(&mut made)).unwrap();
+        until(|| rig.looks() >= 2);
+        until(|| rig.parks() > 1);
+        assert_eq!(rig.waiter.status(), Status::default());
+        let looks = rig.looks();
+        assert!(
+            looks as u128 <= 2 + Stub::<16>::ASKED_WITHIN.as_millis() / 16,
+            "{looks}"
+        );
+        rig.waiter.arm(false, target(&mut made)).unwrap();
+        until(|| rig.looks() > looks);
+        assert_eq!(rig.log.lock().looks.get(looks), Some(&Duration::ZERO));
         assert_eq!(made, 1);
     }
 
@@ -695,7 +946,8 @@ mod tests {
         }
     }
 
-    /// A target or a picture left with the waiter goes with it.
+    /// A target, a picture, or a picture held back, left with the waiter
+    /// goes with it.
     #[test]
     fn what_waits_with_the_waiter_goes_with_it() {
         struct Counted(Arc<AtomicBool>);
@@ -727,11 +979,12 @@ mod tests {
                 std::thread::sleep(wait);
                 Ok(None)
             }
+            fn fold(_: Counted, _: &mut Counted) {}
         }
-        for publish in [true, false] {
+        for (publish, hold) in [(true, false), (true, true), (false, false)] {
             let wake = Wake::new();
             let woken = Waiter::new(&wake).unwrap();
-            let waiter =
+            let mut waiter =
                 PresentWaiter::spawn("present-waiter-test", Holder { publish }, Waker(wake))
                     .unwrap();
             let dropped = Arc::new(AtomicBool::new(false));
@@ -741,9 +994,17 @@ mod tests {
             assert_eq!(arm.unwrap(), Arm::Armed);
             assert!(woken.wait(soon()).unwrap());
             assert_eq!(waiter.status().published, publish);
+            if hold {
+                let late = Instant::now() + FRESH_FOR;
+                assert!(waiter.next_picture(late, LOOK).is_none());
+                assert!(waiter.status().held);
+            }
             assert!(!dropped.load(Ordering::SeqCst));
             drop(waiter);
-            assert!(dropped.load(Ordering::SeqCst), "publish={publish}");
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "publish={publish} hold={hold}"
+            );
         }
     }
 
@@ -824,9 +1085,29 @@ mod tests {
             ..keyframe
         };
         assert_eq!(at(answered, ms(120)), None);
+        // A picture held back waits for the look's answer as a repeat
+        // does, before the first picture too, and goes instead of one.
+        let held = Status {
+            held: true,
+            ..armed
+        };
+        for last_submit in [None, Some(t0 + ms(90))] {
+            let rule = Idle {
+                status: held,
+                last_submit,
+                ..keyframe
+            };
+            assert!(rule.wants_answer(t0 + ms(120)));
+            assert_eq!(at(rule, ms(120)), Some(t0 + ms(330) + look));
+            assert_eq!(at(rule, ms(330) + look), None);
+            assert!(!rule.repeat_now(t0 + ms(330) + look));
+        }
+        assert_eq!(at(with(Status { idle: true, ..held }), ms(120)), None);
         // Whatever the state, `None` leaves something to do at the tick,
         // and an instant already past never comes without it.
-        for status in [Status::default(), armed, published, idle] {
+        let statuses = [Status::default(), armed, published, idle]
+            .map(|status| [false, true].map(|held| Status { held, ..status }));
+        for status in statuses.into_iter().flatten() {
             for last_submit in [None, Some(t0 + ms(90))] {
                 for keyframe in [false, true] {
                     let rule = Idle {
@@ -837,8 +1118,10 @@ mod tests {
                     };
                     for now in [ms(95), ms(120), due, ms(330) + look, ms(400)] {
                         let now = t0 + now;
-                        let something =
-                            status.published || status.armed.is_none() || rule.repeat_now(now);
+                        let something = status.published
+                            || status.armed.is_none()
+                            || rule.repeat_now(now)
+                            || (status.held && status.answered(now, look));
                         match rule.until(now, None) {
                             None => assert!(something, "{rule:?} at {now:?}"),
                             Some(until) => assert!(until > now || something, "{rule:?}"),

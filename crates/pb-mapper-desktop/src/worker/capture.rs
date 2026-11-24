@@ -136,7 +136,9 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     /// When a source that had nothing to submit at `at` is asked again, its
     /// tick still armed, if it cannot say so itself. A push source wakes
     /// thread C for a fresh picture or names when it needs the tick
-    /// (`capture_idle_until`). A pull source, such as DXGI, does neither.
+    /// (`capture_idle_until`), as ScreenCaptureKit and, in process, the
+    /// Windows encoder's DXGI capture thread do. A pull source, such as the
+    /// privileged helper's worker, whose answers wake nothing, does neither.
     /// While the desktop is active (`hot_until`), it is asked again at its
     /// capture poll interval, so the next present goes out within that
     /// interval of appearing; while it is still, a period later, so it costs

@@ -1465,7 +1465,9 @@ the helper, the worker's encoder has its watcher and its capture thread
 too, but nothing they wake: thread C still polls the worker every 2 ms, the
 worker reads the counts each millisecond of a drain's long poll, and a
 capture request that finds nothing new arms the worker's capture thread,
-which converts the next present as it comes for the next request to take.
+which converts the next present as it comes for the next request to take,
+and stops looking once no request has armed it for 2 s, as while the host,
+every viewer paused, sends none.
 An encoder that holds nothing and
 has asked for no input for 2 s after it last took or gave a unit is
 stalled, as one that holds a unit for 2 s is.
@@ -1485,10 +1487,19 @@ surface into that sample by the D3D11 video processor, which the GPU is
 handed (`Flush`) before the frame goes back to DXGI; the thread then
 publishes the picture, disarms itself and wakes thread C, whose tick,
 already due, submits it. A frame that only moved the pointer is released and
-waited past, and wakes nothing. Unarmed (after a submit until the next tick,
-after a repeat or backpressure, or while every viewer has paused), the
-thread waits for thread C, and DXGI folds the desktop's updates into its
-next frame, which the next arming takes at once. Each frame is released as
+waited past, and wakes nothing. Unarmed (once it published, until thread
+C's next tick finds nothing new; after a repeat; while every viewer has
+paused; or once thread C has not armed it again for 2 s, as when a paused
+host behind the helper sends no request), the thread waits for thread C, and DXGI
+folds the desktop's updates into its next frame, which the next arming
+takes at once. A picture that waited 2 ms or more before a submit takes
+it, as one does while thread C skips ticks for backpressure, across a
+pause, or after a repeat went first, may have a newer present behind it,
+which the thread, disarmed as it published, has not looked for: it is held
+back, and the thread is armed to look past it. A newer picture then goes
+in its place, carrying the held one's presents, and otherwise the held one
+goes once the look found nothing newer, or 32 ms after the arming without
+that answer. Each frame is released as
 soon as it is converted, so no update is missed between ticks, and no
 full-size BGRA copy of the desktop is made. Both threads hold the device's
 own lock (`ID3D11Multithread`) across a picture's work on its one immediate
@@ -1500,12 +1511,15 @@ repeat on a still desktop (the 250 ms liveness repeat, or a keyframe)
 copies its NV12 picture into a fresh sample instead of converting again;
 the encoder never writes the samples it takes. A repeat goes only once the
 armed thread has looked and found nothing newer, which it wakes thread C to
-say when thread C waits for it, or 32 ms after its arming without that
-answer, so that a keyframe, or the first submit after a pause, takes a
-present DXGI already holds rather than repeating an older picture. A present
-the thread finds as thread C disarms it is still converted and published,
-and taken at the next tick. The pool holds six: four in the encoder at most,
-the last one once it is out, and the one the capture thread holds for its
+say when thread C waits for it, or 32 ms after its arming (or after it began
+converting a present it found) without that answer, so that a keyframe, or
+the first submit after a pause, takes a present DXGI already holds rather
+than repeating an older picture, as the polled capture did. A present the
+thread finds as thread C disarms it is still converted and published, and
+looked past at the next tick. The pool holds six, and a sample is taken from
+it only while the encoder has room for one more unit: the three it then
+holds at most, the last one once it is out, a picture held back or a
+repeat's copy (never both), and the one the capture thread holds for its
 next picture. A failure of the capture thread (DXGI's access lost on a
 desktop switch, say) is published, wakes thread C, and fails its next
 submit, which builds the capture again. Dropping the encoder stops and
@@ -2335,7 +2349,7 @@ shape is painted as before.
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
 | Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder |
-| Armed tick | a tick with no new picture, or whose Windows encoder has not asked for input, stays armed; ScreenCaptureKit wakes thread C, and in process so does the Windows encoder's capture thread for the next present, which it waits for at most 16 ms an `AcquireNextFrame` while armed, and the encoder's input request (asked again every 2 ms meanwhile); a repeat due waits up to 32 ms after the capture thread's arming for its answer that nothing newer waits; through the helper the worker is asked again every 2 ms for 250 ms after an injected input or a new picture and while the encoder holds units (an input brings a pending poll in to 2 ms), and once a period otherwise |
+| Armed tick | a tick with no new picture, or whose Windows encoder has not asked for input, stays armed; ScreenCaptureKit wakes thread C, and in process so does the Windows encoder's capture thread for the next present, which it waits for at most 16 ms an `AcquireNextFrame` while armed, and the encoder's input request (asked again every 2 ms meanwhile); a repeat due, or a published picture taken 2 ms or more after it was published, waits up to 32 ms after the capture thread's arming for its answer that nothing newer waits; a capture thread not armed again for 2 s stops looking; through the helper the worker is asked again every 2 ms for 250 ms after an injected input or a new picture and while the encoder holds units (an input brings a pending poll in to 2 ms), and once a period otherwise |
 | Capture pacing | after a dated picture, the next tick a period after its present, up to ¼ period early and, for a picture of a single present, at most 1/64 period earlier than a period after the last tick (long-run rate ≤ 64/63 × pace); a picture of several presents that waited keeps the tick a period after the last; ¾ period floor after a stall; a present over a period old counts as undated, and DXGI dates no picture presented over 1 s ago |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
 | QoS | delay the median of 3; RTT window 60 s; a cut needs 2 probes in a row at ≥ 150 ms, or an ack queue ≥ 100 ms and then at most halves; Balanced starts at its ceiling after a first probe under 50 ms; tick 250 ms; bits-per-frame window 3 s; rate-model latch over the last 2 s of ticks, each at ≤ 0.75 × nominal at both ends, with ≥ 6 unique frames and non-IDR bits > max(1.3, min(0.6 × nominal / mean pace, 2)) × expected at each tick's highest per-frame budget |

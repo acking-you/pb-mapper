@@ -352,8 +352,11 @@ impl<T: Transport> Backend for RemoteBackend<T> {
     fn submitted_picture(&self) -> Option<crate::Presented> {
         None
     }
-    /// Nothing to tell the worker: its DXGI capture is pulled, and runs only
-    /// when asked.
+    /// Nothing to tell the worker, which the protocol has no word for: its
+    /// encoder's capture thread, armed by a request that found nothing new,
+    /// stops looking once no request armed it again for 2 s
+    /// (`present_waiter::ASKED_WITHIN`), and the first request after the
+    /// pause looks past any picture it published meanwhile.
     fn video_paused(&mut self, _paused: bool) {}
     fn input(&mut self, input: &Input) -> Result<()> {
         let context = self

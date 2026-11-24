@@ -132,12 +132,14 @@ impl Shared {
 
     /// Do `work`, a picture's work (a `repeat` or a new one) on `device`'s
     /// immediate `context`, holding the device's lock, and time it on the
-    /// GPU where `time_gpu` asked.
+    /// GPU where `time_gpu` asked. With `flush`, the GPU is handed the work
+    /// once it succeeded, the span's closing timestamps with it.
     pub(super) fn work<R>(
         &self,
         device: &ID3D11Device,
         context: &ID3D11DeviceContext,
         repeat: bool,
+        flush: bool,
         work: impl FnOnce() -> Result<R>,
     ) -> Result<R> {
         let mut timer = self
@@ -145,16 +147,19 @@ impl Shared {
             .load(Ordering::Acquire)
             .then(|| self.gpu_timer.lock());
         let mut timer = timer.as_deref_mut().and_then(Option::as_mut);
+        let _device = DeviceLock::enter(&self.multithread);
         let queries = match timer.as_deref_mut() {
             Some(timer) => timer.begin(device, context)?,
             None => None,
         };
-        let done = {
-            let _device = DeviceLock::enter(&self.multithread);
-            work()
-        };
+        let done = work();
         if let (Some(timer), Some(queries)) = (timer, queries) {
             timer.end(context, queries, repeat);
+        }
+        if flush && done.is_ok() {
+            // SAFETY: a call on the context the caller holds, under the
+            // device's lock.
+            unsafe { context.Flush() };
         }
         done
     }
@@ -282,7 +287,7 @@ impl DxgiSource {
             converter.forget_inputs();
         }
         let (device, context) = (capture.device(), capture.device_context());
-        shared.work(device, context, false, || {
+        shared.work(device, context, false, true, || {
             if *direct {
                 if let Err(failure) = converter.convert(&frame, &sample) {
                     *direct = false;
@@ -298,8 +303,6 @@ impl DxgiSource {
             } else {
                 convert_copy(device, context, copied, converter, &frame, &sample)?;
             }
-            // SAFETY: a call on the context this source holds.
-            unsafe { context.Flush() };
             Ok(())
         })?;
         if present != 0 {
@@ -422,6 +425,13 @@ impl PresentSource for DxgiSource {
         // SAFETY: the frame acquired above is released once.
         let released = unsafe { self.capture.duplication().ReleaseFrame() }.map_err(error);
         converted.and_then(|converted| released.map(|()| converted))
+    }
+
+    /// The display showed `older`, which thread C held back and never
+    /// sent, before `newer`: its presents count for `newer`, and its sample
+    /// goes back to the pool.
+    fn fold(older: Picture, newer: &mut Picture) {
+        newer.fresh.presents = newer.fresh.presents.saturating_add(older.fresh.presents);
     }
 }
 

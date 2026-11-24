@@ -79,10 +79,11 @@ const MAX_IN_FLIGHT: usize = crate::worker::ENCODER_DEPTH;
 const SAMPLES: (u32, u32) = (4, 6);
 const _: () = assert!(
     MAX_IN_FLIGHT + 2 <= SAMPLES.1 as usize,
-    "the sample pool holds every unit in flight, the last one a repeat copies once it is out, and the capture thread's next"
+    "a sample is taken only with room for one more unit in flight: those units, the last one a repeat copies once it is out, a picture held back or a repeat's copy (never both), and the capture thread's next"
 );
-/// How long after arming the capture thread a due repeat waits for its
-/// first look's answer before it goes anyway.
+/// How long after arming the capture thread (or after it began converting
+/// a present it found) a due repeat, or a picture held back, waits for its
+/// look's answer before it goes anyway.
 const LOOK: Duration = Duration::from_millis(32);
 const _: () = assert!(
     LOOK.as_millis() >= 2 * ACQUIRE_WAIT.as_millis(),
@@ -508,7 +509,8 @@ enum Taken {
     Picture(Picture),
     /// The last picture again, copied into this sample.
     Repeat(Sample),
-    /// Nothing yet: it is armed, or a picture came as it was.
+    /// Nothing yet: it is armed, and may hold back a picture that waited
+    /// while it looks past it.
     Unchanged,
     /// No free sample, for a repeat or for the capture thread's next
     /// picture.
@@ -835,9 +837,9 @@ impl Encoder {
     /// picture waits to be taken or the capture thread is not armed, which
     /// the tick arms; and while it is armed, as the capture thread wakes
     /// the caller, at the latest when a repeat is due (the liveness repeat,
-    /// or `keyframe_due`), or `LOOK` after its arming while a due repeat
-    /// waits for its look's answer (`present_waiter::Idle::until`). The
-    /// caller never polls DXGI.
+    /// or `keyframe_due`), or `LOOK` after its arming while a due repeat,
+    /// or a picture held back, waits for its look's answer
+    /// (`present_waiter::Idle::until`). The caller never polls DXGI.
     pub fn idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
         self.idle().until(Instant::now(), keyframe_due)
     }
@@ -857,7 +859,9 @@ impl Encoder {
     }
 
     /// Every viewer paused: the capture thread stops waiting for presents,
-    /// which DXGI folds together until the caller arms it again.
+    /// which DXGI folds together until the caller arms it again. A picture
+    /// it publishes as it stops waits for the resume, which looks past it
+    /// first, as past any picture that waited.
     pub fn paused(&self, paused: bool) {
         if paused {
             self.capture.disarm();
@@ -1137,10 +1141,13 @@ impl Encoder {
     /// encoder has no room (`Full`: `MAX_IN_FLIGHT`, or no free sample,
     /// before anything is taken), before it asks for input (`Waiting`), or
     /// when nothing is worth sending yet (`Unchanged`): the capture thread
-    /// is then armed, and wakes the caller for the next picture. A
-    /// requested keyframe stays requested until a sample carries it. A
-    /// failure the capture thread published (the desktop switched, say)
-    /// fails this and every later submit.
+    /// is then armed, and wakes the caller for the next picture. A picture
+    /// the capture thread published that waited (the caller skipped ticks
+    /// or paused, or a repeat went first) goes only once the thread, armed
+    /// again, found nothing newer behind it. A requested keyframe stays
+    /// requested until a sample carries it. A failure the capture thread
+    /// published (the desktop switched, say) fails this and every later
+    /// submit.
     pub fn submit(&mut self, force_keyframe: bool) -> Result<Submit> {
         self.check_thread()?;
         self.presented = None;
@@ -1149,8 +1156,9 @@ impl Encoder {
         self.force_keyframe |= force_keyframe;
         self.capture.failed()?;
         if self.pending.len() >= MAX_IN_FLIGHT {
-            // Backpressure spends the tick: the next present waits in DXGI
-            // for the next one.
+            // A full encoder spends the tick, for a caller that does not
+            // stop at `pending_len` first as thread C does: the next present
+            // waits in DXGI for the next arming.
             self.capture.disarm();
             return Ok(Submit::Full);
         }
@@ -1227,16 +1235,21 @@ impl Encoder {
     }
 
     /// What a submit with room sends: the picture the capture thread
-    /// published; else, when a repeat is due and the thread found nothing
+    /// published, unless it waited, as of `present_waiter::FRESH_FOR`, when
+    /// DXGI may hold a newer present behind it: that one is held back
+    /// while the thread, armed again, looks past it, and goes once the look
+    /// found nothing newer or `LOOK` passed, unless a newer picture goes in
+    /// its place. Else, when a repeat is due and the thread found nothing
     /// newer, the last picture again, copied whole from its sample (the
     /// video processor does not run again, and the encoder never writes
-    /// the samples it takes); else nothing yet, with the thread armed, and
-    /// asked for its look's answer when a repeat is due.
+    /// the samples it takes). Else nothing yet, with the thread armed, and
+    /// asked for its look's answer when a repeat is due or a picture is
+    /// held back.
     fn take(&mut self) -> Result<Taken> {
-        if let Some(picture) = self.capture.take() {
+        let now = Instant::now();
+        if let Some(picture) = self.capture.next_picture(now, LOOK) {
             return Ok(Taken::Picture(picture));
         }
-        let now = Instant::now();
         let idle = self.idle();
         if idle.repeat_now(now)
             && let Some(last) = &self.last
@@ -1249,7 +1262,7 @@ impl Encoder {
                 return Ok(Taken::Full);
             };
             let context = &self.context;
-            self.shared.work(&self.device, context, true, || {
+            self.shared.work(&self.device, context, true, false, || {
                 unsafe {
                     context.CopySubresourceRegion(
                         &sample.texture,
@@ -1266,14 +1279,18 @@ impl Encoder {
             })?;
             return Ok(Taken::Repeat(sample));
         }
-        Ok(match self.arm(idle.repeat_due(now))? {
+        Ok(match self.arm(idle.wants_answer(now))? {
             Arm::Armed => Taken::Unchanged,
-            Arm::Empty => Taken::Full,
+            // No sample for the thread to look past a picture held back
+            // with: that one goes as it is.
+            Arm::Empty => self.capture.take_held().map_or(Taken::Full, Taken::Picture),
             // It published as it was armed: a picture, or the failure that
             // ended it.
             Arm::Published => {
                 self.capture.failed()?;
-                self.capture.take().map_or(Taken::Unchanged, Taken::Picture)
+                self.capture
+                    .next_picture(Instant::now(), LOOK)
+                    .map_or(Taken::Unchanged, Taken::Picture)
             }
         })
     }
