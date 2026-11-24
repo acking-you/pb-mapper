@@ -972,7 +972,10 @@ does not require Flutter or a POCOX runtime.
   for a new desktop context, a display change or an encoder recovery, never for
   a rate change. `capture_video` drains finished output and submits at most one
   capture at the rate it is given; `drain_video` and `pending_video` let the
-  worker collect an asynchronous encoder's output between ticks. Each unit's
+  worker collect an asynchronous encoder's output between ticks, and
+  `video_full()` (false by default) names a bound of the encoder's own below
+  the worker's, at which the worker skips a due tick without a capture, as
+  at its own (a Mac host's VideoToolbox at two units in flight). Each unit's
   `VideoFormat` carries `gop`, the GOP the encoder read back, so a unit relayed
   by the helper reports it as well. `describe(probe_h265)` runs right after
   the backend is built and within the 3 s before the host answers the viewer:
@@ -1408,14 +1411,17 @@ A capture that finds
 the encoder without room spends its tick. A tick is skipped (and
 counted in `skipped_ticks`) only while two units in the hand-off queue wait for
 send credit, which is transport backpressure, or while the encoder (or the
-helper) holds four, never for presentation. The two bounds are separate
+helper) holds four, or a bound of the source's own below four
+(`Backend::video_full`, a Mac host's two below), never for presentation.
+The two bounds are separate
 because a unit stays in the encoder for its latency: with one shared bound of
 two, an encoder that kept each unit 40 ms delivered 40 FPS at a pace of 60, and
 one that kept it 60 ms delivered 30. Four cover a latency of nearly four
 periods, and a fast encoder never holds more than one, so it adds no latency.
 The bound is fixed rather than derived from the measured dwell, because a
 queueing encoder's dwell grows with its depth. A Mac host holds VideoToolbox
-to two units in flight (`VT_IN_FLIGHT`), finished units not counted: where
+to two units in flight (`VT_IN_FLIGHT`), finished units not counted, and
+thread C skips a tick that finds two as one that finds four: where
 it encodes asynchronously (a size that is not a multiple of 16, such as a
 MacBook's built-in display at its default resolution) and the pace outruns
 it, the extra two only queued. On an M6 at a pace of 120, in a test loop
@@ -1508,8 +1514,9 @@ H.264 and 68 with H.265, within 1% of what the blocking call gave). Until
 that wake, the source names a time
 250 ms away as its next tick, so thread C waits for it rather than spin. At
 most two units are in flight in VideoToolbox (`VT_IN_FLIGHT`, the one in
-the mailbox among them; a unit out and not yet drained is not), and a tick
-that finds two spends itself; see the gate above. A new bitrate is set by
+the mailbox among them; a unit out and not yet drained is not), and thread
+C asks the source before it captures and skips a tick that finds two,
+counted in `skipped_ticks` as at the gate above. A new bitrate is set by
 the submit thread before its next encode, or at once while it idles, and a
 bitrate or encode VideoToolbox refuses reaches thread C at its next drain as
 the codec's failure. Dropping the encoder lets the submit thread finish its
@@ -2094,7 +2101,8 @@ made the call itself, an encode at a size that is a multiple of 16 held
 queued input for as long as it took. In a test loop on an M6 that paced a
 session as thread C does and queued an input every millisecond, an input's
 wait at the 99th percentile was 5.0–5.3 ms at 1920x1200, 7.3–7.7 ms at
-2560x1440 and 14.9–17.4 ms at 3840x2160 before, and 40–53 µs at every size
+2560x1440 and 14.9–17.4 ms at 3840x2160 before (each case's median of
+three runs), and 40–53 µs at every size
 after, in all but two of the 60 runs (one run each of two cases waited 3.3
 and 4.4 ms while the loop was not in a call;
 [measurements](benchmarks/2026-11-24-macos-vt-submit/README.md)). A live session's
@@ -2256,7 +2264,7 @@ shape is painted as before.
 | Timeouts | handshake 3 s; host read 3 s; viewer header 4 s; writes 3 s plus the message's time at 1 Mbit/s; `Stopped` best effort within 1 s; the host reads on until the viewer closes, within the same second |
 | Viewer ping / host statistics | after 1 s idle / every 1 s |
 | Credit window | `t` = base RTT (100 ms until measured) + 100 ms; 3 to 64 frames; 64 KiB to 4 MiB; delivery clamp ≥ 32 KiB once the ack queue exceeds 100 ms |
-| Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder |
+| Host hand-off | 6 units, 8 MiB, 1 s oldest, not counting a wait behind an IDR in flight; capture skipped at 2 waiting for credit or 4 in the encoder (2 in flight in a Mac host's VideoToolbox) |
 | Armed tick | a tick with no new picture stays armed; ScreenCaptureKit wakes thread C; DXGI, in process or through the helper, is asked again every 2 ms for 250 ms after an injected input or a new picture (an input brings a pending poll in to 2 ms), and once a period otherwise |
 | Capture pacing | after a dated picture, the next tick a period after its present, up to ¼ period early and, for a picture of a single present, at most 1/64 period earlier than a period after the last tick (long-run rate ≤ 64/63 × pace); a picture of several presents that waited keeps the tick a period after the last; ¾ period floor after a stall; a present over a period old counts as undated, and DXGI dates no picture presented over 1 s ago |
 | Probe / unresponsive | every 1 s, every 250 ms while the base RTT is under 100 ms / after 2 s, pace 2 FPS |
@@ -2320,8 +2328,9 @@ queue. Its encoder's submit thread traces `macos_encoder_load` there as
 well, after the first call a second or more after its last line:
 `seconds` (the window's length), `call_p50_us` and `call_p99_us` (its encode
 calls, which thread C waited out before the thread took them), `units`
-(the encodes it made), and from thread C's submits `gate_ticks` (ticks spent
-on two units in flight), `armed_refusals` (submits that found the thread
+(the encodes it made), and from thread C's ticks `gate_ticks` (ticks
+skipped for two units in flight, which `skipped_ticks` counts too),
+`armed_refusals` (submits that found the thread
 busy and left their tick armed) and `peak_in_flight`. A Mac host logs the
 first picture of each stream as `macos_capture_layout` on
 `pb_mapper_desktop::session` (debug): its width and height, the pixels it

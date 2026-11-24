@@ -101,6 +101,9 @@ struct Fake {
     /// Each unit repeats an unchanged picture, as the Windows encoder's
     /// liveness frame does.
     duplicate: Arc<AtomicBool>,
+    /// The encoder is at a bound of its own, as a Mac host's VideoToolbox
+    /// with two units in flight.
+    full: Arc<AtomicBool>,
     repeatable: bool,
     submitted_video: bool,
 }
@@ -129,6 +132,7 @@ impl Fake {
             idle_until: Arc::default(),
             still: Arc::default(),
             duplicate: Arc::default(),
+            full: Arc::default(),
             repeatable: false,
             submitted_video: true,
         }
@@ -245,6 +249,9 @@ impl Backend for Fake {
     }
     fn pending_video(&self) -> usize {
         self.encoding.lock().len()
+    }
+    fn video_full(&self) -> bool {
+        self.full.load(Ordering::SeqCst)
     }
     fn submitted_video(&self) -> bool {
         self.submitted_video
@@ -644,6 +651,29 @@ fn pacing_is_even_and_skips_ticks_without_bursts() {
     let slow = h.captures().len() - before;
     assert!((125..=127).contains(&slow), "{slow}");
     assert_eq!(h.state().skipped_ticks, skipped);
+}
+
+/// An encoder at a bound of its own, below thread C's: each due tick is
+/// skipped without a capture call and counted, as at thread C's bound, so
+/// `skipped_ticks` shows it, and capture resumes on the grid once a unit
+/// leaves.
+#[test]
+fn a_source_at_its_own_encoder_bound_skips_and_counts_the_tick() {
+    let mut h = Harness::new(true, None);
+    let period = Duration::from_secs(1) / 60;
+    h.run(Duration::from_millis(100), true);
+    h.fake.full.store(true, Ordering::SeqCst);
+    let (before, skipped) = (h.captures().len(), h.state().skipped_ticks);
+    h.run(Duration::from_millis(200), true);
+    assert_eq!(h.captures().len(), before);
+    let counted = h.state().skipped_ticks - skipped;
+    assert!((11..=13).contains(&counted), "{counted}");
+    h.fake.full.store(false, Ordering::SeqCst);
+    h.run(Duration::from_millis(200), true);
+    let resumed = &h.captures()[before..];
+    assert!((11..=13).contains(&resumed.len()), "{}", resumed.len());
+    assert!(spacing(resumed).iter().all(|gap| *gap >= period * 3 / 4));
+    assert_eq!(h.state().skipped_ticks, skipped + counted);
 }
 
 #[test]

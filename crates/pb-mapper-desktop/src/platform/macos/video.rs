@@ -40,8 +40,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Units VideoToolbox may hold at once, the mailbox's among them; a tick
-/// that finds this many spends itself. Where a session encodes
+/// Units VideoToolbox may hold at once, the mailbox's among them; thread C
+/// skips a tick that finds this many (`full`). Where a session encodes
 /// asynchronously (a size that is not a multiple of 16, such as a MacBook's
 /// built-in display at its default resolution) and the pace outruns it,
 /// each unit admitted waits behind the others: on an M6 at a pace of 120,
@@ -278,12 +278,13 @@ impl VideoSource for MacVideo {
     }
     /// Never waits: nothing captured yet, a full encoder or a still screen
     /// inside the liveness interval submit nothing; a keyframe asked for
-    /// stays asked for until a submit carries it. `VT_IN_FLIGHT` units in
-    /// flight spend the tick; an encoder whose submit thread is still busy
-    /// leaves it armed, and that thread wakes thread C once it is free, so
-    /// the newest picture goes then. A display that slept through a pause,
-    /// that never gave a picture because it sleeps, or that turned off
-    /// under the stream and stayed dark for `SETTLE`, is lit, and the
+    /// stays asked for until a submit carries it. Thread C skips a tick
+    /// while `VT_IN_FLIGHT` units are in flight (`full`), and a submit that
+    /// finds them anyway spends its tick; an encoder whose submit thread is
+    /// still busy leaves it armed, and that thread wakes thread C once it is
+    /// free, so the newest picture goes then. A display that slept through
+    /// a pause, that never gave a picture because it sleeps, or that turned
+    /// off under the stream and stayed dark for `SETTLE`, is lit, and the
     /// submit fails so that thread C opens a new stream once it draws.
     fn submit(&mut self, keyframe: bool) -> Result<bool> {
         self.presented = None;
@@ -342,6 +343,12 @@ impl VideoSource for MacVideo {
         }
         self.timing.roll(now, &self.stream);
         Ok(true)
+    }
+    /// `VT_IN_FLIGHT` units in flight: thread C skips the tick and counts it
+    /// in `skipped_ticks`, and the encoder in `macos_encoder_load`'s
+    /// `gate_ticks`.
+    fn full(&self) -> bool {
+        self.encoder.full(VT_IN_FLIGHT)
     }
     /// A new picture, dated by its arrival on the stream's queue.
     fn presented(&self) -> Option<Presented> {

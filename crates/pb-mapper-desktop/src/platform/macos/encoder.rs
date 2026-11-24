@@ -134,7 +134,8 @@ impl State {
 /// What thread C's submits found, for `macos_encoder_load`.
 #[derive(Clone, Copy, Default)]
 struct GateCounts {
-    /// Ticks spent on units in flight (`Admit::Full`).
+    /// Due ticks that found the limit's worth of units in flight
+    /// (`Encoder::full`, `Admit::Full`).
     full: u32,
     /// Submits that found the submit thread busy and left their tick armed
     /// (`Admit::Busy`).
@@ -181,7 +182,7 @@ unsafe impl Send for SendSession {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Admit {
     /// The limit's worth of units is in flight: backpressure, which spends
-    /// the tick.
+    /// the tick (thread C asks `full` first and skips it).
     Full,
     /// The submit thread holds a picture or is inside a call: the tick stays
     /// armed, and the thread wakes thread C once it is free.
@@ -562,6 +563,15 @@ impl Encoder {
         state.pending.len() + state.ready.len() + usize::from(state.failure.is_some())
     }
 
+    /// Whether `limit` units are in flight, for a due tick, which thread C
+    /// then skips: counted as a gate tick.
+    pub(crate) fn full(&self, limit: usize) -> bool {
+        let mut state = self.shared.state.lock();
+        let full = state.in_flight() >= limit;
+        state.gate.full += u32::from(full);
+        full
+    }
+
     /// Whether a picture may be handed over now: not while `limit` units
     /// are in flight, which spends the tick, nor while the submit thread is
     /// busy, which leaves it armed until the thread wakes thread C.
@@ -877,8 +887,8 @@ const LOAD_SAMPLES: usize = 256;
 /// The submit thread's debug figures, `macos_encoder_load`, after the first
 /// call a second or more after the last line: the window's length, how long
 /// its encode calls took (p50, p99), which thread C waited out before it
-/// had this thread, and the units it encoded; and, from thread C's
-/// submits, the ticks spent on units in flight (`gate_ticks`), the submits
+/// had this thread, and the units it encoded; and, from thread C's ticks,
+/// those skipped for units in flight (`gate_ticks`), the submits
 /// that found this thread busy and left their tick armed
 /// (`armed_refusals`), and the most units in flight at a hand-off. Nothing
 /// allocated.
