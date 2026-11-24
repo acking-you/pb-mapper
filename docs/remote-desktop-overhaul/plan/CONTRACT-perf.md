@@ -300,7 +300,7 @@ cursor:   C sample 16 ms -> watch -> B-send CursorGate (300 ms echo suppression)
 | delay bands | 50 / 100 / 150 / 200 / 300 / 600 ms | qos.rs |
 | `QOS_TICK` / `RATIO_INTERVAL` / `DYNAMIC_UNIQUE_FRAMES` | 250 ms / 3 s / 6 per window | qos.rs |
 | bpf factors | ×1.15 / 1.10 / 1.05 (dynamic only) / 0.95 / 0.90 / 0.85 / 0.80; increase ≤ +150 kbit/s | qos.rs |
-| `LATCH_OVERSHOOT` / `LATCH_WINDOWS` / `LATCH_PACE_RATIO` | 1.3 / 2 / 0.75 | qos.rs |
+| `LATCH_SPAN` / `LATCH_OVERSHOOT` / `LATCH_PACE_SHARE` / `LATCH_FLOOR_MAX` / `LATCH_PACE_RATIO` | 2 s (8 ticks) / 1.3 / 0.6 / 2.0 / 0.75 | qos.rs |
 | `STARTUP_HOLD` / startup fps | 1 s / `min(normal, round(15·scale))` | qos.rs |
 | `JPEG_MAX_FPS` | 8 | qos.rs |
 | encoder bitrate clamp / `pixel_scale` clamp | 256_000..=40_000_000 / 0.25..=4.0 | qos.rs |
@@ -788,8 +788,8 @@ Unresponsiveness never closes a session.
    `last_state_generation` = its generation.
 3. **Notice.** For each new notice serial → write `Notice`.
 4. **QoS tick.** Every `QOS_TICK`: `qos.tick(now, credit snapshot)`
-   (unresponsive, startup expiry, 3 s bpf window, latch); then publish
-   targets.
+   (the per-tick rate-model latch, unresponsive, startup expiry, 3 s bpf
+   window); then publish targets.
 5. **Stats.** Every `STATS_INTERVAL` → write `Stats`. Also emit the 1 Hz
    trace (5.17).
 6. **Probe.** If none is outstanding and `now − last_probe ≥ PROBE_INTERVAL`:
@@ -998,19 +998,28 @@ The result is clamped to `[floor × pixel_scale, max × pixel_scale]`.
 ```
 expected_bps  = bpf × pace
 encoder_bps   = clamp(match rate_model { Nominal => bpf × nominal_fps, Timestamp => bpf × pace }, 256_000, 40_000_000)
-latch (same window, only while rate_model == Nominal && dynamic):
-    n = produced.non_idr_frames delta;  bits = produced.non_idr_bytes delta × 8
-    if n ≤ LATCH_PACE_RATIO × nominal_fps × 3 && bits > LATCH_OVERSHOOT × bpf × n { overshoot += 1 } else { overshoot = 0 }
-    if overshoot ≥ LATCH_WINDOWS { rate_model = Timestamp (one-way for the session); trace desktop_rate_model_latched }
+latch (every QoS tick, before the window, only while rate_model == Nominal):
+    budget = Nominal encoder_bps / nominal_fps          (bpf unless the clamp moved it)
+    peak   = the highest budget since the last tick     (every bpf change raises it)
+    a tick < QOS_TICK / 2 after the last is folded into the next
+    bucket = { Δframes, Δunique, n = Δnon_idr_frames, bits = Δnon_idr_bytes × 8,
+               expected = peak × n, paced_low = pace at both ends ≤ LATCH_PACE_RATIO × nominal_fps }
+    span   = the last LATCH_SPAN / QOS_TICK buckets, in a fixed ring
+    mean   = span.frames / span.elapsed
+    if every bucket paced_low && span.unique ≥ DYNAMIC_UNIQUE_FRAMES
+       && span.bits > max(LATCH_OVERSHOOT, min(LATCH_PACE_SHARE × nominal_fps / mean, LATCH_FLOOR_MAX)) × span.expected
+        { rate_model = Timestamp (one-way for the session); trace desktop_rate_model_latched }
 ```
 
 How the two encoder rate models behave:
 
 - **Per-frame-budget MFT** (`Nominal`). It spends `encoder_bps / nominal = bpf`
-  per frame, so an fps cut sheds bandwidth at once.
+  per frame, so an fps cut sheds bandwidth at once. Its frames can stay above
+  budget only at its content floor, which the pace term tolerates up to
+  `LATCH_FLOOR_MAX` (NVIDIA measured 1.79 at pace 5 of 120).
 - **Per-second-budget MFT.** At reduced pace it spends
   `bpf × nominal / pace ≥ 1.33 × bpf` per frame. The latch detects this within
-  two windows, and bandwidth then follows pace.
+  2.25 s of the pace falling, and bandwidth then follows pace.
 - Nothing ever raises the encoder bitrate because fps was cut.
 
 `video_bench --pace 60,30,15,5` (10 s per step at nominal 60) prints `pace,
@@ -3127,7 +3136,7 @@ its files (section 12).
 | `idr::requests_coalesce_defer_and_are_never_dropped` | Ten requests in 100 ms → one IDR now and one after 300 ms. `force` bypasses the interval. Nothing is periodic. | 0 |
 | `credit::receipts_return_credit_and_idr_uses_headroom` | The window closes at frames and bytes. A receipt reopens it. One IDR is admitted over the byte window while P-frames are in flight, and a second IDR waits. An empty ledger admits any size. The seq is booked before the write, and `seq > last_admitted` → error. The ack-queue clamp shrinks bytes under synthetic receipt delay and releases afterwards. | H |
 | `qos::delay_controller_follows_rustdesk_steps` | Scaled ramp to the ceiling. 200 ms divides fps. 300 ms → `150·min/d`. Unresponsive → 2 fps output with the fps state untouched and immediate recovery. Tainted samples are ignored by the controller. The baseline is min-of-60 and resets on `Path`. The viewer cap and pause clamp the pace. The startup cap lasts 1 s. | H |
-| `qos::bits_per_frame_steps_and_one_way_latch` | 3 s steps only when dynamic, the +150 kbit/s cap, the preset floor and max. A preset switch resets fps and bpf with no rebuild. The latch flips after 2 overshoot windows at pace ≤ 0.75 nominal and never flips back. | H |
+| `qos::bits_per_frame_steps_and_one_way_latch` | 3 s steps only when dynamic, the +150 kbit/s cap, the preset floor and max. A preset switch resets fps and bpf with no rebuild. A per-second budget at pace ≤ 0.75 nominal latches within 12 ticks and never flips back. The other `qos::` latch tests pin the per-tick latch: within 2.5 s of a pace drop, a part-filled per-second budget, cuts within a window and within a tick, both ends of a tick, the mean pace from frames produced, six unique frames, the folded early tick, the bitrate bound and the measured content floor. | H |
 | `session::cursor_is_not_echoed_within_300ms_but_generation_changes_pass` | `CursorGate`: suppression, trailing sync, generation pass-through | H |
 | `session::stale_generation_units_are_dropped_before_admission` | After a control-grant invalidate with units queued, the old-generation units are dropped without a seq, the session continues, and the seq stays contiguous | H |
 | `host::handshake_reports_denied_and_busy_before_close` | A bad token → `Rejected{denied}` with no capture started. A second viewer → `Rejected{busy}`. A bad token **while busy** → `Rejected{denied}`, never `busy` (no oracle, R5). | H |

@@ -312,7 +312,8 @@ impl Session {
             | (targets.paused.swap(values.paused, Ordering::AcqRel) != values.paused)
     }
 
-    /// The QoS tick: unresponsiveness, startup expiry and the 3 s window.
+    /// The QoS tick: the rate-model latch, unresponsiveness, startup expiry
+    /// and the 3 s window.
     fn tick(&self, now: Instant) {
         let credit = self.credit.lock().view();
         let produced = self.shared.outgoing.produced();

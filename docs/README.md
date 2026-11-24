@@ -44,6 +44,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [Desktop pipeline measurements](benchmarks/2026-11-24-desktop-pipeline/README.md) | `host_send_bench` and the slow-link suite before and after armed capture ticks and the receipt-rate estimator, and the A/B runs behind the withdrawn hand-off and thread-priority changes |
 | [Capture pacing measurements](benchmarks/2026-11-24-capture-pacing/README.md) | `host_send_bench` before and after present-anchored capture pacing, and the Windows and Mac device runs its effect still needs |
 | [Windows host kept awake](benchmarks/2026-11-24-win-keep-awake/README.md) | what a capture call's keep-awake touch costs, and the device checks still outstanding |
+| [Rate-model latch measurements](benchmarks/2026-11-24-rate-model-latch/README.md) | the slow-link suite, with an encoder that budgets per second, before and after the rate-model latch read the last 2 s of QoS ticks instead of two 3 s windows |
 
 ## Security
 
