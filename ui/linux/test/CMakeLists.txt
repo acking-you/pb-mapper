@@ -1,6 +1,7 @@
 # The GStreamer decoder module and a harness that drives it with recorded
 # clips, outside Flutter, converting each picture with the runner's GL code
-# in a GL ES context with no surface that stands in for Flutter's; and a unit
+# in a GL ES context with no surface that stands in for Flutter's, and
+# drawing it as the video plane does there and in a desktop GL one; and a unit
 # test of how the module places decoders on GPUs, which needs neither.
 # scripts/test/linux-desktop-video.sh builds and runs them; the app build
 # (../CMakeLists.txt) does not include them.

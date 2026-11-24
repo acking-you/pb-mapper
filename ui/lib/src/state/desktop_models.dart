@@ -782,6 +782,7 @@ class DesktopPicture {
   const DesktopPicture({
     this.textureId,
     this.platformViewType,
+    this.plane = false,
     required this.aspectRatio,
     required this.codec,
   });
@@ -791,6 +792,10 @@ class DesktopPicture {
   /// presents it itself (the macOS layer presenter), made with [textureId];
   /// null where a Flutter texture shows it.
   final String? platformViewType;
+
+  /// Whether the runner draws the native picture on its own plane under the
+  /// Flutter view (the Linux video plane), where the viewer leaves a hole.
+  final bool plane;
   final double aspectRatio;
 
   /// The session's codec, `h264`, `h265` or `jpeg`; through a reconnect,
@@ -802,11 +807,12 @@ class DesktopPicture {
       other is DesktopPicture &&
       other.textureId == textureId &&
       other.platformViewType == platformViewType &&
+      other.plane == plane &&
       other.aspectRatio == aspectRatio &&
       other.codec == codec;
   @override
   int get hashCode =>
-      Object.hash(textureId, platformViewType, aspectRatio, codec);
+      Object.hash(textureId, platformViewType, plane, aspectRatio, codec);
 }
 
 /// Another controlling viewer's pointer in host display pixels, as

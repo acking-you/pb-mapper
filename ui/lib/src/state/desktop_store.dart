@@ -2200,16 +2200,34 @@ class DesktopStore {
   }
 
   /// Greys the picture where the runner presents it itself
-  /// ([DesktopPicture.platformViewType]), which no Flutter filter reaches:
-  /// the viewer's grey still asks. Nothing for a texture, a JPEG picture or
-  /// none.
+  /// ([DesktopPicture.platformViewType], [DesktopPicture.plane]), which no
+  /// Flutter filter reaches: the viewer's grey still asks. Nothing for a
+  /// texture, a JPEG picture or none.
   Future<void> greyPicture(bool on) async {
     final texture = _texture;
-    if (texture == null || texture.platformViewType == null) return;
+    if (texture == null ||
+        (texture.platformViewType == null && !texture.plane)) {
+      return;
+    }
     try {
       await texture.grey(on);
     } catch (_) {
       // A disposed or failed presenter has no picture to grey.
+    }
+  }
+
+  /// Places the runner's plane ([DesktopPicture.plane]) where the viewer
+  /// left the hole for texture [textureId]'s picture; nothing once that
+  /// texture is gone, or for any other.
+  Future<void> placePicture(int textureId, VideoPlacement placement) async {
+    final texture = _texture;
+    if (texture == null || !texture.plane || texture.textureId != textureId) {
+      return;
+    }
+    try {
+      await texture.place(placement);
+    } catch (_) {
+      // A disposed or failed plane has nothing to place.
     }
   }
 
@@ -2238,6 +2256,7 @@ class DesktopStore {
       _picture.value = DesktopPicture(
         textureId: texture.textureId,
         platformViewType: texture.platformViewType,
+        plane: texture.plane,
         aspectRatio: width > 1 && height > 1 ? width / height : 16 / 9,
         // Between sessions, the last one's.
         codec: _media?.codec ?? _picture.value?.codec ?? 'h264',
