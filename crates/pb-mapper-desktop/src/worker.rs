@@ -14,12 +14,14 @@ mod hold;
 mod modes;
 #[cfg(test)]
 mod tests;
+mod throughput;
 mod window;
 
 use self::{
     capture::unavailable_reason,
     cursor::{CursorEcho, ShapeLook},
     hold::{DragHold, LeftPress},
+    throughput::ThroughputCap,
     window::{Window, WindowStats},
 };
 use crate::{
@@ -76,7 +78,9 @@ pub(crate) const TRANSPORT_GATE: usize = 2;
 /// nearly four periods without lowering the rate; a fast encoder never holds
 /// more than one, so it adds no latency. Fixed rather than derived from the
 /// measured dwell: a queueing encoder's dwell grows with its depth, and a
-/// bound that followed it would deepen its own queue.
+/// bound that followed it would deepen its own queue. An encoder too slow
+/// for the pace that fills to it caps the pace at its throughput instead
+/// (`throughput`), out of the ticks it skips here.
 pub(crate) const ENCODER_DEPTH: usize = 4;
 const CONTEXT_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 /// How long the desktop counts as active after an input thread C injected or
@@ -461,7 +465,11 @@ struct Engine<B: Backend, K: Clock = Monotonic> {
     /// carries it clears it.
     keyframe: bool,
     pacer: Pacer,
+    /// The pace in force: the viewers' least, within the cap at the
+    /// encoder's throughput.
     pace_fps: u32,
+    /// The cap at the encoder's throughput, moved once a second.
+    throughput: ThroughputCap,
     /// When a pull source that had nothing to submit is asked again, its tick
     /// still armed (`capture_poll_after`).
     capture_poll_due: Option<Instant>,
@@ -561,6 +569,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             keyframe: true,
             pacer: Pacer::new(pace_fps, now),
             pace_fps,
+            throughput: ThroughputCap::default(),
             capture_poll_due: None,
             hot_until: now,
             context_due: now,
@@ -644,6 +653,11 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 if cfg.peer_cursors {
                     added_peer_reader = true;
                 }
+                // A cap at the encoder's throughput already holds the pace
+                // this viewer is sent at.
+                cfg.shared
+                    .encoder_cap
+                    .store(self.throughput.cap().unwrap_or(0), Ordering::Release);
                 self.slots[idx] = Some(ViewerSlot {
                     conn_id,
                     slot: cfg.shared.slot,
@@ -871,6 +885,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 slot.state.encoder_dwell = rolled.encoder_dwell;
                 slot.state.input_wait = rolled.input_wait;
             }
+            self.cap_throughput(&rolled, now);
         }
         // Fine process timers while capturing serve the network tasks too;
         // a paused or unavailable session gives them back.

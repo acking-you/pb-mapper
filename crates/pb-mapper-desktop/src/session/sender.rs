@@ -596,6 +596,7 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             fps = qos.fps,
             pace_fps = qos.pace_fps,
             viewer_cap = qos.viewer_cap,
+            encoder_cap = qos.encoder_cap,
             paused = qos.paused,
             unresponsive = qos.unresponsive,
             bpf = qos.bpf,

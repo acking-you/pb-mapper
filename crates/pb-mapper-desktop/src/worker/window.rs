@@ -19,10 +19,18 @@ pub(super) struct WindowStats {
     pub capture_fps: f32,
     pub encoder_dwell: Option<Duration>,
     pub input_wait: InputWaitStats,
+    /// How long the window ran, at least `STATS_WINDOW`.
+    pub elapsed: Duration,
+    /// Due ticks skipped for an encoder (or the helper) holding
+    /// `ENCODER_DEPTH` units, apart from transport skips.
+    pub full_ticks: u32,
+    /// Units the encoder returned, duplicates included.
+    pub units: u32,
 }
 
 /// The published one-second rates: unique captures, input wait and the
-/// encoder's dwell.
+/// encoder's dwell; and what the cap at the encoder's throughput reads
+/// (`throughput`).
 pub(super) struct Window {
     started: Instant,
     pub(super) unique: u64,
@@ -30,6 +38,8 @@ pub(super) struct Window {
     max_wait: u32,
     /// The encoder's own submit to output time of each unit it returned.
     dwells: Vec<Duration>,
+    full_ticks: u32,
+    units: u32,
     pacing: Pacing,
 }
 
@@ -68,6 +78,8 @@ impl Window {
             waits: Vec::new(),
             max_wait: 0,
             dwells: Vec::new(),
+            full_ticks: 0,
+            units: 0,
             pacing: Pacing::NEW,
         }
     }
@@ -88,6 +100,16 @@ impl Window {
         if encode_us > 0 && self.dwells.len() < WAIT_SAMPLES {
             self.dwells.push(Duration::from_micros(encode_us.into()));
         }
+    }
+
+    /// The encoder returned a unit for the viewers.
+    pub(super) fn unit(&mut self) {
+        self.units = self.units.saturating_add(1);
+    }
+
+    /// A due tick was skipped for an encoder holding `ENCODER_DEPTH` units.
+    pub(super) fn full_tick(&mut self) {
+        self.full_ticks = self.full_ticks.saturating_add(1);
     }
 
     /// A capture call that began at `at` spent its tick on `picture`, which
@@ -135,7 +157,8 @@ impl Window {
             p99_us: at(99),
             max_us: self.max_wait,
         };
-        self.pacing.trace(elapsed);
+        self.pacing.trace(elapsed, self.full_ticks);
+        let (full_ticks, units) = (self.full_ticks, self.units);
         // A new window, as `new` makes one, keeping the samples' buffers.
         let Self {
             started,
@@ -143,6 +166,8 @@ impl Window {
             waits,
             max_wait,
             dwells,
+            full_ticks: full,
+            units: produced,
             pacing,
         } = self;
         *started = now;
@@ -150,11 +175,16 @@ impl Window {
         waits.clear();
         *max_wait = 0;
         dwells.clear();
+        *full = 0;
+        *produced = 0;
         *pacing = Pacing::NEW;
         Some(WindowStats {
             capture_fps,
             encoder_dwell,
             input_wait,
+            elapsed,
+            full_ticks,
+            units,
         })
     }
 }
@@ -164,10 +194,10 @@ impl Pacing {
     /// the wait from a present to the capture that took it (p50 and p95),
     /// the share of captures whose picture was dated, and per second the
     /// captures, the presents they covered, the presents among them that
-    /// newer ones replaced before a capture, and the polls that found
-    /// nothing new.
-    fn trace(&mut self, elapsed: Duration) {
-        if self.captures == 0 && self.empty_polls == 0
+    /// newer ones replaced before a capture, the polls that found nothing
+    /// new, and the ticks skipped for a full encoder (`full_ticks`).
+    fn trace(&mut self, elapsed: Duration, full_ticks: u32) {
+        if self.captures == 0 && self.empty_polls == 0 && full_ticks == 0
             || !tracing::enabled!(target: PACING_TARGET, tracing::Level::DEBUG)
         {
             return;
@@ -191,6 +221,7 @@ impl Pacing {
             presents_per_s = per_second(self.presents),
             coalesced_per_s = per_second(self.presents.saturating_sub(self.dated.into())),
             empty_polls_per_s = per_second(self.empty_polls.into()),
+            full_ticks_per_s = per_second(full_ticks.into()),
         );
     }
 }

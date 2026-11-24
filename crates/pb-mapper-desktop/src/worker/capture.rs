@@ -300,6 +300,12 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         let Some(context) = &self.context else {
             return;
         };
+        // The cap at the encoder's throughput holds at once; the viewers'
+        // QoS take it in at their next update.
+        let pace_fps = self
+            .throughput
+            .cap()
+            .map_or(pace_fps, |cap| pace_fps.min(cap));
         if pace_fps != self.pace_fps {
             let faster = pace_fps > self.pace_fps;
             self.pace_fps = pace_fps;
@@ -382,6 +388,9 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             for slot in self.slots.iter_mut().flatten().filter(|slot| !slot.paused) {
                 slot.state.skipped_ticks += 1;
             }
+            if pending >= ENCODER_DEPTH {
+                self.window.full_tick();
+            }
             self.pacer.consume(now, None);
             self.capture_poll_due = None;
         }
@@ -420,6 +429,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         };
         let format = frame.format;
         self.window.dwell(format.encode_us);
+        self.window.unit();
         self.frame_id += 1;
         if !format.duplicate {
             self.window.unique += 1;
