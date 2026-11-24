@@ -5,17 +5,24 @@
 //! the screen stands still, or at once for a keyframe. The encoder pushes
 //! its output and wakes thread C (`DRAIN = None`). A new picture is dated by
 //! when it reached the stream's queue, which thread C anchors its pacing on.
+//! A display that sleeps gives the stream nothing: an open, the first
+//! submit after a resume and a stream with no picture light it
+//! (`power.rs`) and fail, and thread C's retry opens a stream once it draws.
+//! A stream whose display turned off under it repeats its last picture
+//! until the display has been dark for `wake::SETTLE`, then does the same.
 
 use super::{
     capture::{CaptureState, Counts, Stream},
     encoder::{self, Encoder},
     platform::ScreenAccess,
+    power,
+    wake::{SETTLE, SleepWatch},
 };
 use crate::{
     BackendError, Display, EncodedFrame, FailureKind, Presented, Result, VideoCodec, VideoLimits,
     VideoRate, Waker,
     codec::pipeline::{FIRST_SUBMIT_WAIT, LIVENESS_INTERVAL},
-    error,
+    error, failure_kind,
     platform::VideoSource,
     qos::{ENCODER_BITRATE_MAX, ENCODER_BITRATE_MIN, scaled_size},
     worker::ENCODER_DEPTH,
@@ -26,6 +33,15 @@ use std::time::{Duration, Instant};
 pub(crate) struct MacVideo {
     stream: Stream,
     encoder: Encoder,
+    /// The captured display's id.
+    display: u32,
+    /// Resumed since the last submit, which then checks that the display
+    /// did not fall asleep during the pause.
+    resumed: bool,
+    /// What the stream found of the display's sleep, and when it last
+    /// found anything: a new picture, or a look.
+    watch: SleepWatch,
+    looked: Instant,
     created: Instant,
     last_submit: Option<Instant>,
     /// Asked for and not yet submitted.
@@ -35,6 +51,15 @@ pub(crate) struct MacVideo {
     presented: Option<Presented>,
     timing: Timing,
 }
+
+/// How often a stream with no new picture looks whether its display fell
+/// asleep, at a repeat of its last picture, which a still screen submits
+/// every `LIVENESS_INTERVAL`.
+const ASLEEP_LOOK: Duration = Duration::from_millis(500);
+const _: () = assert!(
+    ASLEEP_LOOK.as_millis() + LIVENESS_INTERVAL.as_millis() < SETTLE.as_millis(),
+    "a display that turns off under a still screen is found awake within SETTLE before"
+);
 
 /// Where `macos_capture_timing` goes: with thread C's pacing.
 const TIMING_TARGET: &str = "pb_mapper_desktop::feedback";
@@ -121,7 +146,8 @@ impl VideoSource for MacVideo {
         encoder::encodes(codec)
     }
     /// The display fitted inside the viewer's limits, its aspect kept,
-    /// never upscaled; the encoder first, whose failure is the codec's.
+    /// never upscaled; the encoder first, whose failure is the codec's. A
+    /// sleeping display is lit instead, and the open fails until it draws.
     fn open(
         _: &ScreenAccess,
         display: &Display,
@@ -131,6 +157,11 @@ impl VideoSource for MacVideo {
         waker: &Waker,
     ) -> Result<Self> {
         rate_bounds(rate.bitrate)?;
+        // Thread C checked the session just before: this login owns the
+        // screen, unlocked.
+        if power::wake([display.id]) {
+            return Err(power::waking());
+        }
         let (width, height) = scaled_size(
             display.width,
             display.height,
@@ -138,11 +169,25 @@ impl VideoSource for MacVideo {
             limits.max_height,
         );
         let encoder = Encoder::new(codec, width, height, limits.max_fps, rate.bitrate, waker)?;
-        let stream = Stream::start(display.id, width, height, limits.max_fps, waker)?;
+        let stream =
+            Stream::start(display.id, width, height, limits.max_fps, waker).map_err(|failure| {
+                // ScreenCaptureKit may not list a display that fell asleep.
+                if failure_kind(&failure) == Some(FailureKind::DisplayLost)
+                    && power::wake([display.id])
+                {
+                    power::waking()
+                } else {
+                    failure
+                }
+            })?;
         let now = Instant::now();
         Ok(Self {
             stream,
             encoder,
+            display: display.id,
+            resumed: false,
+            watch: SleepWatch::default(),
+            looked: now,
             created: now,
             last_submit: None,
             keyframe: true,
@@ -159,9 +204,17 @@ impl VideoSource for MacVideo {
     }
     /// Never waits: nothing captured yet, a full encoder or a still screen
     /// inside the liveness interval submit nothing; a keyframe asked for
-    /// stays asked for until a submit carries it.
+    /// stays asked for until a submit carries it. A display that slept
+    /// through a pause, that never gave a picture because it sleeps, or
+    /// that turned off under the stream and stayed dark for `SETTLE`, is
+    /// lit, and the submit fails so that thread C opens a new stream once
+    /// it draws.
     fn submit(&mut self, keyframe: bool) -> Result<bool> {
         self.presented = None;
+        // Thread C checked the session just before, as for `open`.
+        if std::mem::take(&mut self.resumed) && power::wake([self.display]) {
+            return Err(power::waking());
+        }
         self.keyframe |= keyframe | self.encoder.keyframe_due();
         if self.encoder.pending() >= ENCODER_DEPTH {
             return Ok(true);
@@ -173,6 +226,9 @@ impl VideoSource for MacVideo {
                 .is_some_and(|last| now >= last + LIVENESS_INTERVAL);
         let Some(taken) = self.stream.take(repeat)? else {
             if self.last_submit.is_none() && now >= self.created + FIRST_SUBMIT_WAIT {
+                if power::wake([self.display]) {
+                    return Err(power::waking());
+                }
                 return Err(BackendError::new(
                     FailureKind::CaptureFailed,
                     "ScreenCaptureKit delivered no picture",
@@ -181,6 +237,20 @@ impl VideoSource for MacVideo {
             }
             return Ok(false);
         };
+        if taken.fresh.is_some() {
+            self.watch.awake(now);
+            self.looked = now;
+        } else if now >= self.looked + ASLEEP_LOOK {
+            // A display put to sleep sends the stream nothing more, and its
+            // last picture would repeat for good.
+            self.looked = now;
+            if !power::sleeping(self.display) {
+                self.watch.awake(now);
+            } else if self.watch.asleep(now) {
+                power::light();
+                return Err(power::waking());
+            }
+        }
         self.encoder
             .encode(&taken.picture, self.keyframe, taken.fresh.is_none())?;
         self.keyframe = false;
@@ -197,6 +267,9 @@ impl VideoSource for MacVideo {
         self.presented
     }
     fn idle_until(&self, keyframe_due: Option<Instant>) -> Option<Instant> {
+        if self.resumed {
+            return None;
+        }
         match self.stream.state() {
             CaptureState::Ready => None,
             CaptureState::Waiting => Some(self.created + FIRST_SUBMIT_WAIT),
@@ -215,5 +288,10 @@ impl VideoSource for MacVideo {
         // A stopped stream needs to be drained even while paused, when no
         // other callback is necessarily waiting to be collected.
         self.encoder.pending() + usize::from(self.stream.stopped())
+    }
+    /// The display may sleep while every viewer is paused, which releases
+    /// the session's activity: the next submit looks.
+    fn paused(&mut self, paused: bool) {
+        self.resumed = !paused;
     }
 }
