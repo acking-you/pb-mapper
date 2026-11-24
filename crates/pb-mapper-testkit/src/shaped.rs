@@ -1,9 +1,9 @@
-//! A TCP hop that holds bytes for a delay and limits their rate, adjustable
-//! while connections run.
+//! A TCP hop that holds bytes for a delay and limits their rate, or holds
+//! them all, adjustable while connections run.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -18,6 +18,10 @@ pub struct Shape {
     pub delay_ms: AtomicU64,
     /// Bytes per second; 0 is unlimited.
     pub rate: AtomicU64,
+    /// Every byte is held while this is set, as a path that drops
+    /// everything holds it: connections stay open, and what was held goes
+    /// on once it is cleared.
+    pub blocked: AtomicBool,
 }
 
 /// A running [`shaped_link`]. Dropping it stops the hop: its accept loop
@@ -72,6 +76,9 @@ pub async fn shaped_link_each_way(
     ShapedLink { addr, _hop: hop }
 }
 
+/// How often a held direction looks whether it is still blocked.
+const BLOCKED_POLL: Duration = Duration::from_millis(5);
+
 async fn shaped_copy(mut read: OwnedReadHalf, mut write: OwnedWriteHalf, shape: Arc<Shape>) {
     let (send, mut receive) = tokio::sync::mpsc::channel::<(tokio::time::Instant, Vec<u8>)>(256);
     let incoming = async move {
@@ -97,6 +104,9 @@ async fn shaped_copy(mut read: OwnedReadHalf, mut write: OwnedWriteHalf, shape: 
             let delay = Duration::from_millis(shape.delay_ms.load(Ordering::Relaxed));
             tokio::time::sleep_until(read_at + delay).await;
             for packet in bytes.chunks(4096) {
+                while shape.blocked.load(Ordering::Relaxed) {
+                    tokio::time::sleep(BLOCKED_POLL).await;
+                }
                 let rate = shape.rate.load(Ordering::Relaxed);
                 if rate > 0 {
                     free = free.max(tokio::time::Instant::now());
