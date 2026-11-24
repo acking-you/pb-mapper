@@ -1,12 +1,15 @@
 # Viewer following its window's display: measurements
 
 Release builds on a 12-core Apple M6 with 24 GiB RAM, macOS 27.0 (26A425) and
-Rust 1.99.1, with other builds running on the machine at the same time. Three
+Rust 1.99.1, with other builds running on the machine at the same time. Four
 runs of
 
 `cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture --test-threads=1 slow_link::window_display`
 
-Raw output: [run 1](run-1.txt), [run 2](run-2.txt), [run 3](run-3.txt).
+Raw output: [run 1](run-1.txt), [run 2](run-2.txt), [run 3](run-3.txt),
+[run 4](run-4.txt). Run 4 was made after the review that holds a backlog cap
+beneath a slower display; with no backlog cap in these runs, the cap takes
+the same steps in it as in the first three.
 
 Each case runs in one process on loopback, through a real relay and TLS, with
 the slow-link suite's synthetic encoder (1080p, 8 ms, a per-frame budget) and
@@ -21,7 +24,7 @@ the viewer connected with.
 
 ## Smooth (ceiling 120)
 
-Values are the three runs in order. "First capture at the new pace" is from
+Values are the four runs in order. "First capture at the new pace" is from
 the call to the first capture the host's encoder was asked to pace at the
 new rate, read from the synthetic encoder's own record of each pace change.
 The rates are the means of the host's once-a-second stats over the phase,
@@ -30,27 +33,27 @@ once a second over the whole phase, its first second included.
 
 | Phase | Measure | Values |
 | --- | --- | --- |
-| On the 120 Hz display | host pace (fps) | 120.0, 120.0, 120.0 |
+| On the 120 Hz display | host pace (fps) | 120.0, 120.0, 120.0, 120.0 |
 | | host cap | none in every second |
-| | received (fps) | 119.9, 120.0, 119.9 |
-| | sent (Mbit/s) | 12.01, 12.00, 11.99 |
-| Moved to 60 Hz | first capture at pace 60 after (ms) | 64.6, 70.9, 73.3 |
-| | host pace (fps) | 60.0, 60.0, 60.0 |
+| | received (fps) | 119.9, 120.0, 119.9, 119.8 |
+| | sent (Mbit/s) | 12.01, 12.00, 11.99, 12.00 |
+| Moved to 60 Hz | first capture at pace 60 after (ms) | 64.6, 70.9, 73.3, 70.6 |
+| | host pace (fps) | 60.0, 60.0, 60.0, 60.0 |
 | | host cap | 60 in every second |
-| | received (fps) | 66.2, 66.1, 66.2 |
-| | sent (Mbit/s) | 6.00, 6.04, 6.00 |
-| Moved back to 144 Hz | first capture at pace 120 after (ms) | 90.9, 107.4, 106.2 |
-| | host pace (fps) | 120.0, 120.0, 120.0 |
+| | received (fps) | 66.2, 66.1, 66.2, 66.2 |
+| | sent (Mbit/s) | 6.00, 6.04, 6.00, 6.04 |
+| Moved back to 144 Hz | first capture at pace 120 after (ms) | 90.9, 107.4, 106.2, 110.3 |
+| | host pace (fps) | 120.0, 120.0, 120.0, 120.0 |
 | | host cap | none in every second |
-| | received (fps) | 114.0, 114.0, 114.0 |
-| | sent (Mbit/s) | 11.99, 11.94, 12.00 |
+| | received (fps) | 114.0, 114.0, 114.0, 113.9 |
+| | sent (Mbit/s) | 11.99, 11.94, 12.00, 11.94 |
 
 The pace changes within the 250 ms viewer tick and a loopback round trip,
 each way, without a reconnect. The received means of the two moved phases
 include a first sample that still reads the rate before the move: the
 viewer's received rate is a once-a-second figure, and 66.1 to 66.2 over ten
-samples is one at about 120 and nine at 60, 114.0 one at about 60 and nine at
-120. Bits per frame
+samples is one at about 120 and nine at 60, 113.9 to 114.0 one at about 60
+and nine at 120. Bits per frame
 stayed at 100 000 throughout: on an unlimited link they are already the
 preset's for this picture, so halving the frame rate halved the bitrate sent
 rather than raising each frame's bits. On a link that limits the bitrate the
