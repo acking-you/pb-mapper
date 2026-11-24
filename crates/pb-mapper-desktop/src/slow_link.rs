@@ -1111,10 +1111,10 @@ fn p95(mut values: Vec<u64>) -> Option<u64> {
 }
 
 /// A decoder that takes 67 ms per frame: the viewer's fps cap brings the host
-/// down to what it presents, while the host's own controller, its bits per
-/// frame and its rate model stay where the network puts them. Once the cap
-/// has found the decoder, after the first 10 s, it holds the pace at 13 to 15
-/// without a backlog episode or a keyframe request.
+/// down to just below what it decodes, while the host's own controller, its
+/// bits per frame and its rate model stay where the network puts them. Once
+/// the cap has found the decoder, after the first 10 s, it holds the pace at
+/// 13 to 15 without a backlog episode or a keyframe request.
 #[test]
 #[ignore = "explicit ~60-second slow presenter acceptance"]
 fn slow_presenter_is_capped_by_fps_cap_not_host_backpressure() {

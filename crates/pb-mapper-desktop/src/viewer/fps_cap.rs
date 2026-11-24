@@ -13,13 +13,14 @@
 //! busy, so its pulls over such ticks are what it can take. A lowering
 //! remembers the capacity, and raises then stop just below it. Above that a
 //! raise is a probe of a tenth of it, watched for `PROBE_WATCH` and taken back
-//! at once at the first sign that the consumer falls behind, with a backoff
-//! that doubles while probes fail; one that holds well above the capacity
-//! shows the consumer got faster, and the capacity is forgotten, as it is
-//! when a new generation, a new picture size or a preset change makes it
-//! stale. A consumer takes at least one unit per its median turnaround, the
-//! time from a hand-off to that unit's presentation: when that is well above
-//! the capacity, it replaces it.
+//! at once at the first sign that the consumer falls behind (not while it
+//! decodes a fresh IDR, which may be slow at any rate), with a backoff that
+//! doubles while probes fail; a pause in the watch takes it back too, as no
+//! verdict. A probe that holds well above the capacity shows the consumer got
+//! faster, and the capacity is forgotten, as it is when a new generation, a
+//! new picture size or a preset change makes it stale. A consumer takes at
+//! least one unit per its median turnaround, the time from a hand-off to that
+//! unit's presentation: when that is well above the capacity, it replaces it.
 //!
 //! A consumer that queues inside itself (GStreamer's four units in flight,
 //! MediaCodec) hides a backlog from the sink's queue, but not from the time it
@@ -102,6 +103,9 @@ pub(crate) struct Observed {
     pub queued: usize,
     /// How long the head has waited; zero when nothing is queued.
     pub head_wait: Duration,
+    /// The consumer took an IDR within the sink's `IDR_GRACE`: what queued
+    /// behind it may be its slow decode, not the rate.
+    pub idr_recent: bool,
 }
 
 /// One tick of the meter that kept the consumer busy.
@@ -244,7 +248,8 @@ struct Probe {
 
 /// Owned by the sink. `tick` runs every viewer tick while the session
 /// streams and is not paused, from `IDR_GRACE` after the consumer took its
-/// first IDR; otherwise `freeze` keeps the cap as it is.
+/// first IDR; otherwise `freeze` keeps the cap as it is, but for a probe
+/// under watch, which it takes back.
 pub(crate) struct FpsCap {
     /// The session's `limits.max_fps`. The host clears its cap for any value
     /// at or above it, so this is what removing the cap sends: the preset's
@@ -331,16 +336,20 @@ impl FpsCap {
         self.lag_ticks = 0;
     }
 
-    /// Paused, or the host does not stream: nothing is judged, the hold
-    /// toward a raise starts over afterwards, and a probe under watch is left
-    /// where it is, without a verdict.
-    pub fn freeze(&mut self) {
+    /// Paused, or the host does not stream: nothing is judged, and the hold
+    /// toward a raise starts over afterwards. A probe under watch is taken
+    /// back, without a verdict: the cap to send then, so the host never
+    /// stays above what the consumer was seen to take.
+    pub fn freeze(&mut self, now: Instant) -> Option<u32> {
         self.high_ticks = 0;
         self.lag_ticks = 0;
         self.short_since = None;
         self.backlog = false;
         self.meter.reset();
-        self.probe = None;
+        let probe = self.probe.take()?;
+        self.cap = Some(probe.from);
+        self.last_change = Some(now);
+        Some(probe.from)
     }
 
     /// The fps to send the host, when the cap changes: lowered under backlog
@@ -407,11 +416,17 @@ impl FpsCap {
         }
 
         if let Some(probe) = &mut self.probe {
-            probe.busy_ticks = if busy { probe.busy_ticks + 1 } else { 0 };
+            // A slow IDR decode holds the queue and keeps the consumer busy
+            // at any rate: those ticks are no verdict on the probe.
+            if !observed.idr_recent {
+                probe.busy_ticks = if busy { probe.busy_ticks + 1 } else { 0 };
+            }
             let failed = backlog
                 || lagging
                 || probe.busy_ticks >= PROBE_BUSY_TICKS
-                || (observed.queued >= PROBE_QUEUED && observed.head_wait > late);
+                || (!observed.idr_recent
+                    && observed.queued >= PROBE_QUEUED
+                    && observed.head_wait > late);
             if failed {
                 // Back at once, whenever the probe was.
                 let from = probe.from;
@@ -553,6 +568,7 @@ mod tests {
                 presented_fps: fps,
                 queued,
                 head_wait: Duration::ZERO,
+                idr_recent: false,
             };
             self.observe(observed, direct)
         }
@@ -642,7 +658,7 @@ mod tests {
         // Paused: nothing is judged however long, and the hold starts over.
         for _ in 0..40 {
             ticks.now += Duration::from_millis(250);
-            ticks.cap.freeze();
+            assert_eq!(ticks.cap.freeze(ticks.now), None);
         }
         ticks.quiet(12, 36.0, 0, false);
         assert_eq!(ticks.tick(36.0, 0, false), Some(46));
@@ -662,6 +678,7 @@ mod tests {
             presented_fps: 40.0,
             queued: 0,
             head_wait: Duration::ZERO,
+            idr_recent: false,
         };
         let mut cap = FpsCap::new(start, 120, false);
         cap.on_backlog();
@@ -749,6 +766,7 @@ mod tests {
             presented_fps: 16.0,
             queued: 2,
             head_wait: Duration::from_millis(150),
+            idr_recent: false,
         };
         assert_eq!(ticks.observe(late, false), Some(15));
 
@@ -767,6 +785,61 @@ mod tests {
         ticks.quiet_consumer(12, 4, false, 0);
         ticks.consumer(4, false);
         assert_eq!(ticks.tick(17.0, 0, false), Some(19));
+    }
+
+    /// A slow IDR decode is no verdict on a probe: while the consumer took
+    /// one within the sink's grace, the queue behind it and a busy consumer do
+    /// not take the probe back; past the grace they do. A pause during the
+    /// watch takes the probe back at once without counting it as failed, so
+    /// the host does not stay above the 15 the consumer was seen to take.
+    #[test]
+    fn a_probe_is_spared_an_idr_decode_and_taken_back_by_a_pause() {
+        /// Raised to 95% of the 16 measured, then probed to 17.
+        fn probing() -> Ticks {
+            let mut ticks = Ticks::measured_16();
+            ticks.quiet_consumer(12, 3, false, 0);
+            ticks.consumer(3, false);
+            assert_eq!(ticks.tick(12.0, 0, false), Some(15));
+            ticks.quiet_consumer(3, 4, false, 0);
+            ticks.consumer(4, false);
+            assert_eq!(ticks.tick(15.0, 0, false), Some(17));
+            ticks
+        }
+
+        // Two queued behind an IDR the consumer is still decoding, the head
+        // late and the consumer busy: the probe stands, and only the same
+        // queue past the grace takes it back.
+        let mut ticks = probing();
+        let decoding = Observed {
+            presented_fps: 16.0,
+            queued: 2,
+            head_wait: Duration::from_millis(150),
+            idr_recent: true,
+        };
+        for _ in 0..2 {
+            ticks.consumer(4, true);
+            assert_eq!(ticks.observe(decoding, false), None);
+        }
+        ticks.consumer(4, true);
+        let late = Observed {
+            idr_recent: false,
+            ..decoding
+        };
+        assert_eq!(ticks.observe(late, false), Some(15));
+
+        // A pause in the watch: back to 15 at once, and nothing judged while
+        // it lasts.
+        let mut ticks = probing();
+        ticks.now += Duration::from_millis(250);
+        assert_eq!(ticks.cap.freeze(ticks.now), Some(15));
+        for _ in 0..8 {
+            ticks.now += Duration::from_millis(250);
+            assert_eq!(ticks.cap.freeze(ticks.now), None);
+        }
+        // No verdict, so no backoff: the next probe waits only for the hold.
+        ticks.quiet_consumer(12, 4, false, 0);
+        ticks.consumer(4, false);
+        assert_eq!(ticks.tick(15.0, 0, false), Some(17));
     }
 
     /// A capacity measured while the consumer was briefly slow does not hold

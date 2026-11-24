@@ -256,8 +256,9 @@ when you decode it too. The host picks one for the session.
 Decode with what the platform has (Media Foundation, VideoToolbox, MediaCodec,
 openh264, FFmpeg) on the consumer's own thread: `VideoConsumer::next` blocks,
 and never on Tokio. The sink keeps only the newest decodable units: when the
-consumer falls behind it drops to the next IDR and caps the host's frame rate
-to what the consumer presents.
+consumer falls behind it asks for an IDR and keeps the queue for the consumer
+to drain until that IDR supersedes it (an overflow still drops to the next
+IDR), and it caps the host's frame rate below what the consumer can decode.
 
 - After a `discontinuity`, drop what the decoder holds and start again at the
   keyframe the sink hands out next.

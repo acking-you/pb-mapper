@@ -1673,11 +1673,10 @@ and at what the consumer takes:
 - The turnaround is the time from handing a unit out to its accepted
   presentation. A decoder that queues inside itself (the Linux runner keeps up
   to four units in its GStreamer pipeline, and Android's MediaCodec holds a
-  few) hides a
-  backlog from the sink's queue, but its turnaround rises by a decode time for
-  each unit it holds. The turnaround is late when its median over the last
-  second exceeds its least over the last ten seconds by more than two frame
-  intervals at the cap, and at least 40 ms.
+  few) hides a backlog from the sink's queue, but its turnaround rises by a
+  decode time for each unit it holds. The turnaround is late when its median
+  over the last second exceeds its least over the last ten seconds by more
+  than two frame intervals at the cap, and at least 40 ms.
 
 More than two queued on two consecutive ticks, a backlog episode or an overflow
 from then on, or a late turnaround on two consecutive ticks, lowers the cap to
@@ -1693,20 +1692,23 @@ once a second: by 5 at a 30 fps ceiling and in proportion above it (10 at 60,
 capacity, watched for 3 s. Two queued with the oldest waiting more than two
 frame intervals at the probed cap (at least 40 ms), a late turnaround, a
 backlog episode or the consumer busy four ticks in a row take it back at once,
-whatever the 1 s spacing, and the next probe waits 3 s, doubling to 60 s. A
-probe that holds resets that wait, and the next may follow at once. The
+whatever the 1 s spacing, and the next probe waits 3 s, doubling to 60 s.
+Within 500 ms of the consumer taking an IDR, whose decode may be slow at any
+rate, neither the queue nor a busy tick counts against a probe. A pause, or
+the host not streaming, during the watch takes the probe back at once too,
+without counting it as failed. A probe that holds resets that wait, and the
+next may follow at once. The
 capacity is forgotten when a probe holds at 1.1 times it or more, and on a
 new generation, a new picture size or a preset change. A consumer takes at
 least one unit per median turnaround, so when that rate is 1.1 times the
 capacity or more it becomes the capacity: a decoder that got faster, or one
 only its presentations had measured, is not held below what it shows it can
 take, while probes above it keep their wait. At the preset's ceiling the cap
-is removed.
-Only backlog lowers it, so a phone that keeps up, or a static desktop, never
-ratchets the host down.
+is removed. Only backlog lowers it, so a phone that keeps up, or a static
+desktop, never ratchets the host down.
 
-One limiter covers every keyframe request: the decoder's, the sink's drops and
-the user's. While waiting for an IDR it asks at once (or after a 1 s hold that
+One limiter covers every keyframe request: the decoder's, the sink's backlog
+episodes and overflow drops, and the user's. While waiting for an IDR it asks at once (or after a 1 s hold that
 follows a new generation, a host recovery or a resume), then after 0.5, 1, 2
 and 4 s, and every 4 s after that, until an IDR's header arrives, even while
 its payload is still in transit; until that IDR has landed, the hold and the
@@ -1858,7 +1860,7 @@ shapes by content, never by number.
 | Process timers | 1 ms, with power throttling opted out, while a session captures |
 | IDR | host minimum interval 300 ms; viewer minimum 500 ms, backoff to 4 s; 1 s hold after a discontinuity |
 | Viewer sink | 32 units, 8 MiB; backlog at 250 ms with ≥ 3 queued, drained until the IDR or a head under 125 ms; IDR grace 500 ms; stall watchdog 700 ms |
-| fps cap | tick 250 ms; capacity from ≥ 4 busy ticks of the last 8; × 0.9 direct, × 0.8 relay; minimum 5; after 3 s, +5 per 30 fps of ceiling or a quarter of the cap, up to 95% of the capacity; probes of 10% watched 3 s, backoff 3 s doubling to 60 s; turnaround late past 2 frame intervals (≥ 40 ms) over its 10 s floor; ≥ 1 s between changes but for a probe taken back |
+| fps cap | tick 250 ms; capacity from ≥ 4 busy ticks of the last 8; × 0.9 direct, × 0.8 relay; minimum 5; after 3 s, +5 per 30 fps of ceiling or a quarter of the cap, up to 95% of the capacity; probes of 10% watched 3 s (not by the queue within the IDR grace; a pause takes one back), backoff 3 s doubling to 60 s; turnaround late past 2 frame intervals (≥ 40 ms) over its 10 s floor; ≥ 1 s between changes but for a probe taken back |
 | Input | viewer queue 512 events or 256 KiB, batches of 16; host lane 512; presentation fresh for 2 s; presentations sent at most every 100 ms except ahead of input |
 | Cursor | sampled every 16 ms; the controller's own move never reported; a report older than the controller's last move set aside; a shape read only when `cursor_shape` was negotiated, the pointer shows on the shared display and the OS pointer changed (a failed read again after 250 ms), an image over 1024 px a side never, 1 to 256 px a side sent, 64 slots on each end |
 | Codec | `Accepted` waits at most 3 s for the backend's display and H.265 answer; one probe per GPU and process; encoder bitrate 256 kbit/s to 80 Mbit/s; bits per frame × (pixels / 1080p)^0.75, within 0.4 and 3 |

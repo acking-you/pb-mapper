@@ -26,8 +26,9 @@
 //! The fps cap judges the consumer only from `IDR_GRACE` after its first IDR:
 //! what queued during the hand-off and its decoder's start, and an overflow
 //! then, are not its falling behind. The sink tells it what the consumer
-//! takes: each unit handed out, each time the consumer found nothing, and the
-//! time from each hand-off to that unit's accepted presentation.
+//! takes: each unit handed out, each time the consumer found nothing, the
+//! time from each hand-off to that unit's accepted presentation, and whether
+//! it took an IDR within `IDR_GRACE`.
 //!
 //! Keyframe requests go through the viewer's recovery state machine and its
 //! limiter, and the viewer tick runs the fps cap and the stall watchdog here.
@@ -58,8 +59,9 @@ const SINK_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// one younger than half of it ends the backlog episode.
 const BACKLOG_AGE: Duration = Duration::from_millis(250);
 const BACKLOG_MIN_UNITS: usize = 3;
-/// No backlog episode this soon after an IDR was handed out, and no fps cap
-/// judgment this soon after the first.
+/// No backlog episode, and no fps cap probe failed by the queue, this soon
+/// after an IDR was handed out, and no fps cap judgment this soon after the
+/// first.
 const IDR_GRACE: Duration = Duration::from_millis(500);
 /// Longest decoder name kept for the overlay.
 const DECODER_NAME_MAX: usize = 64;
@@ -412,17 +414,16 @@ impl VideoSink {
             state.discarded += 1;
             self.request(state, KeyframeReason::Gap, now);
             return;
-        } else {
-            if state.backlogged(now, 1) {
-                self.open_backlog(state, now);
-            }
-            if state.queue.len() >= SINK_MAX_UNITS
-                || state.bytes + unit.bytes.len() > SINK_MAX_BYTES
-            {
-                state.discarded += 1;
-                self.overflow(state, now);
-                return;
-            }
+        } else if state.queue.len() >= SINK_MAX_UNITS
+            || state.bytes + unit.bytes.len() > SINK_MAX_BYTES
+        {
+            // Checked first: an overflow drops the queue, so the same unit
+            // never also opens a backlog episode over it.
+            state.discarded += 1;
+            self.overflow(state, now);
+            return;
+        } else if state.backlogged(now, 1) {
+            self.open_backlog(state, now);
         }
         state.enqueue(unit);
         drop(guard);
@@ -525,8 +526,8 @@ impl VideoSink {
     /// The viewer tick (every 250 ms). Returns the fps the host should be
     /// capped at, when that changes; it is judged only while the session
     /// streams and is not paused, from `IDR_GRACE` after the consumer took its
-    /// first IDR. Also re-requests an awaited IDR on its backoff, and runs the
-    /// stall watchdog.
+    /// first IDR, and a probe under watch when that stops is taken back. Also
+    /// re-requests an awaited IDR on its backoff, and runs the stall watchdog.
     pub(super) fn tick(
         &self,
         now: Instant,
@@ -547,11 +548,13 @@ impl VideoSink {
                 head_wait: state.queue.front().map_or(Duration::ZERO, |head| {
                     now.saturating_duration_since(head.received_at)
                 }),
+                idr_recent: state
+                    .idr_pulled_at
+                    .is_some_and(|at| now.saturating_duration_since(at) < IDR_GRACE),
             };
             state.fps_cap.tick(now, observed, direct, quality)
         } else {
-            state.fps_cap.freeze();
-            None
+            state.fps_cap.freeze(now)
         };
         let stalled = !paused && state.stalled(now);
         if let Some(reason) = state.recovery.tick(now, stalled) {
@@ -1207,6 +1210,108 @@ mod tests {
             [None, Some(30), None, None, None, Some(7)],
             "{caps:?}"
         );
+    }
+
+    /// What the consumer took of one picture is not held against another:
+    /// after a new picture size, or a new generation whether its `State` or
+    /// its first unit comes first, raises take full steps again instead of
+    /// probing just above the capacity measured before.
+    #[test]
+    fn a_new_picture_or_generation_forgets_the_capacity() {
+        #[derive(Clone, Copy, Debug)]
+        enum Change {
+            None,
+            Resize,
+            State,
+            Unit,
+        }
+        /// The consumer above until the cap is 7, for a capacity of 8 a
+        /// second; then from 1510 ms an IDR with `change` and units at 8 a
+        /// second, each taken at once and presented 120 ms later. The first
+        /// raise after that, and when.
+        fn first_raise(change: Change) -> (u64, u32) {
+            let clock = Clocked::new();
+            let (generation, size) = match change {
+                Change::None => (1, 16),
+                Change::Resize => (1, 32),
+                Change::State | Change::Unit => (2, 16),
+            };
+            let mut presenting = VecDeque::new();
+            for millis in 0..=6000u64 {
+                if millis < 1510 && millis.is_multiple_of(40) {
+                    clock.push(millis / 40 + 1, millis == 0, millis);
+                }
+                if millis == 1510 && matches!(change, Change::State) {
+                    clock.sink.on_state_at(2, true, clock.at(millis));
+                }
+                let changed = millis
+                    .checked_sub(1510)
+                    .filter(|since| since.is_multiple_of(125));
+                if let Some(since) = changed {
+                    let at = clock.at(millis);
+                    let mut unit = video(generation, 100 + since / 125, since == 0, at);
+                    (unit.width, unit.height) = (size, size);
+                    clock.sink.push_at(unit, at);
+                }
+                if presenting.front().is_some_and(|(_, _, due)| *due == millis)
+                    && let Some((generation, frame_id, _)) = presenting.pop_front()
+                {
+                    clock
+                        .consumer
+                        .presented_at(generation, frame_id, clock.at(millis));
+                }
+                let pull = if millis < 1510 {
+                    millis.is_multiple_of(125)
+                } else {
+                    changed.is_some()
+                };
+                if pull {
+                    let unit = clock.pull(millis).unwrap();
+                    presenting.push_back((unit.generation, unit.frame_id, millis + 120));
+                    if millis >= 1510 {
+                        // It keeps up: the next pull finds nothing.
+                        assert!(clock.pull(millis).is_none());
+                    }
+                }
+                if millis.is_multiple_of(250) && millis > 0 {
+                    let cap = clock.tick(millis);
+                    if millis == 1500 {
+                        assert_eq!(cap, Some(7), "{change:?}");
+                    } else if millis > 1500
+                        && let Some(cap) = cap
+                    {
+                        return (millis, cap);
+                    }
+                }
+            }
+            panic!("no raise after {change:?}");
+        }
+
+        // The same picture keeps the capacity: 3 s after the queue is short,
+        // a probe of a tenth of it.
+        assert_eq!(first_raise(Change::None), (4750, 8));
+        // Another forgets it: a full step at a ceiling of 60.
+        for change in [Change::Resize, Change::State, Change::Unit] {
+            assert_eq!(first_raise(change), (4750, 17), "{change:?}");
+        }
+    }
+
+    /// A unit that both overflows the queue and finds its head too old is one
+    /// overflow: the queue goes, and no backlog episode opens over it.
+    #[test]
+    fn an_overflow_is_not_also_a_backlog_episode() {
+        let clock = Clocked::new();
+        clock.push(1, true, 0);
+        assert!(clock.pull(0).is_some());
+        // Within IDR_GRACE of the IDR, 32 units queue behind its decode.
+        for frame_id in 2..=33 {
+            clock.push(frame_id, false, 100);
+        }
+        assert_eq!(clock.counts(), (0, 0));
+        // Past it, the next overflows with the head 500 ms old.
+        clock.push(34, false, 600);
+        assert_eq!(clock.counts(), (1, 1));
+        assert_eq!(clock.pulled(600), None);
     }
 
     /// The session streams before its consumer attaches, and the consumer's

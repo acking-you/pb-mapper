@@ -7,18 +7,28 @@ side ran three times:
 `cargo test --release -p pb-mapper-desktop --lib -- --ignored --nocapture --test-threads=1 slow_link`
 
 "Before" is `1515eda` with this change's slow-link cases added and nothing
-else changed. "After" is this change. Every case runs in one process on
-loopback, through a real relay and TLS, with a synthetic encoder and a
-simulated decoder: a thread that takes a unit, sleeps for its decode time and
-presents it. None of this is a real decoder; see the last section.
+else changed. "After" is this change as reviewed: review made a pause take
+back a probe under watch, kept the queue behind a freshly taken IDR from
+failing a probe, and counted a unit that both overflows the queue and finds
+its head too old once. The after runs were made again with those changes; the
+runs before them, in this change's history, measured the same within
+run-to-run spread. Every case runs in one process on loopback, through a real
+relay and TLS, with a synthetic encoder and a simulated decoder: a thread that
+takes a unit, sleeps for its decode time and presents it. None of this is a
+real decoder; see the last section.
 
 Raw output: [before 1](before-1.txt), [2](before-2.txt), [3](before-3.txt);
-[after 1](after-1.txt), [2](after-2.txt), [3](after-3.txt). In the before
-build the new cases only asserted that they reached their end state; the
-bounds they assert now were set from these runs. The before runs fail two
-cases (`slow_presenter_is_capped_by_fps_cap_not_host_backpressure` and
-`pipelined_slow_consumer`) on the assertions this change adds. All 16 cases
-pass in every after run.
+[after 1](after-1.txt), [2](after-2.txt), [3](after-3.txt). The before build
+already asserted the two bounds the plan set: a mean pace of 13 to 15 FPS with
+no backlog episode or keyframe request from 10 s to 60 s for the 67 ms
+decoder, and no backlog episode after 10 s for the pipelined one. The before
+runs fail both cases
+(`slow_presenter_is_capped_by_fps_cap_not_host_backpressure` and
+`pipelined_slow_consumer`) on them. The other new cases only asserted, in the
+before build, that they reached their end state; the bounds they assert now
+(the cap gone within 12 s of the speed-up, 115 FPS received again within 10 s,
+a fresh picture within 100 ms of the stall's end) were set from these runs.
+All 16 cases pass in every after run.
 
 ## The fps cap
 
@@ -28,17 +38,17 @@ Values are the three runs in order.
 | --- | --- | --- | --- |
 | Decoder taking 67 ms a frame, 10 to 60 s | backlog episodes | 6, 5, 4 | 0, 0, 0 |
 | | keyframe requests | 6, 5, 4 | 0, 0, 0 |
-| | mean host pace (FPS) | 12.2, 12.3, 12.3 | 13.1, 13.0, 13.0 |
-| 67 ms a frame for 20 s, then 5 ms | cap removed after (s) | 12.0, 9.0, 12.0 | 8.0, 7.0, 7.0 |
+| | mean host pace (FPS) | 12.2, 12.3, 12.3 | 13.1, 13.2, 13.2 |
+| 67 ms a frame for 20 s, then 5 ms | cap removed after (s) | 12.0, 9.0, 12.0 | 7.0, 8.0, 7.0 |
 | Four units held inside, 67 ms each, 10 to 30 s | backlog episodes | 4, 3, 5 | 0, 0, 0 |
 | | keyframe requests | 4, 3, 5 | 0, 0, 0 |
-| | receipt to presentation, p95 (ms) | 461, 473, 486 | 262, 358, 354 |
-| | presentations | 254, 244, 241 | 252, 247, 247 |
-| | mean host pace (FPS) | 13.7, 13.2, 13.1 | 12.6, 12.3, 12.3 |
-| 10 ms a frame at 120 FPS, 10 to 30 s | sink wait (receipt to hand-off), p95 (ms) | 51.7, 45.1, 58.1 | 50.9, 47.6, 35.7 |
-| | receipt to presentation, p95 (ms) | 65.1, 59.2, 72.8 | 64.5, 61.9, 49.2 |
-| | presentations | 1317, 1312, 1303 | 1370, 1414, 1392 |
-| | mean host pace (FPS) | 65.2, 65.7, 64.7 | 68.0, 70.2, 69.1 |
+| | receipt to presentation, p95 (ms) | 461, 473, 486 | 327, 302, 365 |
+| | presentations | 254, 244, 241 | 245, 255, 245 |
+| | mean host pace (FPS) | 13.7, 13.2, 13.1 | 12.3, 12.7, 12.2 |
+| 10 ms a frame at 120 FPS, 10 to 30 s | sink wait (receipt to hand-off), p95 (ms) | 51.7, 45.1, 58.1 | 38.8, 42.7, 52.4 |
+| | receipt to presentation, p95 (ms) | 65.1, 59.2, 72.8 | 51.8, 56.2, 65.8 |
+| | presentations | 1317, 1312, 1303 | 1425, 1404, 1385 |
+| | mean host pace (FPS) | 65.2, 65.7, 64.7 | 71.1, 69.7, 70.7 |
 | | backlog episodes, units discarded | 0, 0 in each | 0, 0 in each |
 | 120 FPS, 18 ms one way, 1 ms a frame but 20 ms for one second | 115 FPS received again after (s) | 15.3, 15.3, 15.3 | 7.3, 7.3, 7.3 |
 | | backlog episodes, keyframe requests (whole session) | 2, 2 in each | 3, 2 in each |
@@ -46,14 +56,14 @@ Values are the three runs in order.
 In the host's once-a-second trace of the 67 ms decoder, the cap before went
 from 10 or 11 to 15 or 16 every few seconds, and each overshoot ended in a
 dropped queue and a keyframe request. After, it is 13, 95% of the rate the cap
-measured, rounded down, for the whole 50 s (12 to 14 in the first 7 or 8 s
-of two runs), with single one-second samples at 15 where a probe was taken
-back. The 10 ms decoder at 120 FPS mostly holds at 68 to 71 with probes to 76
-to 79, lowered to 58 to 60 once or twice in 20 s; before, the cap climbed by 5
-a second to 75 to 85 and fell back to 57 to 60 every 6 to 8 s.
+measured, rounded down, for the whole 50 s (12 in the first 3 s of one run),
+with single one-second samples at 15 where a probe was taken back. The 10 ms
+decoder at 120 FPS mostly holds at 70 to 72 with probes to 76 to 80, lowered
+to 58 or 59 at most twice in 20 s; before, the cap climbed by 5 a second to
+75 to 85 and fell back to 57 to 60 every 6 to 8 s.
 
 The pipelined decoder models the Linux runner, which keeps up to four units
-inside its GStreamer pipeline. Its host pace is lower after (12.3 to 12.6
+inside its GStreamer pipeline. Its host pace is lower after (12.2 to 12.7
 against 13.1 to 13.7), but it presents as many frames: before, the extra
 frames reached the sink and were dropped with the queue. Its latency is
 lower, and it no longer asks for keyframes. Its cap cycles between 10 or 11
@@ -62,10 +72,11 @@ between 10 or 11 and 20 or 21.
 
 A variant in which a turnaround that raised the capacity also reset the probe
 backoff gave the same pipelined pace (12.8, 12.2, 12.4) and
-receipt-to-presentation p95 (285, 367, 332 ms) as the version kept. It was
-dropped because only a probe that held should reset the backoff: its output
-is [variant 1](variant-reset-1.txt), [2](variant-reset-2.txt),
-[3](variant-reset-3.txt).
+receipt-to-presentation p95 (285, 367, 332 ms) as the version kept, which
+measured 12.6, 12.3 and 12.3 FPS and 262, 358 and 354 ms in the runs made
+alongside it, before review. It was dropped because only a probe that held
+should reset the backoff: its output is [variant 1](variant-reset-1.txt),
+[2](variant-reset-2.txt), [3](variant-reset-3.txt).
 
 ## The backlog drain
 
@@ -75,10 +86,10 @@ counted from the stall's end.
 
 | Link | Measure | Before | After |
 | --- | --- | --- | --- |
-| Unlimited | fresh picture after the stall (ms) | 5.8, 6.0, 6.1 | 8.8, 6.0, 5.3 |
-| | longest interval between presentations (ms) | 419, 419, 425 | 421, 423, 419 |
-| 1 Mbit/s | fresh picture after the stall (ms) | 344, 400, 447 | 6.0, 6.1, 5.6 |
-| | longest interval between presentations (ms) | 462, 483, 465 | 458, 462, 452 |
+| Unlimited | fresh picture after the stall (ms) | 5.8, 6.0, 6.1 | 6.1, 6.1, 6.1 |
+| | longest interval between presentations (ms) | 419, 419, 425 | 423, 426, 426 |
+| 1 Mbit/s | fresh picture after the stall (ms) | 344, 400, 447 | 6.1, 5.8, 5.9 |
+| | longest interval between presentations (ms) | 462, 483, 465 | 459, 459, 458 |
 | Both | keyframe requests, backlog episodes | 1, 1 in each | 1, 1 in each |
 
 On the unlimited link the requested IDR lands before the stall ends, so both
@@ -95,8 +106,8 @@ pace 60 through each 600 ms stall; 59.9 to 60.1 received FPS with a 45 ms
 encoder and no skipped tick; pace 60 at a 350 ms RTT; back to 3.2 Mbit/s 2.0 s
 after the 1 Mbit/s limit lifts; no keyframe request when IDRs take over a
 second to cross; every requested and every other viewer's IDR answered, with
-median waits of 371 to 469 ms before and 379 to 432 ms after (requested) and
-376 to 426 ms before and 269 to 431 ms after (another viewer's).
+median waits of 371 to 469 ms before and 414 to 439 ms after (requested) and
+376 to 426 ms before and 376 to 432 ms after (another viewer's).
 
 ## Left for a device
 
