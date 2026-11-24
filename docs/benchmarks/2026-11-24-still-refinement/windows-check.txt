@@ -1,0 +1,5 @@
+$ RUSTC_WRAPPER= CC_x86_64_pc_windows_msvc=fakecc AR_x86_64_pc_windows_msvc=fakear \
+    cargo +1.100.0 clippy --target x86_64-pc-windows-msvc -p pb-mapper-desktop \
+    --all-features --all-targets -- -D warnings -A clippy::needless_range_loop
+    Checking pb-mapper-desktop v0.12.1 (<worktree>/crates/pb-mapper-desktop)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.13s

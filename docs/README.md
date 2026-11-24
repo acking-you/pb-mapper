@@ -52,6 +52,7 @@ are in [AGENTS.md](../AGENTS.md). Pages marked 中文 are written in Chinese.
 | [Viewer pixel snap measurements](benchmarks/2026-11-24-viewer-pixel-snap/README.md) | the contrast a 1-pixel stroke keeps through the viewer's picture transform, before and after keeping a 1:1 picture on device pixels and showing a near-1 fit at exactly 1:1 |
 | [Windows encoder settings](benchmarks/2026-11-24-windows-encoder-settings/README.md) | the VideoToolbox and hand-built SPS samples behind the H.264 SPS rewrite, Core Media building a decoder's format from each rewrite, and the device runs the High profile, quality against speed, the display-remoting scenario and the GPU priority still need |
 | [Windows capture conversion](benchmarks/2026-11-24-win-capture-convert/README.md) | the rotation, display-mode size and odd-edge crop geometry tested on every platform, a type-check of the Windows host from a Mac, and the device runs direct conversion, rotated displays, the crop, the video processor's GPU geometry test and its quality still need |
+| [Still refinement](benchmarks/2026-11-24-still-refinement/README.md) | the refinement policy's tests and a type-check of the Windows host, a VideoToolbox run showing why a Mac host has no burst (it sharpened sooner but converged no sooner), and the Windows device runs that decide which encoders refine |
 
 ## Security
 
