@@ -270,6 +270,8 @@ pub(crate) struct StartCaps {
     pub physical_keys: bool,
     /// The worker reads the pointer's shape (`Request::CursorShape`).
     pub cursor_shapes: bool,
+    /// The worker injects `Input::Scroll` in 1/120 of a notch.
+    pub hires_wheel: bool,
 }
 impl From<&BackendCaps> for StartCaps {
     fn from(caps: &BackendCaps) -> Self {
@@ -282,6 +284,7 @@ impl From<&BackendCaps> for StartCaps {
             physical_keys,
             cursor_shapes,
             rate_model: _,
+            hires_wheel,
         } = *caps;
         Self {
             lock,
@@ -290,6 +293,7 @@ impl From<&BackendCaps> for StartCaps {
             cursor,
             physical_keys,
             cursor_shapes,
+            hires_wheel,
         }
     }
 }
@@ -302,6 +306,7 @@ impl From<StartCaps> for BackendCaps {
             cursor,
             physical_keys,
             cursor_shapes,
+            hires_wheel,
         } = caps;
         Self {
             h265: false,
@@ -315,6 +320,7 @@ impl From<StartCaps> for BackendCaps {
             // per frame, and `Nominal` is the safe start anyway, as the latch
             // corrects it and nothing corrects `Timestamp`.
             rate_model: RateModel::Nominal,
+            hires_wheel,
         }
     }
 }
@@ -384,6 +390,70 @@ impl TryFrom<RawAdapterKey> for AdapterKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Protocol 12: an input request carries `Input::Scroll` as the viewer
+    /// sent it, and a `Start` answer says whether the worker scrolls in
+    /// 1/120 of a notch; both read back as they were sent, and caps that
+    /// leave `hires_wheel` out, a protocol-11 worker's, are refused.
+    #[test]
+    fn a_scroll_and_the_workers_hires_wheel_cross_the_pipe() {
+        let expected = DesktopContext {
+            display: crate::Display {
+                id: 1,
+                name: "helper".into(),
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            },
+            generation: 3,
+            desktop: crate::DesktopKind::Ordinary,
+        };
+        let request = Request::Input {
+            expected,
+            sequence: 9,
+            input: Input::Scroll {
+                horizontal: -12,
+                vertical: 240,
+                continuous: true,
+            },
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(
+            r#""input":{"kind":"scroll","horizontal":-12,"vertical":240,"continuous":true}"#
+        ));
+        let Request::Input {
+            sequence: 9,
+            input:
+                Input::Scroll {
+                    horizontal: -12,
+                    vertical: 240,
+                    continuous: true,
+                },
+            ..
+        } = serde_json::from_str(&json).unwrap()
+        else {
+            panic!("the scroll did not read back");
+        };
+
+        let caps = BackendCaps {
+            lock: true,
+            physical_keys: true,
+            hires_wheel: true,
+            ..BackendCaps::default()
+        };
+        let answer = Response {
+            caps: Some(StartCaps::from(&caps)),
+            ..Response::default()
+        };
+        let json = serde_json::to_string(&answer).unwrap();
+        assert!(json.contains(r#""hires_wheel":true"#));
+        let read: Response = serde_json::from_str(&json).unwrap();
+        let read = BackendCaps::from(read.caps.unwrap());
+        assert!(read.hires_wheel && read.physical_keys && read.lock);
+        let older = json.replace(r#","hires_wheel":true"#, "");
+        assert!(serde_json::from_str::<Response>(&older).is_err());
+    }
 
     /// Protocol 11: `Request::Adapter` takes no field, and a response names
     /// an adapter, or leaves it out as every other answer does; either reads

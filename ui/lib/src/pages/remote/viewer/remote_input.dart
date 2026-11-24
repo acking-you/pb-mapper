@@ -80,6 +80,7 @@ final class RemoteInput implements RemotePointerSink {
   final Duration Function() clock;
 
   final _ready = ValueNotifier(false);
+  final _cancels = _Pulse();
   int? _epoch;
 
   /// Physical keys whose down is held on the host, and those whose down
@@ -130,6 +131,11 @@ final class RemoteInput implements RemotePointerSink {
 
   /// Control is live and the picture's geometry known.
   ValueListenable<bool> get ready => _ready;
+
+  /// Fires whenever the local gesture in progress is cancelled: focus
+  /// loss, the app going inactive or hidden, losing control or the picture,
+  /// a new geometry epoch. A trackpad's fling stops with it.
+  Listenable get localCancels => _cancels;
 
   /// Fires when the cursor moves, shows or hides.
   Listenable get cursorChanges => _desktop.cursor;
@@ -226,6 +232,30 @@ final class RemoteInput implements RemotePointerSink {
     if (_waiting.isEmpty) {
       _desktop.send(wheel, geometryEpoch: g.epoch);
     } else if (_sequence(g, [..._waitingDowns, wheel])) {
+      _sentWaiting();
+    }
+  }
+
+  /// The host scrolls in 1/120 of a notch: it listed `wheel_hires`.
+  bool get hiresWheel =>
+      _desktop.session.value.capabilities.contains('wheel_hires');
+
+  /// [horizontal] and [vertical] in 1/120 of a notch, toward a host that
+  /// scrolls in them ([hiresWheel]) alone; [continuous] for a trackpad's
+  /// travel or a fling. Modifiers waiting here go first, as with [wheel].
+  void scroll(int horizontal, int vertical, {required bool continuous}) {
+    final g = _live;
+    if (g == null || (horizontal == 0 && vertical == 0) || !hiresWheel) {
+      return;
+    }
+    final scroll = DesktopInput.scroll(
+      horizontal,
+      vertical,
+      continuous: continuous,
+    );
+    if (_waiting.isEmpty) {
+      _desktop.send(scroll, geometryEpoch: g.epoch);
+    } else if (_sequence(g, [..._waitingDowns, scroll])) {
       _sentWaiting();
     }
   }
@@ -475,7 +505,7 @@ final class RemoteInput implements RemotePointerSink {
     _clearHeld();
     // A modifier still waiting was never sent: nothing to release.
     _waiting.clear();
-    _onLocalCancel();
+    _cancelLocal();
     _latch.clear();
     if (held) _desktop.release();
   }
@@ -486,6 +516,7 @@ final class RemoteInput implements RemotePointerSink {
     _desktop.session.removeListener(_onState);
     _desktop.geometry.removeListener(_onState);
     _ready.dispose();
+    _cancels.dispose();
   }
 
   // ---------------------------------------------------------------- inner
@@ -508,9 +539,14 @@ final class RemoteInput implements RemotePointerSink {
     if (lost || newEpoch) {
       _clearHeld();
       _waiting.clear();
-      _onLocalCancel();
+      _cancelLocal();
       _latch.clear();
     }
+  }
+
+  void _cancelLocal() {
+    _onLocalCancel();
+    _cancels.fire();
   }
 
   /// The downs of the modifiers waiting, in the order they went down.
@@ -643,4 +679,9 @@ final class RemoteInput implements RemotePointerSink {
       : rune < 0x10000
       ? 3
       : 4;
+}
+
+/// A notification its owner fires.
+final class _Pulse extends ChangeNotifier {
+  void fire() => notifyListeners();
 }

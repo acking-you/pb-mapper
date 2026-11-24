@@ -531,6 +531,7 @@ mod tests {
             os: Some(HostOs::Android),
             physical_keys: true,
             cursor_shapes: true,
+            hires_wheel: true,
             ..BackendCaps::default()
         };
         let host = negotiated_capabilities(&backend.values(), &viewer);

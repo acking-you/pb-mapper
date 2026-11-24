@@ -1,7 +1,7 @@
-//! Injection on Windows: enigo for buttons, the wheel, keys and text,
-//! `SendInput` for absolute moves and physical keys' scancodes,
-//! `LockWorkStation`, with the token diagnostics a rejected injection
-//! records.
+//! Injection on Windows: enigo for buttons, the wheel's notches, keys and
+//! text, `SendInput` for absolute moves, scrolls in 1/120 of a notch and
+//! physical keys' scancodes, `LockWorkStation`, with the token diagnostics a
+//! rejected injection records.
 use super::pointer;
 use crate::{
     Button, DoubleClickGuard, Key, Result, error,
@@ -28,8 +28,9 @@ use windows::Win32::{
             GetDoubleClickTime, GetKeyboardLayout, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
             KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
             KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC_EX, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE,
-            MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
-            MapVirtualKeyExW, SendInput, VIRTUAL_KEY, VK_NUMLOCK, VK_PAUSE,
+            MOUSEEVENTF_HWHEEL, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE,
+            MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, MapVirtualKeyExW, SendInput,
+            VIRTUAL_KEY, VK_NUMLOCK, VK_PAUSE,
         },
         WindowsAndMessaging::{
             GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SM_CXDOUBLECLK,
@@ -73,6 +74,7 @@ impl WinInput {
 impl Injector for WinInput {
     const LOCK: bool = true;
     const PHYSICAL_KEYS: bool = true;
+    const HIRES_WHEEL: bool = true;
     /// Injected through `SendInput`, which the system applies after it
     /// returns: the cursor reports `(x, y)` until it shows it. Placed with
     /// `SetCursorPos` while placing, and when `SendInput` takes nothing,
@@ -120,6 +122,47 @@ impl Injector for WinInput {
                 .map_err(native_input_error)?;
         }
         Ok(())
+    }
+    /// One `SendInput` of a vertical and a horizontal wheel event, for the
+    /// axes that move, whose deltas are the units as they came: Windows'
+    /// own, `WHEEL_DELTA` (120) a notch. Windows has no word for
+    /// continuity: a smaller delta is how a precision touchpad's travel
+    /// reaches a program too.
+    fn scroll(&mut self, horizontal: i32, vertical: i32, _continuous: bool) -> Result<()> {
+        let marker = self.enigo.get_marker_value();
+        let wheel = |flags: MOUSE_EVENT_FLAGS, data: u32| INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: data,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: marker,
+                },
+            },
+        };
+        let send = |inputs: &[INPUT]| -> Result<()> {
+            // SAFETY: initialised `INPUT`s, their size as the call requires;
+            // the error is this thread's, read right after the call that set
+            // it, by `native_input_error`.
+            let sent = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
+            if sent as usize == inputs.len() {
+                Ok(())
+            } else {
+                Err(native_input_error("SendInput refused a scroll"))
+            }
+        };
+        match wheel_data(horizontal, vertical) {
+            (None, None) => Ok(()),
+            (Some(vertical), None) => send(&[wheel(MOUSEEVENTF_WHEEL, vertical)]),
+            (None, Some(horizontal)) => send(&[wheel(MOUSEEVENTF_HWHEEL, horizontal)]),
+            (Some(vertical), Some(horizontal)) => send(&[
+                wheel(MOUSEEVENTF_WHEEL, vertical),
+                wheel(MOUSEEVENTF_HWHEEL, horizontal),
+            ]),
+        }
     }
     fn key(&mut self, key: Key, down: bool) -> Result<()> {
         self.send_key(Pressed::Key(key), down)
@@ -279,6 +322,18 @@ impl WinInput {
             _ => Err("SendInput refused a physical key"),
         }
     }
+}
+
+/// The `mouseData` of the vertical (`MOUSEEVENTF_WHEEL`) and horizontal
+/// (`MOUSEEVENTF_HWHEEL`) wheel events a scroll of `(horizontal, vertical)`
+/// units makes, for the axes that move. A positive vertical delta turns the
+/// wheel away from the user, which scrolls up, the opposite of the vertical
+/// a viewer sends; a positive horizontal one scrolls right, as the viewer's
+/// does. A negative delta goes as its two's complement, as `mouseData`
+/// carries it.
+fn wheel_data(horizontal: i32, vertical: i32) -> (Option<u32>, Option<u32>) {
+    let data = |delta: i32| (delta != 0).then_some(delta as u32);
+    (data(vertical.saturating_neg()), data(horizontal))
 }
 
 /// How `SendInput` presses a physical key.
@@ -718,6 +773,22 @@ mod key_tests {
                 .enumerate()
                 .all(|(i, press)| !pressed[..i].contains(press))
         );
+    }
+
+    /// A scroll down turns the wheel toward the user, a negative
+    /// `WM_MOUSEWHEEL` delta, as enigo turns `Input::Wheel`'s notch down;
+    /// one right is a positive `WM_MOUSEHWHEEL` delta; an axis that does
+    /// not move sends nothing, and the units go as they came.
+    #[test]
+    fn a_scroll_turns_each_wheel_by_its_units() {
+        let negative = |delta: i32| Some(delta as u32);
+        assert_eq!(wheel_data(0, 120), (negative(-120), None));
+        assert_eq!(wheel_data(0, -7), (Some(7), None));
+        assert_eq!(wheel_data(30, 0), (None, Some(30)));
+        assert_eq!(wheel_data(-12_000, 1), (negative(-1), negative(-12_000)));
+        assert_eq!(wheel_data(0, 0), (None, None));
+        // `mouseData` reads back as the signed delta a program sees.
+        assert_eq!(wheel_data(0, 120).0.map(|data| data as i32), Some(-120));
     }
 
     /// Pause under a Ctrl held here, either one by place or the

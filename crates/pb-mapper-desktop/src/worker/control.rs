@@ -32,6 +32,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     pub(super) fn release_slot_inputs(&mut self, idx: usize) {
         if !self.other_slots_hold_any(idx) {
             self.backend.release();
+            self.last_scroll_slot = None;
             if let Some(slot) = &mut self.slots[idx] {
                 slot.held.clear();
             }
@@ -39,10 +40,20 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         }
         if self.context.is_none() {
             self.backend.release();
+            self.last_scroll_slot = None;
             if let Some(slot) = &mut self.slots[idx] {
                 slot.held.clear();
             }
             return;
+        }
+        if self
+            .slots
+            .get(idx)
+            .and_then(Option::as_ref)
+            .is_some_and(|slot| self.last_scroll_slot == Some(slot.slot))
+        {
+            self.backend.forget_scroll();
+            self.last_scroll_slot = None;
         }
         let mut to_release = Vec::new();
         if let Some(slot) = &mut self.slots[idx] {
@@ -464,8 +475,10 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         };
         // When another controller moved the OS cursor in the meantime, return
         // the pointer to this viewer's last position before clicking/scrolling.
-        if matches!(input, Input::Button { .. } | Input::Wheel { .. })
-            && let Some((x, y)) = slot.pointer
+        if matches!(
+            input,
+            Input::Button { .. } | Input::Wheel { .. } | Input::Scroll { .. }
+        ) && let Some((x, y)) = slot.pointer
             && self.last_pointer_owner != Some((slot.slot, x, y))
         {
             let reposition = Input::Move { x, y };
@@ -473,6 +486,12 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             self.last_pointer_owner = Some((slot.slot, x, y));
             self.mover_moved_since_sample = true;
             slot.cursor.injected(x, y);
+        }
+        if matches!(input, Input::Scroll { .. })
+            && let Some(previous) = self.last_scroll_slot.replace(slot.slot)
+            && previous != slot.slot
+        {
+            self.backend.forget_scroll();
         }
         let inject = |_| {
             if shared_hold {
@@ -485,9 +504,11 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             Input::Button { button, down, .. } => slot.held.button(button, down, inject),
             Input::Key { key, down } => slot.held.key(key, down, inject),
             Input::PhysicalKey { usage, down } => slot.held.physical(usage, down, inject),
-            Input::Move { .. } | Input::Wheel { .. } | Input::Text { .. } | Input::Lock {} => {
-                self.backend.input_in_context(context, input)
-            }
+            Input::Move { .. }
+            | Input::Wheel { .. }
+            | Input::Scroll { .. }
+            | Input::Text { .. }
+            | Input::Lock {} => self.backend.input_in_context(context, input),
         }
     }
 
@@ -585,6 +606,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     pub(super) fn invalidate_all(&mut self) {
         self.backend.release();
         self.last_pointer_owner = None;
+        self.last_scroll_slot = None;
         self.mover_moved_since_sample = false;
         self.last_left_press = None;
         self.hide_all_peer_cursors();

@@ -101,6 +101,13 @@ sealed class DesktopInput {
 
   /// [horizontal] and [vertical] are wheel notches, at most 100 each way.
   factory DesktopInput.wheel(int horizontal, int vertical) = DesktopWheel;
+
+  /// [horizontal] and [vertical] are 1/120 of a notch, at most
+  /// [DesktopScroll.maxUnits] each way; [continuous] is a trackpad's travel
+  /// or a fling, otherwise a wheel's notches. Only to a host that listed
+  /// `wheel_hires`.
+  factory DesktopInput.scroll(int horizontal, int vertical, {bool continuous}) =
+      DesktopScroll;
   const factory DesktopInput.key(RemoteKey key, bool down) = DesktopKey;
 
   /// At most [DesktopText.maxBytes] of UTF-8.
@@ -167,6 +174,39 @@ final class DesktopWheel extends DesktopInput {
       other.vertical == vertical;
   @override
   int get hashCode => Object.hash(horizontal, vertical);
+}
+
+/// Scrolling in 1/120 of a notch ([unitsPerNotch]), positive down and
+/// right as [DesktopWheel], toward a host that listed `wheel_hires`.
+final class DesktopScroll extends DesktopInput {
+  DesktopScroll(int horizontal, int vertical, {this.continuous = false})
+    : horizontal = horizontal.clamp(-maxUnits, maxUnits),
+      vertical = vertical.clamp(-maxUnits, maxUnits);
+
+  /// A notch, as Windows' `WHEEL_DELTA`.
+  static const unitsPerNotch = 120;
+
+  /// As far as [DesktopWheel.maxNotches] go.
+  static const maxUnits = DesktopWheel.maxNotches * unitsPerNotch;
+  final int horizontal, vertical;
+
+  /// A trackpad's travel or a fling, which the host may scroll smoothly.
+  final bool continuous;
+  @override
+  Map<String, Object?> toJson() => {
+    'kind': 'scroll',
+    'horizontal': horizontal,
+    'vertical': vertical,
+    if (continuous) 'continuous': true,
+  };
+  @override
+  bool operator ==(Object other) =>
+      other is DesktopScroll &&
+      other.horizontal == horizontal &&
+      other.vertical == vertical &&
+      other.continuous == continuous;
+  @override
+  int get hashCode => Object.hash(horizontal, vertical, continuous);
 }
 
 /// A key going down or up on the host: [DesktopKey] or

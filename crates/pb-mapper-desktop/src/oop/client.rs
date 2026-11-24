@@ -488,6 +488,7 @@ impl<T: Transport> Backend for RemoteBackend<T> {
     fn release(&mut self) {
         let _ = self.call(Request::Release {});
     }
+    fn forget_scroll(&mut self) {}
     /// Never read here: the background host runs in the SYSTEM service in
     /// session 0, whose values are defaults, not the user's.
     fn double_click_guard(&mut self) -> Option<crate::DoubleClickGuard> {
@@ -829,6 +830,39 @@ mod tests {
             .capture_video(&desktop(), codec, false, rate)
             .unwrap();
         assert!(backend.submitted_video());
+        drop(backend);
+        helper.join().unwrap();
+    }
+
+    /// Protocol 12 over a pipe to a worker serving a synthetic display: its
+    /// `Start` answer says it scrolls in 1/120 of a notch, which the host
+    /// lists as `wheel_hires`, and a scroll reaches its injector as sent.
+    #[test]
+    fn protocol_12_carries_scrolls_and_the_hires_wheel() {
+        let probe = Probe::default();
+        let journal = pb_mapper_core::test_support::TempPath::new("desktop-oop-scroll");
+        let (mut backend, helper) = synthetic(&probe, journal.to_path_buf(), |_| None, |_| {});
+        let caps = backend.describe(false).unwrap().caps;
+        assert!(caps.hires_wheel);
+        assert!(caps.values().iter().any(|listed| listed == "wheel_hires"));
+        let context = backend.context().unwrap();
+        for (vertical, continuous) in [(-7, true), (120, false)] {
+            let scroll = Input::Scroll {
+                horizontal: 3,
+                vertical,
+                continuous,
+            };
+            backend.input_in_context(&context, &scroll).unwrap();
+        }
+        assert_eq!(probe.scrolls(), [(3, -7, true), (3, 120, false)]);
+        // Both ends hold a scroll to its bound.
+        let too_far = Input::Scroll {
+            horizontal: 0,
+            vertical: 12_001,
+            continuous: true,
+        };
+        assert!(backend.input_in_context(&context, &too_far).is_err());
+        assert_eq!(probe.scrolls().len(), 2);
         drop(backend);
         helper.join().unwrap();
     }

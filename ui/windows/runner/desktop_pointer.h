@@ -21,6 +21,10 @@
 // ::SetCursor on this, the platform thread, and `cursor_delete {id}` frees
 // it. The engine answers WM_SETCURSOR over the client area without setting a
 // cursor, so the one set here stays until Dart activates a system cursor.
+// `wheel_lines` answers the lines a wheel notch scrolls
+// (SPI_GETWHEELSCROLLLINES, 3 if it cannot be read), read as the runner
+// starts, which is when Flutter's embedder reads it for the scroll distance it
+// reports: Dart turns that distance back into notches with it.
 class DesktopPointer {
  public:
   explicit DesktopPointer(flutter::FlutterEngine* engine);
@@ -37,6 +41,8 @@ class DesktopPointer {
   // Deleted while still the current cursor, which DestroyIcon may refuse:
   // destroyed by a later call, once another cursor shows.
   std::vector<HCURSOR> retired_;
+  // SPI_GETWHEELSCROLLLINES as the runner started.
+  UINT wheel_lines_ = 3;
 };
 
 #endif  // RUNNER_DESKTOP_POINTER_H_

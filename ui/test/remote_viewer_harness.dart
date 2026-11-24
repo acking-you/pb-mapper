@@ -77,7 +77,8 @@ class ViewerHarness {
 
   /// The batches the store handed to Rust since the last call, each as
   /// readable events: `control↓`, `left↑`, `move 960,540`, `text "hi"`,
-  /// `#e1↓` (a physical key, by its USB HID usage).
+  /// `#e1↓` (a physical key, by its USB HID usage), `wheel 0,1` (notches),
+  /// `scroll 0,120` (1/120 notches; ` ~` when continuous).
   List<List<String>> sent() {
     final batches = api.argsOf('input');
     final fresh = batches.skip(_seen).toList();
@@ -95,6 +96,9 @@ class ViewerHarness {
           '${e['drag_start'] == true ? ' drag' : ''}',
     'move' => 'move ${e['x']},${e['y']}',
     'wheel' => 'wheel ${e['horizontal']},${e['vertical']}',
+    'scroll' =>
+      'scroll ${e['horizontal']},${e['vertical']}'
+          '${e['continuous'] == true ? ' ~' : ''}',
     'text' => 'text "${e['text']}"',
     'physical_key' =>
       '#${(e['usage'] as int).toRadixString(16)}'
