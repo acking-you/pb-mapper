@@ -49,7 +49,9 @@ typedef struct PbVideoExports {
 } PbVideoExports;
 
 // What a codec decodes here: the largest picture a session should ask for
-// (0 x 0: none), whether its decoder runs on hardware, and its element.
+// (0 x 0: none), whether its decoder runs on hardware, and its element with
+// the GPU it decodes on where that is known ("vah264dec on renderD128"), as
+// the session reports it.
 typedef struct PbVideoCodecProbe {
   uint32_t max_width;
   uint32_t max_height;
@@ -147,15 +149,23 @@ typedef struct PbVideoDecoder PbVideoDecoder;
 
 typedef struct PbVideoModule {
   uint32_t abi;
-  // Reads the GStreamer registry and builds nothing. Blocks while GStreamer
-  // initializes (a first run scans its plugins), so never on the GTK
-  // thread. 0, or -1 with `error` set when GStreamer cannot start.
-  int32_t (*probe)(PbVideoProbe* out, char* error, size_t error_len);
-  // `presenter` says what the pictures may be (copied). `frame_ready` runs
-  // on a GStreamer thread whenever a newer picture can be acquired.
-  // Nothing here touches GStreamer yet.
+  // Reads the GStreamer registry and sysfs and builds nothing: it loads no
+  // plugin and opens no device itself. Blocks while GStreamer initializes
+  // (a first run scans its plugins), so never on the GTK thread. 0, or -1
+  // with `error` set when GStreamer cannot start. `device`, as in `create`,
+  // puts the decoders on the presenting GPU first.
+  int32_t (*probe)(const char* device, PbVideoProbe* out, char* error,
+                   size_t error_len);
+  // `presenter` says what the pictures may be (copied). `device` is the DRM
+  // device file of the GPU that presents them, as EGL names it (a render
+  // node, else a primary node), or null or empty when that is unknown: a
+  // hardware decoder on that GPU is tried before one whose GPU is unknown,
+  // and that before one on another GPU. `frame_ready` runs on a GStreamer
+  // thread whenever a newer picture can be acquired. Nothing here touches
+  // GStreamer yet.
   PbVideoDecoder* (*create)(const PbVideoExports* exports,
                             const PbVideoPresenter* presenter,
+                            const char* device,
                             void (*frame_ready)(void* context),
                             void* context);
   // Binds a source, replacing the previous one, and starts the decoder
@@ -201,7 +211,7 @@ typedef struct PbVideoModule {
   void (*release)(PbVideoPicture* picture);
 } PbVideoModule;
 
-#define PB_VIDEO_MODULE_ABI 2u
+#define PB_VIDEO_MODULE_ABI 3u
 #define PB_VIDEO_MODULE_FILE "libpb_mapper_desktop_video.so"
 #define PB_VIDEO_MODULE_SYMBOL "pb_mapper_desktop_video_module_v1"
 typedef const PbVideoModule* (*PbVideoModuleEntry)(void);

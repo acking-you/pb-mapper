@@ -38,12 +38,13 @@ target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 # GStreamer development files are installed. The runner loads it at run time,
 # so the app needs neither the module nor GStreamer to start; without them
 # every remote desktop session is JPEG. gstreamer-allocators gives a
-# decoder's dma-buf descriptors.
+# decoder's dma-buf descriptors. desktop_video_device.cc places each decoder
+# on a GPU, from sysfs.
 pkg_check_modules(GSTREAMER QUIET IMPORTED_TARGET
   gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-allocators-1.0)
 if(GSTREAMER_FOUND)
   find_package(Threads REQUIRED)
-  add_library(pb_mapper_desktop_video MODULE "desktop_video_gst.cc")
+  add_library(pb_mapper_desktop_video MODULE "desktop_video_gst.cc" "desktop_video_device.cc")
   apply_standard_settings(pb_mapper_desktop_video)
   set_target_properties(pb_mapper_desktop_video PROPERTIES
     CXX_VISIBILITY_PRESET hidden
