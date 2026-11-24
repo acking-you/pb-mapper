@@ -47,7 +47,14 @@ pub(crate) struct WinCursor {
 impl CursorSource for WinCursor {
     const MODE: CursorMode = CursorMode::Separate;
     const SHAPES: bool = true;
+    /// Each read keeps the display and the system awake a little longer, as
+    /// a capture call does: while a session runs unpaused, thread C reads the
+    /// pointer every 16 ms, and the helper's worker at each desktop check and
+    /// video request, even while the network or the encoder holds capture
+    /// back. Once the session pauses, nothing reads it (through the helper,
+    /// once the encoder's last output is drained).
     fn read(&mut self) -> Result<Option<(i32, i32, bool)>> {
+        super::power::touch();
         let mut cursor = CURSORINFO {
             cbSize: size_of::<CURSORINFO>() as u32,
             ..Default::default()
