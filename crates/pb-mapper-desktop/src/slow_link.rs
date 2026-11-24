@@ -978,11 +978,10 @@ fn bandwidth_limit_lowers_fps_and_bitrate_then_recovers() {
 
 /// The same limit on an encoder that budgets per second. At the nominal model
 /// it spends the nominal bitrate at any pace, so its pictures fill the link,
-/// capture waits for credit and the delay controller takes the pace to 3 FPS
-/// or below, where no 2 s of ticks holds six frames: no latch can come until
-/// pictures flow again, by when the pace is climbing back. Reports whether
-/// and when the latch came, and asserts that the session recovers as it does
-/// on a per-frame budget.
+/// capture waits for credit and the pace falls below 3 FPS, where no 2 s of
+/// ticks holds six frames: no latch can come until pictures flow again, by
+/// when the pace is climbing back. Reports whether and when the latch came,
+/// and asserts that the session recovers as it does on a per-frame budget.
 #[test]
 #[ignore = "explicit ~45-second per-second encoder measurement on a bandwidth limit"]
 fn per_second_encoder_on_a_bandwidth_limit() {
