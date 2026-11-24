@@ -506,6 +506,9 @@ Nothing in the SDK crates knows it exists.
     macOS encoder); `present_waiter.rs`, the thread a push capture source's
     pictures come from while thread C's tick wants one (the Windows host's
     DXGI capture), with thread C's rule for when it needs that source again;
+    `refine.rs`, when a still picture is repeated (a refinement burst at the
+    capture pace after a picture its budget limited stops changing, on an
+    encoder that earned it, then liveness);
     `rate_fit.rs`, test-only, fits a pace sweep to a rate model for the
     macOS encoder's measurement and, by path, `video_bench --pace`
   - `input/`: the input vocabulary a controlling viewer sends (`Input`,

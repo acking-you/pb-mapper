@@ -11,6 +11,9 @@ pub(crate) mod resubmit;
 // The capture thread a push source's pictures come from: the Windows host's,
 // tested everywhere.
 pub(crate) mod present_waiter;
+// When a still picture goes again: refinement bursts, then liveness. The
+// Windows host's, tested everywhere.
+pub(crate) mod refine;
 pub(crate) mod sps;
 // Which rate model a pace sweep fits: measurement support, which the macOS
 // encoder's measurement uses and video_bench includes by path; tested

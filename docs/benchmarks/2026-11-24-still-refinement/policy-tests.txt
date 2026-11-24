@@ -1,0 +1,26 @@
+$ cargo test -p pb-mapper-desktop --lib -- codec::refine codec::present_waiter worker::tests::a_refinement worker::tests::an_armed
+running 23 tests
+test codec::present_waiter::tests::a_refinement_repeat_comes_before_liveness_and_leaves_the_tick_armed ... ok
+test codec::refine::tests::a_burst_starts_only_after_a_budget_sized_unit_has_stood_still ... ok
+test codec::present_waiter::tests::thread_c_comes_back_at_the_tick_only_when_there_is_something_to_do ... ok
+test codec::refine::tests::a_liveness_repeat_ends_a_pictures_claim_to_a_burst ... ok
+test codec::refine::tests::a_burst_stops_at_its_cap ... ok
+test codec::refine::tests::a_new_picture_or_keyframe_ends_a_burst_and_stale_outputs_are_ignored ... ok
+test codec::refine::tests::keyframes_of_a_still_picture_share_its_cap ... ok
+test codec::refine::tests::liveness_resumes_after_a_burst ... ok
+test codec::refine::tests::no_burst_while_disabled_or_paced_no_faster_than_liveness ... ok
+test codec::refine::tests::small_early_repeats_do_not_stop_a_burst_and_two_small_ones_after_do ... ok
+test codec::refine::tests::the_qp_stops_a_burst_at_its_floor_or_once_it_stops_dropping ... ok
+test codec::present_waiter::tests::a_failure_is_published_once_and_every_later_call_fails ... ok
+test codec::present_waiter::tests::an_armed_thread_publishes_the_next_present_and_wakes_thread_c ... ok
+test codec::present_waiter::tests::a_look_that_finds_nothing_marks_the_thread_idle_and_answers_only_when_asked ... ok
+test codec::present_waiter::tests::a_present_found_after_a_disarm_is_still_published ... ok
+test codec::present_waiter::tests::a_picture_that_waited_goes_only_once_the_thread_looked_past_it ... ok
+test codec::present_waiter::tests::what_waits_with_the_waiter_goes_with_it ... ok
+test worker::tests::an_armed_capture_thread_is_taken_as_it_publishes_and_never_polled ... ok
+test worker::tests::a_refinement_burst_keeps_the_tick_armed_for_the_next_present ... ok
+test codec::present_waiter::tests::dropping_the_waiter_stops_and_joins_its_thread ... ok
+test codec::present_waiter::tests::an_armed_thread_not_asked_again_stops_looking ... ok
+test codec::present_waiter::tests::a_due_repeat_waits_for_the_present_the_thread_is_converting ... ok
+test codec::present_waiter::tests::an_armed_thread_kept_armed_goes_on_looking ... ok
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 247 filtered out; finished in 0.90s
