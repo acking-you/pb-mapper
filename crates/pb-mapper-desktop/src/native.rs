@@ -163,6 +163,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
                 cursor_shapes: <P::Cursor as CursorSource>::SHAPES,
                 rate_model: <P::Video as VideoSource>::RATE_MODEL,
                 hires_wheel: <P::Input as Injector>::HIRES_WHEEL,
+                relative_pointer: <P::Input as Injector>::RELATIVE_POINTER,
             },
             display,
         })
@@ -352,6 +353,13 @@ impl<P: Platform> Backend for PlatformBackend<P> {
             Input::Move { x, y } => {
                 let display = &expected.display;
                 input.pointer(display.x + *x as i32, display.y + *y as i32)
+            }
+            Input::MoveBy { dx, dy } if <P::Input as Injector>::RELATIVE_POINTER => {
+                input.pointer_by(*dx, *dy)
+            }
+            // A host that did not list `relative_pointer` is sent none.
+            Input::MoveBy { .. } => {
+                Err(BackendError::new(FailureKind::Unsupported, "relative pointer motion").into())
             }
             Input::Button { button, down, .. } => self
                 .held

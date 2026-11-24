@@ -52,6 +52,9 @@ pub(crate) const CAPABILITY_KEYFRAME_SEQ: &str = "keyframe_seq";
 /// From a host: it injects `Input::Scroll`, 1/120 of a notch at a time. A
 /// viewer sends that input to no other host.
 pub(crate) const CAPABILITY_WHEEL_HIRES: &str = "wheel_hires";
+/// From a host: it injects `Input::MoveBy`, the pointer moved by counts as a
+/// mouse moves it. A viewer sends that input to no other host.
+pub(crate) const CAPABILITY_RELATIVE_POINTER: &str = "relative_pointer";
 pub(crate) const MAX_CAPABILITIES: usize = 16;
 
 /// Viewers a host serves at once.

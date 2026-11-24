@@ -280,10 +280,11 @@ mod readiness_tests {
         assert!(update_required(old.protocol(), false, || false));
         // Protocol 3 sends input with its generation alone, protocol 4
         // refuses the background host's `lan_first`, protocol 5 H.265,
-        // protocol 6 display modes, protocol 10 the `Adapter` request, and
-        // protocol 11 the `Scroll` input and `hires_wheel` caps: all are
-        // outdated too.
-        for outdated in [3, 4, 5, 6, 10, 11] {
+        // protocol 6 display modes, protocol 10 the `Adapter` request,
+        // protocol 11 the `Scroll` input and `hires_wheel` caps, and
+        // protocol 12 the `MoveBy` input and `relative_pointer` caps: all
+        // are outdated too.
+        for outdated in [3, 4, 5, 6, 10, 11, 12] {
             let previous = installation(&format!(r#""schema":2,"protocol":{outdated},"#)).unwrap();
             assert!(update_required(previous.protocol(), true, || true));
         }

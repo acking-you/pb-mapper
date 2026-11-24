@@ -356,6 +356,10 @@ impl Backend for Fake {
             let x = self.clip.lock().map_or(x, |clip| x.min(clip));
             *self.pointer.lock() = (x as i32, y as i32);
         }
+        if let Input::MoveBy { dx, dy } = *event {
+            let mut pointer = self.pointer.lock();
+            *pointer = (pointer.0 + dx, pointer.1 + dy);
+        }
         self.log.lock().inputs.push(((self.clock)(), event.clone()));
         Ok(())
     }
@@ -1036,6 +1040,63 @@ fn watcher_replaces_the_host_pointer_while_a_controller_moves_it() {
     h.step();
     assert_eq!(h.inputs(), before);
     assert_eq!(h.state().record.reason, Some(StateReason::InputFailed));
+}
+
+/// A relative move leaves its controller no pixel of its own: where the
+/// pointer went is reported 2 ms after the move, not at the next sample,
+/// in a session that reads no shapes too, and a click after it lands where
+/// the pointer is, never back at the controller's last absolute move. A
+/// watcher sees the host's own pointer in place of the controller's.
+#[test]
+fn a_relative_move_is_reported_2_ms_after_it_and_a_click_stays_there() {
+    let ms = Duration::from_millis;
+    let mut h = Harness::new(true, None);
+    let watcher = h.join_watcher(60);
+    h.send(LaneCommand::Control { enabled: true });
+    h.step();
+    h.present();
+    h.input(Input::Move { x: 6, y: 5 });
+    h.run(ms(20), true);
+    assert!(watcher.peer_cursors.borrow().entries[0].visible);
+    let sampled = h.sampled();
+    let report = |h: &Harness| h.shared.cursor.borrow().clone().unwrap();
+    let before = report(&h).serial;
+
+    h.run(ms(3), true);
+    let moved = h.now();
+    assert!(moved < sampled + ms(14));
+    h.input(Input::MoveBy { dx: 2, dy: 3 });
+    assert_eq!(h.reported(), moved + ms(2));
+    let after = report(&h);
+    assert_eq!(after.serial, before + 1);
+    assert_eq!((after.cursor.x, after.cursor.y), (8, 8));
+    assert!(after.cursor.visible);
+    h.run(ms(20), true);
+    assert!(!watcher.peer_cursors.borrow().entries[0].visible);
+    let seen = watcher.cursor.borrow().as_ref().unwrap().cursor;
+    assert_eq!((seen.x, seen.y, seen.visible), (8, 8, true));
+
+    let from = h.inputs();
+    let press = Input::Button {
+        button: crate::Button::Left,
+        down: true,
+        drag_start: false,
+    };
+    h.input(press);
+    h.step();
+    let log = h.fake.log.lock();
+    let injected: Vec<_> = log.inputs[from..].iter().map(|(_, i)| i.clone()).collect();
+    assert!(
+        matches!(
+            injected.as_slice(),
+            [Input::Button {
+                button: crate::Button::Left,
+                down: true,
+                ..
+            }]
+        ),
+        "{injected:?}"
+    );
 }
 
 /// A scroll, as a click or a wheel's notch, lands where its controller

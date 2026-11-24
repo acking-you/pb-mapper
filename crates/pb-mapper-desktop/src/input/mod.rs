@@ -18,6 +18,8 @@ const _: () = assert!(
     SCROLL_UNITS_MAX == WHEEL_NOTCHES_MAX * SCROLL_UNITS_PER_NOTCH as u32,
     "a scroll goes as far as a wheel at most"
 );
+/// The most counts one `Input::MoveBy` moves the pointer each way.
+pub(crate) const POINTER_DELTA_MAX: u32 = 4096;
 
 /// The OS double-click time and half the double-click box, read in the
 /// interactive session. A press that starts a drag waits this long after a
@@ -84,6 +86,17 @@ pub enum Input {
         vertical: i32,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         continuous: bool,
+    },
+    /// The pointer moved by `(dx, dy)` counts, as a mouse moves it, at most
+    /// 4096 each way, positive right and down: about a host pixel each,
+    /// after the host's own pointer speed, and exactly that to a program
+    /// that reads the mouse itself (a game, a 3D view). What a viewer sends
+    /// while it holds its own pointer locked over the picture, whatever the
+    /// host's pointer is doing. Only to a host that listed
+    /// `relative_pointer`.
+    MoveBy {
+        dx: i32,
+        dy: i32,
     },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -214,6 +227,9 @@ impl Input {
                 .then_some("scroll input too large"),
             Self::PhysicalKey { usage, .. } => (!PHYSICAL_KEY_USAGES.contains(usage))
                 .then_some("physical key outside the keyboard page"),
+            Self::MoveBy { dx, dy } => (dx.unsigned_abs() > POINTER_DELTA_MAX
+                || dy.unsigned_abs() > POINTER_DELTA_MAX)
+                .then_some("pointer motion too large"),
             Self::Button { .. } | Self::Key { .. } | Self::Lock {} => None,
         };
         refused.map_or(Ok(()), |reason| Err(error(reason)))
@@ -297,7 +313,8 @@ mod tests {
     use crate::{Button, Display, Input, Key};
 
     /// The injection boundary refuses a pointer off the display, text too
-    /// long or holding NUL, and a scroll too large; nothing else.
+    /// long or holding NUL, and a scroll or a relative move too large;
+    /// nothing else.
     #[test]
     fn input_is_refused_only_outside_its_bounds() {
         let display = Display {
@@ -352,6 +369,25 @@ mod tests {
         };
         assert!(valid(scroll(-12_000, 12_000)) && valid(scroll(1, -1)));
         assert!(!valid(scroll(12_001, 0)) && !valid(scroll(0, i32::MIN)));
+        let by = |dx, dy| Input::MoveBy { dx, dy };
+        assert!(valid(by(-4096, 4096)) && valid(by(0, 0)));
+        assert!(!valid(by(4097, 0)) && !valid(by(0, i32::MIN)));
+    }
+
+    /// A relative move is `{"kind":"move_by","dx":..,"dy":..}`, both fields
+    /// always, and nothing else is taken.
+    #[test]
+    fn a_relative_move_reads_back_as_it_was_sent() {
+        let by = Input::MoveBy { dx: -3, dy: 7 };
+        let json = serde_json::to_string(&by).unwrap();
+        assert_eq!(json, r#"{"kind":"move_by","dx":-3,"dy":7}"#);
+        let read = |json: &str| serde_json::from_str::<Input>(json);
+        assert!(matches!(
+            read(&json).unwrap(),
+            Input::MoveBy { dx: -3, dy: 7 }
+        ));
+        assert!(read(r#"{"kind":"move_by","dx":1}"#).is_err());
+        assert!(read(r#"{"kind":"move_by","dx":1,"dy":1,"raw":true}"#).is_err());
     }
 
     /// A scroll is `{"kind":"scroll",...}`; `continuous` goes only when set,

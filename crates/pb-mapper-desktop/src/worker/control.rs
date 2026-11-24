@@ -401,13 +401,27 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                             self.shape_due = Some(ShapeLook::after_move(self.shape_due, now));
                         }
                     }
+                    if let Input::MoveBy { .. } = event.input {
+                        // The pointer went where the OS took it from wherever
+                        // it was: no pixel of this viewer's to echo, to
+                        // return to before a click, or to own. The viewer
+                        // paints the host's pointer from the reports, so
+                        // the next one comes as soon as a shape would.
+                        slot.pointer = None;
+                        slot.cursor.moved_by();
+                        self.last_pointer_owner = None;
+                        self.shape_due = Some(ShapeLook::after_move_by(self.shape_due, now));
+                    }
                 }
-                if let Input::Move { x, y } = event.input {
-                    self.publish_peer_cursor(
+                match event.input {
+                    Input::Move { x, y } => self.publish_peer_cursor(
                         idx,
                         i32::try_from(x).unwrap_or(i32::MAX),
                         i32::try_from(y).unwrap_or(i32::MAX),
-                    );
+                    ),
+                    // Watchers see the host's own pointer instead.
+                    Input::MoveBy { .. } => self.hide_peer_cursor(idx),
+                    _ => {}
                 }
             }
             Err(failure) => {
@@ -488,6 +502,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
             Input::Key { key, down } => slot.held.key(key, down, inject),
             Input::PhysicalKey { usage, down } => slot.held.physical(usage, down, inject),
             Input::Move { .. }
+            | Input::MoveBy { .. }
             | Input::Wheel { .. }
             | Input::Scroll { .. }
             | Input::Text { .. }

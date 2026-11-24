@@ -34,13 +34,19 @@ const _: () = assert!(
 /// `SHAPE_LATE` after it. A look still pending for an earlier move keeps
 /// its time where that is sooner, so moves closer together than
 /// `SHAPE_LOOK` never put a look off, and running it leaves the newest
-/// move's own looks. At most one is pending.
+/// move's own looks. At most one is pending. After a relative move
+/// (`Input::MoveBy`) a look is a whole sample, its position too: the
+/// controller paints the host's pointer from the reports, having no place
+/// of its own to show, so the pointer follows its moves within `SHAPE_LOOK`
+/// rather than at the next sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ShapeLook {
     /// When the pending look runs.
     due: Instant,
     /// The newest move.
     moved: Instant,
+    /// The newest move was relative: a look samples the position too.
+    position: bool,
 }
 impl ShapeLook {
     pub(super) fn due(self) -> Instant {
@@ -50,10 +56,20 @@ impl ShapeLook {
     /// The looks after a move at `now`. A pending one already due stays
     /// due: it runs in this iteration, for the move before.
     pub(super) fn after_move(look: Option<Self>, now: Instant) -> Self {
+        Self::after(look, now, false)
+    }
+
+    /// The looks after a relative move at `now`, each a whole sample.
+    pub(super) fn after_move_by(look: Option<Self>, now: Instant) -> Self {
+        Self::after(look, now, true)
+    }
+
+    fn after(look: Option<Self>, now: Instant, position: bool) -> Self {
         let first = now + SHAPE_LOOK;
         Self {
             due: look.map_or(first, |look| look.due.min(first)),
             moved: now,
+            position,
         }
     }
 
@@ -64,10 +80,7 @@ impl ShapeLook {
             .into_iter()
             .map(|after| self.moved + after)
             .find(|due| *due > now)
-            .map(|due| Self {
-                due,
-                moved: self.moved,
-            })
+            .map(|due| Self { due, ..self })
     }
 }
 
@@ -91,7 +104,8 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     /// viewer reads shapes. A look reads the pointer and its shape, and only
     /// when a viewer that reads shapes gets a new one does it go on as a
     /// sample and start the clock again; otherwise it reports nothing, so a
-    /// viewer gets a position sooner than the clock only with a new shape.
+    /// viewer gets a position sooner than the clock only with a new shape,
+    /// or after a relative move, whose looks are whole samples.
     /// A reading that finds a new shape keeps the looks still owed: that
     /// shape may answer an earlier move, and the newest move's come later.
     pub(super) fn sample_cursor(&mut self, now: Instant) {
@@ -102,7 +116,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
         if let Some(look) = look {
             self.shape_due = look.next(now);
         }
-        if now >= self.cursor_due {
+        if now >= self.cursor_due || look.is_some_and(|look| look.position) {
             self.read_cursor(now, false);
         } else if look.is_some() && self.cursor_shapes {
             self.read_cursor(now, true);
@@ -278,6 +292,12 @@ impl CursorEcho {
 
     pub(super) fn injected(&mut self, x: u32, y: u32) {
         self.injected = Some((x, y));
+    }
+
+    /// A relative move: the pointer went where the OS took it, so wherever a
+    /// report finds it is news, the pixel an earlier move put it at too.
+    pub(super) fn moved_by(&mut self) {
+        self.injected = None;
     }
 
     pub(super) fn took_move(&mut self) {

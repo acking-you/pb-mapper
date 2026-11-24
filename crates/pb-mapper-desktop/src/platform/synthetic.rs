@@ -6,7 +6,8 @@
 //! (`Probe::date`): pictures presented at a set rate on the test's clock,
 //! each waking thread C as it lands, as ScreenCaptureKit's do. `HIRES =
 //! false` is an injector that scrolls in whole notches alone, which a host
-//! does not list as `wheel_hires`.
+//! does not list as `wheel_hires`. Every one moves the pointer by counts
+//! too, which a host lists as `relative_pointer`.
 
 use super::{
     CursorSource, Desktop, DisplayModes, HostSupport, Injector, Parts, Platform, StillCapture,
@@ -55,6 +56,8 @@ struct State {
     scrolls: Vec<(i32, i32, bool)>,
     /// Every wheel's notches injected, in order.
     wheels: Vec<(i32, i32)>,
+    /// Every relative move injected, in order.
+    moves_by: Vec<(i32, i32)>,
     /// How often the injector was told to drop what scrolls kept.
     scroll_forgets: usize,
     /// Ready to drained, per unit.
@@ -200,6 +203,9 @@ impl Probe {
     }
     pub(crate) fn wheels(&self) -> Vec<(i32, i32)> {
         self.0.lock().wheels.clone()
+    }
+    pub(crate) fn moves_by(&self) -> Vec<(i32, i32)> {
+        self.0.lock().moves_by.clone()
     }
     pub(crate) fn scroll_forgets(&self) -> usize {
         self.0.lock().scroll_forgets
@@ -617,8 +623,18 @@ impl<const HIRES: bool> Injector for SynInput<HIRES> {
     const LOCK: bool = false;
     const PHYSICAL_KEYS: bool = true;
     const HIRES_WHEEL: bool = HIRES;
+    const RELATIVE_POINTER: bool = true;
     fn pointer(&mut self, x: i32, y: i32) -> Result<()> {
         self.0.0.lock().pointer = Some((x, y));
+        Ok(())
+    }
+    /// From wherever the pointer is, as an OS moves it, a count a pixel.
+    fn pointer_by(&mut self, dx: i32, dy: i32) -> Result<()> {
+        let mut state = self.0.0.lock();
+        state.moves_by.push((dx, dy));
+        state.pointer = state
+            .pointer
+            .map(|(x, y)| (x.saturating_add(dx), y.saturating_add(dy)));
         Ok(())
     }
     fn button(&mut self, _: Button, _: bool) -> Result<()> {

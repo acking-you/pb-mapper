@@ -267,11 +267,24 @@ pub(crate) trait Injector: Sized {
     /// lists `wheel_hires` only then. Without it `PlatformBackend` turns an
     /// `Input::Scroll` into whole notches of [`Injector::wheel`].
     const HIRES_WHEEL: bool = false;
+    /// Whether [`Injector::pointer_by`] moves the pointer by counts: a
+    /// host lists `relative_pointer` only then.
+    const RELATIVE_POINTER: bool = false;
     fn can_lock(&self) -> bool {
         Self::LOCK
     }
     /// Absolute physical virtual-desktop pixels: display origin plus offset.
     fn pointer(&mut self, x: i32, y: i32) -> Result<()>;
+    /// Move the pointer by `(dx, dy)` counts, already validated, as a mouse
+    /// moves it: from wherever it is now (an app may have put it back since
+    /// the last move), about a pixel a count, and exactly those counts to a
+    /// program that reads the mouse itself. The cursor reports where the
+    /// system puts it, with no injected pixel to wait for. Called only when
+    /// [`Injector::RELATIVE_POINTER`]; the default refuses.
+    fn pointer_by(&mut self, dx: i32, dy: i32) -> Result<()> {
+        let _ = (dx, dy);
+        Err(BackendError::new(FailureKind::Unsupported, "relative pointer motion").into())
+    }
     fn button(&mut self, button: Button, down: bool) -> Result<()>;
     fn wheel(&mut self, horizontal: i32, vertical: i32) -> Result<()>;
     fn key(&mut self, key: Key, down: bool) -> Result<()>;
@@ -564,6 +577,7 @@ pub(crate) fn fallback_caps<P: Platform>() -> BackendCaps {
         lock: <P::Input as Injector>::LOCK,
         physical_keys: <P::Input as Injector>::PHYSICAL_KEYS,
         hires_wheel: <P::Input as Injector>::HIRES_WHEEL,
+        relative_pointer: <P::Input as Injector>::RELATIVE_POINTER,
         os: Some(P::OS),
         cursor: <P::Cursor as CursorSource>::MODE,
         cursor_shapes: <P::Cursor as CursorSource>::SHAPES,

@@ -272,6 +272,8 @@ pub(crate) struct StartCaps {
     pub cursor_shapes: bool,
     /// The worker injects `Input::Scroll` in 1/120 of a notch.
     pub hires_wheel: bool,
+    /// The worker injects `Input::MoveBy`.
+    pub relative_pointer: bool,
 }
 impl From<&BackendCaps> for StartCaps {
     fn from(caps: &BackendCaps) -> Self {
@@ -285,6 +287,7 @@ impl From<&BackendCaps> for StartCaps {
             cursor_shapes,
             rate_model: _,
             hires_wheel,
+            relative_pointer,
         } = *caps;
         Self {
             lock,
@@ -294,6 +297,7 @@ impl From<&BackendCaps> for StartCaps {
             physical_keys,
             cursor_shapes,
             hires_wheel,
+            relative_pointer,
         }
     }
 }
@@ -307,6 +311,7 @@ impl From<StartCaps> for BackendCaps {
             physical_keys,
             cursor_shapes,
             hires_wheel,
+            relative_pointer,
         } = caps;
         Self {
             h265: false,
@@ -321,6 +326,7 @@ impl From<StartCaps> for BackendCaps {
             // corrects it and nothing corrects `Timestamp`.
             rate_model: RateModel::Nominal,
             hires_wheel,
+            relative_pointer,
         }
     }
 }
@@ -452,6 +458,58 @@ mod tests {
         let read = BackendCaps::from(read.caps.unwrap());
         assert!(read.hires_wheel && read.physical_keys && read.lock);
         let older = json.replace(r#","hires_wheel":true"#, "");
+        assert!(serde_json::from_str::<Response>(&older).is_err());
+    }
+
+    /// Protocol 13: an input request carries `Input::MoveBy` as the viewer
+    /// sent it, and a `Start` answer says whether the worker moves the
+    /// pointer by counts; both read back as they were sent, and caps that
+    /// leave `relative_pointer` out, a protocol-12 worker's, are refused.
+    #[test]
+    fn a_relative_move_and_the_workers_relative_pointer_cross_the_pipe() {
+        let expected = DesktopContext {
+            display: crate::Display {
+                id: 1,
+                name: "helper".into(),
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            },
+            generation: 3,
+            desktop: crate::DesktopKind::Ordinary,
+        };
+        let request = Request::Input {
+            expected,
+            sequence: 9,
+            input: Input::MoveBy { dx: -12, dy: 40 },
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains(r#""input":{"kind":"move_by","dx":-12,"dy":40}"#));
+        let Request::Input {
+            sequence: 9,
+            input: Input::MoveBy { dx: -12, dy: 40 },
+            ..
+        } = serde_json::from_str(&json).unwrap()
+        else {
+            panic!("the relative move did not read back");
+        };
+
+        let caps = BackendCaps {
+            hires_wheel: true,
+            relative_pointer: true,
+            ..BackendCaps::default()
+        };
+        let answer = Response {
+            caps: Some(StartCaps::from(&caps)),
+            ..Response::default()
+        };
+        let json = serde_json::to_string(&answer).unwrap();
+        assert!(json.contains(r#""relative_pointer":true"#));
+        let read: Response = serde_json::from_str(&json).unwrap();
+        let read = BackendCaps::from(read.caps.unwrap());
+        assert!(read.relative_pointer && read.hires_wheel);
+        let older = json.replace(r#","relative_pointer":true"#, "");
         assert!(serde_json::from_str::<Response>(&older).is_err());
     }
 

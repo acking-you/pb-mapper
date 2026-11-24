@@ -73,6 +73,15 @@ impl Pointer {
         self.moved = Some((to, now));
     }
 
+    /// A relative move was posted: it has no pixel to wait for, and the one
+    /// an earlier move left is no longer where the pointer is going, so a
+    /// read reports what the OS shows, and the open window says nothing of
+    /// whether moves take effect.
+    pub(crate) fn moved_by(&mut self) {
+        self.moved = None;
+        self.from = None;
+    }
+
     /// The pointer to report at `now`, given the absolute pixel the OS shows
     /// (`None`: not on the bound display).
     pub(crate) fn settle(&mut self, shown: Option<(i32, i32)>, now: std::time::Instant) -> Settled {
@@ -480,6 +489,32 @@ mod tests {
         );
         pointer.moved((300, 40), start);
         assert_eq!(unmoved(&mut pointer, Some((5, 5)), late), None);
+    }
+
+    /// A relative move ends a settle: the next read reports where the OS
+    /// has the pointer, not the pixel an absolute move before it targeted,
+    /// and says nothing of whether moves take effect.
+    #[test]
+    fn a_relative_move_reports_the_pointer_where_the_os_has_it() {
+        let start = Instant::now();
+        let mut pointer = Pointer::default();
+        pointer.settle(Some((5, 5)), start);
+        pointer.moved((100, 40), start);
+        pointer.moved_by();
+        assert_eq!(
+            pointer.settle(Some((5, 5)), start),
+            Settled {
+                at: Some((5, 5)),
+                unmoved: None,
+            }
+        );
+        assert_eq!(
+            pointer.settle(Some((5, 5)), start + SETTLE),
+            Settled {
+                at: Some((5, 5)),
+                unmoved: None,
+            }
+        );
     }
 
     #[test]

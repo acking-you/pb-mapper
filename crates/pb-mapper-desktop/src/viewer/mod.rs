@@ -43,8 +43,9 @@ use crate::{
     protocol::{
         CAPABILITY_ARRIVAL_TIME, CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE,
         CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS, CAPABILITY_PHYSICAL_KEYS,
-        CAPABILITY_WHEEL_HIRES, CURSOR_SLOTS, DesktopKind, MAX_PEER_CURSORS, MAX_VIEWERS,
-        NoticeCode, Route, SessionState, ShapeSlot, StateRecord, VideoSize,
+        CAPABILITY_RELATIVE_POINTER, CAPABILITY_WHEEL_HIRES, CURSOR_SLOTS, DesktopKind,
+        MAX_PEER_CURSORS, MAX_VIEWERS, NoticeCode, Route, SessionState, ShapeSlot, StateRecord,
+        VideoSize,
     },
     security, valid_service,
 };
@@ -765,10 +766,12 @@ impl Viewer {
     /// frame of `generation` and control; Rust stamps the presented frame and
     /// consecutive sequences. A single move replaces a queued move; a full
     /// queue revokes control and fails with `Congestion`. A single scroll
-    /// adds itself to a queued scroll of the same continuity. A physical key
-    /// goes only to a host that listed `physical_keys`, and a scroll
-    /// (`Input::Scroll`) only to one that listed `wheel_hires`: else the
-    /// batch fails with `NotOffered` and nothing is sent.
+    /// adds itself to a queued scroll of the same continuity, and a single
+    /// relative move to a queued relative move. A physical key goes only to
+    /// a host that listed `physical_keys`, a scroll (`Input::Scroll`) only
+    /// to one that listed `wheel_hires`, and a relative move
+    /// (`Input::MoveBy`) only to one that listed `relative_pointer`: else
+    /// the batch fails with `NotOffered` and nothing is sent.
     pub fn input(&self, generation: u64, inputs: &[Input]) -> std::result::Result<(), InputError> {
         {
             let state = self.shared.state.lock();
@@ -778,6 +781,7 @@ impl Viewer {
             let offered = |input: &Input| match input {
                 Input::PhysicalKey { .. } => state.listed(CAPABILITY_PHYSICAL_KEYS),
                 Input::Scroll { .. } => state.listed(CAPABILITY_WHEEL_HIRES),
+                Input::MoveBy { .. } => state.listed(CAPABILITY_RELATIVE_POINTER),
                 Input::Move { .. }
                 | Input::Button { .. }
                 | Input::Wheel { .. }

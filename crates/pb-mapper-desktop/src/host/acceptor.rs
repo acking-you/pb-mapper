@@ -532,6 +532,7 @@ mod tests {
             physical_keys: true,
             cursor_shapes: true,
             hires_wheel: true,
+            relative_pointer: true,
             ..BackendCaps::default()
         };
         let host = negotiated_capabilities(&backend.values(), &viewer);

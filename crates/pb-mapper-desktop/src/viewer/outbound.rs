@@ -23,7 +23,7 @@
 use super::InputError;
 use crate::{
     Input, InputEvent, KeyframeReason, QualityPreset,
-    input::SCROLL_UNITS_MAX,
+    input::{POINTER_DELTA_MAX, SCROLL_UNITS_MAX},
     modes::Mode,
     protocol::{Route, ViewerMessage},
 };
@@ -308,20 +308,21 @@ impl Outbound {
             return Ok(());
         }
         // A scroll adds itself to a queued tail scroll of the same generation
-        // and continuity while the sum stays within a scroll's bound, so a
-        // trackpad's stream cannot fill the queue either. The sum takes a new
-        // sequence and the newer stamp, as a replaced move does.
-        if let [scroll @ Input::Scroll { .. }] = inputs
+        // and continuity, and a relative move to a queued tail relative move,
+        // while the sum stays within the input's bound, so a trackpad's or a
+        // locked mouse's stream cannot fill the queue either. The sum takes a
+        // new sequence and the newer stamp, as a replaced move does.
+        if let [input @ (Input::Scroll { .. } | Input::MoveBy { .. })] = inputs
             && let Some(tail) = queue.events.back_mut()
             && tail.event.generation == generation
-            && let Some(summed) = summed_scroll(&tail.event.input, scroll)
+            && let Some(summed) = summed(&tail.event.input, input)
         {
             let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
             // Read once the sequence is taken: a barrier pushed before then
             // made the tail obsolete, and every event queued ahead of it, so
-            // the scroll goes alone rather than carry the tail past it.
+            // the input goes alone rather than carry the tail past it.
             let current = tail.event.sequence >= self.controls.lock().obsolete_below;
-            let input = if current { summed } else { scroll.clone() };
+            let input = if current { summed } else { input.clone() };
             let len = encoded_len(&input);
             let old = std::mem::replace(&mut tail.len, len);
             tail.event = InputEvent {
@@ -480,34 +481,43 @@ fn presented_message((generation, frame_id): (u64, u64)) -> ViewerMessage {
     }
 }
 
-/// `tail` and `scroll` as one scroll: both scrolls of the same continuity
-/// whose sum stays within a scroll's bound on each axis.
-fn summed_scroll(tail: &Input, scroll: &Input) -> Option<Input> {
-    let (
-        Input::Scroll {
-            horizontal: tail_horizontal,
-            vertical: tail_vertical,
-            continuous: tail_continuous,
-        },
-        Input::Scroll {
-            horizontal,
-            vertical,
-            continuous,
-        },
-    ) = (tail, scroll)
-    else {
-        return None;
-    };
-    let sum = |queued: i32, more: i32| {
+/// `tail` and `input` as one: two scrolls of the same continuity, or two
+/// relative moves, whose sum stays within the input's bound on each axis.
+fn summed(tail: &Input, input: &Input) -> Option<Input> {
+    let sum = |queued: i32, more: i32, bound: u32| {
         queued
             .checked_add(more)
-            .filter(|sum| sum.unsigned_abs() <= SCROLL_UNITS_MAX)
+            .filter(|sum| sum.unsigned_abs() <= bound)
     };
-    (tail_continuous == continuous).then_some(Input::Scroll {
-        horizontal: sum(*tail_horizontal, *horizontal)?,
-        vertical: sum(*tail_vertical, *vertical)?,
-        continuous: *continuous,
-    })
+    match (tail, input) {
+        (
+            Input::Scroll {
+                horizontal: tail_horizontal,
+                vertical: tail_vertical,
+                continuous: tail_continuous,
+            },
+            Input::Scroll {
+                horizontal,
+                vertical,
+                continuous,
+            },
+        ) => (tail_continuous == continuous).then_some(Input::Scroll {
+            horizontal: sum(*tail_horizontal, *horizontal, SCROLL_UNITS_MAX)?,
+            vertical: sum(*tail_vertical, *vertical, SCROLL_UNITS_MAX)?,
+            continuous: *continuous,
+        }),
+        (
+            Input::MoveBy {
+                dx: tail_dx,
+                dy: tail_dy,
+            },
+            Input::MoveBy { dx, dy },
+        ) => Some(Input::MoveBy {
+            dx: sum(*tail_dx, *dx, POINTER_DELTA_MAX)?,
+            dy: sum(*tail_dy, *dy, POINTER_DELTA_MAX)?,
+        }),
+        _ => None,
+    }
 }
 
 /// The length of `input` as JSON, counted without allocating.
@@ -738,6 +748,63 @@ mod tests {
                 None,
                 Some((1000, -1, 120, false)),
                 Some((2, -2, 240, false)),
+            ]
+        );
+        assert!(
+            sent.windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+    }
+
+    /// A locked mouse's stream while the uplink stalls queues as one
+    /// relative move, up to its bound on either axis, with the newest stamp;
+    /// a click between two keeps them apart, and so does a new generation.
+    #[test]
+    fn relative_moves_add_up_in_the_queue_within_their_bound() {
+        let outbound = Outbound::new(None, false);
+        let now = Instant::now();
+        let by = |dx, dy| Input::MoveBy { dx, dy };
+        let submit = |input: Input, stamp: (u64, u64)| {
+            outbound
+                .submit(&[input], || Ok(stamp), || panic!("congested"))
+                .unwrap();
+        };
+        for frame in 0..2000 {
+            submit(by(3, -2), (1, frame));
+        }
+        assert_eq!(outbound.inputs.lock().events.len(), 2);
+        let click = Input::Button {
+            button: Button::Left,
+            down: true,
+            drag_start: false,
+        };
+        submit(click, (1, 2000));
+        submit(by(1, 1), (1, 2000));
+        submit(by(-5, 0), (2, 1));
+        submit(by(-5, 0), (2, 2));
+        let mut sent = Vec::new();
+        while let Next::Send(message) = outbound.next(now, now) {
+            if let ViewerMessage::Input { event } = message {
+                sent.push(event);
+            }
+        }
+        let moves: Vec<_> = sent
+            .iter()
+            .map(|event| match event.input {
+                Input::MoveBy { dx, dy } => Some((event.generation, event.frame_id, dx, dy)),
+                _ => None,
+            })
+            .collect();
+        // 1 365 moves of 3 make 4 095, under the bound of 4 096; the 1 366th
+        // would pass it, and starts the next.
+        assert_eq!(
+            moves,
+            [
+                Some((1, 1364, 4095, -2730)),
+                Some((1, 1999, 1905, -1270)),
+                None,
+                Some((1, 2000, 1, 1)),
+                Some((2, 2, -10, 0)),
             ]
         );
         assert!(

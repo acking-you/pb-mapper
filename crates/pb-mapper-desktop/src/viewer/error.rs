@@ -51,7 +51,8 @@ pub enum InputError {
     Invalid(String),
     /// The batch holds an input the host did not list a capability for
     /// (`Input::PhysicalKey` without `physical_keys`, `Input::Scroll`
-    /// without `wheel_hires`); nothing was sent.
+    /// without `wheel_hires`, `Input::MoveBy` without `relative_pointer`);
+    /// nothing was sent.
     NotOffered,
 }
 impl std::fmt::Display for InputError {

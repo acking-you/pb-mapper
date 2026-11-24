@@ -41,6 +41,11 @@ impl Moves {
         self.pointer.moved(to, now);
     }
 
+    /// A relative move: no pixel to report until it shows.
+    pub(crate) fn moved_by(&mut self) {
+        self.pointer.moved_by();
+    }
+
     /// Whether the next move places the pointer rather than injects: until
     /// the window in front when injected moves stopped taking effect leaves
     /// the foreground. One more call per move while it does, none otherwise.

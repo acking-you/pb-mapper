@@ -9,7 +9,7 @@
 //!   -f h264 clip.h264
 //! cargo run -p pb-mapper --features desktop --example desktop_ui_host -- \
 //!   --clip clip.h264 --dir target/desktop-ui [--no-shapes] [--no-hires-wheel] \
-//!   [--macos] [--relay-only]
+//!   [--no-relative-pointer] [--hide-pointer] [--macos] [--relay-only]
 //! node scripts/test/desktop-bootstrap.cjs target/desktop-ui
 //! ```
 //!
@@ -31,7 +31,13 @@
 //! modifier swap. The host also lists `physical_keys`, and `wheel_hires`, so
 //! a viewer scrolls in 1/120 of a notch (`Scroll`); `--no-hires-wheel`
 //! hosts without it, as a 0.12 host does, so a viewer scrolls in notches
-//! (`Wheel`). `--relay-only` keeps the host off direct paths and tells the
+//! (`Wheel`). It lists `relative_pointer` too, so a viewer that locks its
+//! pointer sends relative moves (`MoveBy`, each printed), which move the
+//! host's pointer by as many pixels; `--no-relative-pointer` hosts without
+//! it, as a 0.12 host does. `--hide-pointer` reports the host's pointer
+//! hidden and puts it back in the middle after every relative move, as a
+//! game that steers its camera with the mouse does, which a viewer's Auto
+//! pointer mode locks for. `--relay-only` keeps the host off direct paths and tells the
 //! viewer to stay on the relay, which listens on loopback only.
 //! `--view-only` hosts without control; `--wander`
 //! moves the host's own pointer across the bands, three seconds in each, as
@@ -80,6 +86,8 @@ struct Options {
     height: u32,
     shapes: bool,
     hires_wheel: bool,
+    relative_pointer: bool,
+    hide_pointer: bool,
     macos: bool,
     relay_only: bool,
     view_only: bool,
@@ -114,6 +122,8 @@ fn options() -> Outcome<Options> {
         height,
         shapes: !flag("--no-shapes"),
         hires_wheel: !flag("--no-hires-wheel"),
+        relative_pointer: !flag("--no-relative-pointer"),
+        hide_pointer: flag("--hide-pointer"),
         macos: flag("--macos"),
         relay_only: flag("--relay-only"),
         view_only: flag("--view-only"),
@@ -145,10 +155,13 @@ async fn main() -> Outcome {
     host_options.allow_direct = !options.relay_only;
     let (width, height) = (options.width, options.height);
     let (shapes, macos, hires_wheel) = (options.shapes, options.macos, options.hires_wheel);
+    let (relative_pointer, hide_pointer) = (options.relative_pointer, options.hide_pointer);
     let fps = options.fps.clamp(1, 120);
     let interval = Duration::from_secs(1) / fps;
     let clip = units.clone();
-    let pointer: Pointer = Arc::new(Mutex::new(None));
+    // A game's pointer is in the middle, hidden, from the start.
+    let middle = hide_pointer.then_some((width / 2, height / 2));
+    let pointer: Pointer = Arc::new(Mutex::new(middle));
     if options.wander {
         tokio::spawn(wander(pointer.clone(), width, height));
     }
@@ -168,6 +181,8 @@ async fn main() -> Outcome {
                 height,
                 shapes,
                 hires_wheel,
+                relative_pointer,
+                hide_pointer,
                 os: if macos {
                     HostOs::Macos
                 } else {
@@ -192,7 +207,8 @@ async fn main() -> Outcome {
     std::fs::write(&staged, serde_json::to_vec(&controller)?)?;
     std::fs::rename(&staged, options.dir.join("controller.json"))?;
     println!(
-        "host_ready relay={} display={width}x{height} units={} cursor_shape={shapes} os={}",
+        "host_ready relay={} display={width}x{height} units={} cursor_shape={shapes} \
+         relative_pointer={relative_pointer} hide_pointer={hide_pointer} os={}",
         relay.addr,
         units.len(),
         if macos { "macos" } else { "windows" }
@@ -305,6 +321,10 @@ struct Replay {
     height: u32,
     shapes: bool,
     hires_wheel: bool,
+    relative_pointer: bool,
+    /// The pointer reads hidden, and a relative move leaves it in the
+    /// middle, as a game's.
+    hide_pointer: bool,
     os: HostOs,
     pointer: Pointer,
     /// The band whose shape was reported last.
@@ -331,6 +351,7 @@ impl Backend for Replay {
         caps.os = Some(self.os);
         caps.physical_keys = true;
         caps.hires_wheel = self.hires_wheel;
+        caps.relative_pointer = self.relative_pointer;
         caps.cursor_shapes = self.shapes;
         Ok(Description {
             display: self.display()?,
@@ -382,7 +403,7 @@ impl Backend for Replay {
         Ok(self.pointer().map(|(x, y)| CursorPosition {
             x: x as i32,
             y: y as i32,
-            visible: true,
+            visible: !self.hide_pointer,
         }))
     }
     fn cursor_shape(&mut self, _: &DesktopContext) -> Result<Option<CursorShape>> {
@@ -408,6 +429,22 @@ impl Backend for Replay {
             }
             Input::PhysicalKey { usage, down } => {
                 println!("host_input physical_key usage={usage:#04x} down={down}");
+            }
+            Input::MoveBy { dx, dy } => {
+                let (width, height) = (self.width, self.height);
+                let middle = (width / 2, height / 2);
+                let moved = |at: u32, by: i32, side: u32| {
+                    at.saturating_add_signed(by).min(side.saturating_sub(1))
+                };
+                if let Ok(mut pointer) = self.pointer.lock() {
+                    let (x, y) = pointer.unwrap_or(middle);
+                    *pointer = Some(if self.hide_pointer {
+                        middle
+                    } else {
+                        (moved(x, *dx, width), moved(y, *dy, height))
+                    });
+                }
+                println!("host_input move_by dx={dx} dy={dy}");
             }
             other => println!("host_input {other:?}"),
         }

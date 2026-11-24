@@ -77,8 +77,7 @@ impl CursorSource for WinCursor {
         unsafe {
             GetCursorInfo(&mut cursor).map_err(error)?;
         }
-        let showing =
-            cursor.flags.0 & CURSOR_SHOWING.0 != 0 && cursor.flags.0 & CURSOR_SUPPRESSED.0 == 0;
+        let showing = shows(cursor.flags.0, cursor.hCursor.is_invalid());
         self.seen = cursor.hCursor;
         let point = cursor.ptScreenPos;
         let mut moves = self.pointer.get();
@@ -109,6 +108,14 @@ impl CursorSource for WinCursor {
         self.reads.record(self.seen, &read, now);
         read.map(Some)
     }
+}
+
+/// Whether the pointer shows, from `GetCursorInfo`'s flags and whether its
+/// cursor handle is null: showing and not suppressed (by touch or pen
+/// input), and with a cursor to show. A program that hides the pointer with
+/// `SetCursor(NULL)`, as a game does, leaves it "showing" with no cursor.
+fn shows(flags: u32, no_cursor: bool) -> bool {
+    flags & CURSOR_SHOWING.0 != 0 && flags & CURSOR_SUPPRESSED.0 == 0 && !no_cursor
 }
 
 /// The two bitmaps `GetIconInfo` makes, deleted however the read ends.
@@ -356,6 +363,18 @@ mod tests {
         System::Threading::{GR_GDIOBJECTS, GetCurrentProcess, GetGuiResources},
         UI::WindowsAndMessaging::{CreateCursor, DestroyCursor},
     };
+
+    /// A pointer shows while Windows says it shows, is not suppressed, and
+    /// has a cursor: one a game hid with `SetCursor(NULL)` is hidden, though
+    /// its flags still say it shows.
+    #[test]
+    fn a_pointer_without_a_cursor_is_hidden() {
+        let showing = CURSOR_SHOWING.0;
+        assert!(shows(showing, false));
+        assert!(!shows(showing, true));
+        assert!(!shows(0, false));
+        assert!(!shows(showing | CURSOR_SUPPRESSED.0, false));
+    }
 
     /// Reading a colour cursor (the system arrow) and a monochrome one
     /// releases every GDI object it makes, and so does refusing one too

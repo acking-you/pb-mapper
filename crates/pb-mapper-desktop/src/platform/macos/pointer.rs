@@ -3,7 +3,8 @@
 //! still show where it was: until the window server shows the injected
 //! pixel, or `SETTLE` passes (the system stopped the move short, or someone
 //! at the Mac moved the mouse), the injected pixel is the pointer
-//! (`input::cursor::Pointer`, which the Windows host shares).
+//! (`input::cursor::Pointer`, which the Windows host shares). A relative
+//! move has no pixel to wait for: the pointer is where the system has it.
 
 use crate::input::cursor::Pointer;
 use std::{cell::Cell, rc::Rc};

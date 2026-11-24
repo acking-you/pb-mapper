@@ -168,6 +168,17 @@ impl MacInput {
         Ok(())
     }
 
+    /// What a move is: with a button down, that button's drag.
+    fn motion(&self) -> (CGEventType, CGMouseButton) {
+        [Button::Left, Button::Right, Button::Middle]
+            .into_iter()
+            .find(|button| self.buttons[index(*button)])
+            .map_or((CGEventType::MouseMoved, CGMouseButton::Left), |button| {
+                let (_, _, dragged, button) = kinds(button);
+                (dragged, button)
+            })
+    }
+
     /// Where the pointer is: where this injector put it, else where the
     /// system has it.
     fn position(&self) -> (f64, f64) {
@@ -314,6 +325,7 @@ impl Injector for MacInput {
     const LOCK: bool = false;
     const PHYSICAL_KEYS: bool = true;
     const HIRES_WHEEL: bool = true;
+    const RELATIVE_POINTER: bool = true;
     /// The cursor reports `(x, y)` until the window server has applied the
     /// move (`pointer.rs`).
     fn pointer(&mut self, x: i32, y: i32) -> Result<()> {
@@ -323,19 +335,32 @@ impl Injector for MacInput {
         let (from_x, from_y) = self.position();
         let moved = ((x - from_x).round() as i64, (y - from_y).round() as i64);
         self.position = Some((x, y));
-        // With a button down, a move is that button's drag.
-        let (kind, button) = [Button::Left, Button::Right, Button::Middle]
-            .into_iter()
-            .find(|button| self.buttons[index(*button)])
-            .map_or((CGEventType::MouseMoved, CGMouseButton::Left), |button| {
-                let (_, _, dragged, button) = kinds(button);
-                (dragged, button)
-            });
+        let (kind, button) = self.motion();
         self.mouse(kind, button, Some(moved), None)?;
         let mut pointer = self.pointer.get();
         pointer.moved(pixel, Instant::now());
         self.pointer.set(pointer);
         Ok(())
+    }
+    /// From where the system has the pointer now, not where this injector
+    /// last put it (an app may have put it back, as a game recentres it):
+    /// the counts as the move's deltas, which an app that reads the mouse
+    /// takes as they are, and the pointer that many pixels on, a drag with a
+    /// button down. The window server keeps it on a screen, so later moves
+    /// and clicks start from where it is again.
+    fn pointer_by(&mut self, dx: i32, dy: i32) -> Result<()> {
+        self.allowed()?;
+        self.position = None;
+        let (x, y) = self.position();
+        let scale = self.geometry.get().scale;
+        self.position = Some((x + f64::from(dx) / scale, y + f64::from(dy) / scale));
+        let (kind, button) = self.motion();
+        let posted = self.mouse(kind, button, Some((dx.into(), dy.into())), None);
+        self.position = None;
+        let mut pointer = self.pointer.get();
+        pointer.moved_by();
+        self.pointer.set(pointer);
+        posted
     }
     fn button(&mut self, button: Button, down: bool) -> Result<()> {
         self.allowed()?;

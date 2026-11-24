@@ -1,7 +1,7 @@
 //! Injection on Windows: enigo for buttons, the wheel's notches, keys and
-//! text, `SendInput` for absolute moves, scrolls in 1/120 of a notch and
-//! physical keys' scancodes, `LockWorkStation`, with the token diagnostics a
-//! rejected injection records.
+//! text, `SendInput` for absolute and relative moves, scrolls in 1/120 of a
+//! notch and physical keys' scancodes, `LockWorkStation`, with the token
+//! diagnostics a rejected injection records.
 use super::pointer;
 use crate::{
     Button, DoubleClickGuard, Key, Result, error,
@@ -14,7 +14,7 @@ use std::{
     time::Instant,
 };
 use windows::Win32::{
-    Foundation::{E_UNEXPECTED, GetLastError, HANDLE},
+    Foundation::{E_UNEXPECTED, GetLastError, HANDLE, POINT},
     Security::{
         GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
         TOKEN_QUERY, TokenIntegrityLevel, TokenSessionId, TokenUIAccess,
@@ -33,9 +33,9 @@ use windows::Win32::{
             VIRTUAL_KEY, VK_NUMLOCK, VK_PAUSE,
         },
         WindowsAndMessaging::{
-            GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, SM_CXDOUBLECLK,
-            SM_CXVIRTUALSCREEN, SM_CYDOUBLECLK, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-            SM_YVIRTUALSCREEN, SetCursorPos,
+            GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId,
+            SM_CXDOUBLECLK, SM_CXVIRTUALSCREEN, SM_CYDOUBLECLK, SM_CYVIRTUALSCREEN,
+            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetCursorPos,
         },
     },
 };
@@ -75,6 +75,7 @@ impl Injector for WinInput {
     const LOCK: bool = true;
     const PHYSICAL_KEYS: bool = true;
     const HIRES_WHEEL: bool = true;
+    const RELATIVE_POINTER: bool = true;
     /// Injected through `SendInput`, which the system applies after it
     /// returns: the cursor reports `(x, y)` until it shows it. Placed with
     /// `SetCursorPos` while placing, and when `SendInput` takes nothing,
@@ -102,6 +103,39 @@ impl Injector for WinInput {
         }
         self.pointer.set(moves);
         made.map_err(native_input_error)
+    }
+    /// One relative `SendInput` move, as a mouse's own: the system moves
+    /// the pointer by the counts after the owner's pointer speed and
+    /// Enhance pointer precision, and a program that reads raw input gets
+    /// them as they are. No pixel to report until it shows: the cursor
+    /// reports where the system put the pointer. While moves place the
+    /// pointer, and when `SendInput` takes nothing, it is placed the counts
+    /// away from where it is, as pixels.
+    fn pointer_by(&mut self, dx: i32, dy: i32) -> Result<()> {
+        let mut moves = self.pointer.get();
+        moves.moved_by();
+        let injected = !moves.placing()
+            && match self.send_relative(dx, dy) {
+                Ok(()) => true,
+                Err(code) => {
+                    moves.refused(code);
+                    false
+                }
+            };
+        self.pointer.set(moves);
+        if injected {
+            return Ok(());
+        }
+        let mut at = POINT::default();
+        // SAFETY: an out point, then plain coordinates, physical pixels in
+        // thread C's per-monitor DPI scope, as `GetCursorPos` gives them.
+        let placed = unsafe {
+            match GetCursorPos(&mut at) {
+                Ok(()) => SetCursorPos(at.x.saturating_add(dx), at.y.saturating_add(dy)),
+                Err(failure) => Err(failure),
+            }
+        };
+        placed.map_err(native_input_error)
     }
     fn button(&mut self, button: Button, down: bool) -> Result<()> {
         self.enigo
@@ -263,6 +297,39 @@ impl WinInput {
                 Sent::Injected
             } else {
                 Sent::Refused(GetLastError().0)
+            }
+        }
+    }
+
+    /// One relative move of `(dx, dy)` counts through `SendInput`, without
+    /// coalescing while a button is held, as `send_move`; the Win32 error
+    /// when it took nothing.
+    fn send_relative(&self, dx: i32, dy: i32) -> std::result::Result<(), u32> {
+        let held = if self.buttons.contains(&true) {
+            MOUSEEVENTF_MOVE_NOCOALESCE
+        } else {
+            MOUSE_EVENT_FLAGS(0)
+        };
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx,
+                    dy,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_MOVE | held,
+                    time: 0,
+                    dwExtraInfo: self.enigo.get_marker_value(),
+                },
+            },
+        };
+        // SAFETY: one initialised `INPUT`, its size as the call requires;
+        // the error is this thread's, read right after the call that set it.
+        unsafe {
+            if SendInput(&[input], size_of::<INPUT>() as i32) == 1 {
+                Ok(())
+            } else {
+                Err(GetLastError().0)
             }
         }
     }

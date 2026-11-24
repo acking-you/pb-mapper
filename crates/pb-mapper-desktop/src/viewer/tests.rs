@@ -279,6 +279,10 @@ async fn scripted_host_session_acknowledges_first_and_authorises_input_by_presen
         viewer.input(1, &scroll),
         Err(InputError::NotOffered)
     ));
+    // And a relative move, to a host that listed `relative_pointer`, as a
+    // 0.12 host did not.
+    let by = [shift[0].clone(), Input::MoveBy { dx: 3, dy: -1 }];
+    assert!(matches!(viewer.input(1, &by), Err(InputError::NotOffered)));
     viewer.input(1, &shift).unwrap();
     let ViewerMessage::Input { event } = receive(&mut host).await else {
         panic!("expected the input");
@@ -565,6 +569,43 @@ async fn a_host_that_lists_wheel_hires_is_sent_scrolls() {
                 if v == vertical && c == continuous
         ));
     }
+    viewer.stop().await.unwrap();
+}
+
+/// To a host that listed `relative_pointer`, a relative move goes as it
+/// was given, and one past its bound is refused before anything is sent.
+#[tokio::test]
+async fn a_host_that_lists_relative_pointer_is_sent_relative_moves() {
+    let (viewer, mut host, _) = connect(HostMessage::Accepted {
+        codec: VideoCodec::H264,
+        limits: VideoLimits::for_viewer(60.0),
+        nominal_fps: 60,
+        quality: QualityPreset::Balanced,
+        capabilities: vec![crate::protocol::CAPABILITY_RELATIVE_POINTER.into()],
+    })
+    .await;
+    let viewer = viewer.unwrap();
+    send(&mut host, state(1, false), None).await;
+    send(&mut host, video(1, 1, 1, true), Some(&[1; 64])).await;
+    let consumer = viewer.video_sink().attach().unwrap();
+    pull(&consumer).await;
+    assert!(consumer.presented(1, 1));
+    viewer.request_control(true).unwrap();
+    send(&mut host, state(1, true), None).await;
+    eventually(|| viewer.status().controlling).await;
+    assert!(matches!(
+        viewer.input(1, &[Input::MoveBy { dx: 4097, dy: 0 }]),
+        Err(InputError::Invalid(_))
+    ));
+    viewer
+        .input(1, &[Input::MoveBy { dx: -40, dy: 9 }])
+        .unwrap();
+    let ViewerMessage::Input { event } =
+        until(&mut host, |m| matches!(m, ViewerMessage::Input { .. })).await
+    else {
+        unreachable!()
+    };
+    assert!(matches!(event.input, Input::MoveBy { dx: -40, dy: 9 }));
     viewer.stop().await.unwrap();
 }
 

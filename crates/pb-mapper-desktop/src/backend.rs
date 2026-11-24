@@ -420,6 +420,9 @@ pub struct BackendCaps {
     /// It injects `Input::Scroll`: scrolling in 1/120 of a notch, a
     /// trackpad's travel included, which the host lists as `wheel_hires`.
     pub hires_wheel: bool,
+    /// It injects `Input::MoveBy`: the pointer moved by counts, as a mouse
+    /// moves it, which the host lists as `relative_pointer`.
+    pub relative_pointer: bool,
 }
 impl BackendCaps {
     /// The values a host lists in `Accepted.capabilities` for these.
@@ -440,12 +443,16 @@ impl BackendCaps {
         let hires_wheel = self
             .hires_wheel
             .then(|| crate::protocol::CAPABILITY_WHEEL_HIRES.to_string());
+        let relative_pointer = self
+            .relative_pointer
+            .then(|| crate::protocol::CAPABILITY_RELATIVE_POINTER.to_string());
         lock.into_iter()
             .chain(modes)
             .chain(os)
             .chain(physical_keys)
             .chain(shapes)
             .chain(hires_wheel)
+            .chain(relative_pointer)
             .collect()
     }
 }

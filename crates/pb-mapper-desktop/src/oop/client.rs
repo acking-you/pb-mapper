@@ -833,6 +833,40 @@ mod tests {
         helper.join().unwrap();
     }
 
+    /// Protocol 13 over a pipe to a worker serving a synthetic display: its
+    /// `Start` answer says it moves the pointer by counts, which the host
+    /// lists as `relative_pointer`, a relative move reaches its injector as
+    /// sent, and the answer carries where the move left the pointer.
+    #[test]
+    fn protocol_13_carries_relative_moves_and_the_relative_pointer() {
+        let probe = Probe::default();
+        let journal = pb_mapper_core::test_support::TempPath::new("desktop-oop-move-by");
+        let (mut backend, helper) = synthetic(&probe, journal.to_path_buf(), |_| None, |_| {});
+        let caps = backend.describe(false).unwrap().caps;
+        assert!(caps.relative_pointer);
+        assert!(
+            caps.values()
+                .iter()
+                .any(|listed| listed == "relative_pointer")
+        );
+        let context = backend.context().unwrap();
+        backend
+            .input_in_context(&context, &Input::Move { x: 10, y: 10 })
+            .unwrap();
+        backend
+            .input_in_context(&context, &Input::MoveBy { dx: -4, dy: 7 })
+            .unwrap();
+        assert_eq!(probe.moves_by(), [(-4, 7)]);
+        let left = backend.cursor(&context).unwrap().unwrap();
+        assert_eq!((left.x, left.y), (6, 17));
+        // Both ends hold a relative move to its bound.
+        let too_far = Input::MoveBy { dx: 4097, dy: 0 };
+        assert!(backend.input_in_context(&context, &too_far).is_err());
+        assert_eq!(probe.moves_by().len(), 1);
+        drop(backend);
+        helper.join().unwrap();
+    }
+
     /// Protocol 12 over a pipe to a worker serving a synthetic display: its
     /// `Start` answer says it scrolls in 1/120 of a notch, which the host
     /// lists as `wheel_hires`, and a scroll reaches its injector as sent.
