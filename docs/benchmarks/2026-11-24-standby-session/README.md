@@ -108,6 +108,14 @@ the outage and one at the switch; a session without a standby ending at
 p50 4001 ms; first picture to direct p50 120 ms with one IDR, a longest gap
 of 34 ms and 6798 bit/s on the relay standby.
 
+At `12eb3d7`, after review fixes (a retired connection's writer let go of
+the session's wakes, among them), the three standby cases ran once more,
+every line in [final.txt](final.txt): block to picture p50 1568 ms (max
+1585), block to input p50 1572 ms (max 1589), one IDR in the outage and one
+at the switch; without a standby, ending at p50 3993 ms; first picture to
+direct p50 118 ms (max 122) with one IDR, a longest gap of 34 ms and
+6798 bit/s on the relay standby.
+
 ## What a device still has to show
 
 - A Windows host and macOS, Windows and Linux viewers across two real NATs:
