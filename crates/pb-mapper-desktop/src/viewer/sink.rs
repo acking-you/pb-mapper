@@ -32,6 +32,9 @@
 //!
 //! Keyframe requests go through the viewer's recovery state machine and its
 //! limiter, and the viewer tick runs the fps cap and the stall watchdog here.
+//! One made while predicted frames are thrown away until the next IDR names
+//! the last seq read, for a host that listed `keyframe_seq`, which then stops
+//! sending them unless it sent an IDR after that seq.
 use super::{
     DecoderInfo, InputError, IntervalStats, ViewerShared,
     fps_cap::{FpsCap, Observed},
@@ -267,6 +270,23 @@ impl SinkState {
                 .queue
                 .front()
                 .is_some_and(|head| now.saturating_duration_since(head.received_at) > BACKLOG_AGE)
+    }
+    /// Whether a request for `reason` comes while predicted frames are of no
+    /// use before the next IDR, so the host may stop sending them until it:
+    /// the sink's own wait for one (a gap, an overflow, a new generation), a
+    /// runner's after a gap or a failure, which drops them until its next
+    /// keyframe, or a stall, after which the Linux runner rebuilds its
+    /// pipeline at the next keyframe and the watchdog's decoder presents
+    /// nothing. The host ends such a skip only at an IDR, so a decoder that
+    /// keeps decoding is never sent a frame whose reference was skipped. A
+    /// backlog episode keeps decoding its queue, and a user's request drops
+    /// nothing.
+    fn discarding(&self, reason: KeyframeReason) -> bool {
+        match reason {
+            KeyframeReason::User => false,
+            KeyframeReason::Backlog => self.wait_key,
+            KeyframeReason::Gap | KeyframeReason::DecoderError | KeyframeReason::Stall => true,
+        }
     }
     /// The fps cap judges the consumer from `IDR_GRACE` after its first IDR;
     /// before then the queue holds the hand-off's wait and its decoder's start.
@@ -558,7 +578,7 @@ impl VideoSink {
         };
         let stalled = !paused && state.stalled(now);
         if let Some(reason) = state.recovery.tick(now, stalled) {
-            self.forward(reason);
+            self.forward(reason, state.discarding(reason));
         }
         cap
     }
@@ -605,14 +625,14 @@ impl VideoSink {
         if !state.recovery.request(reason, now) {
             return false;
         }
-        self.forward(reason);
+        self.forward(reason, state.discarding(reason));
         true
     }
 
     /// Under the sink lock: the outbound slots only ever follow it.
-    fn forward(&self, reason: KeyframeReason) {
+    fn forward(&self, reason: KeyframeReason, discarding: bool) {
         if let Some(shared) = self.shared.upgrade() {
-            shared.outbound.keyframe(reason);
+            shared.outbound.keyframe(reason, discarding);
         }
     }
 
@@ -1312,6 +1332,29 @@ mod tests {
         clock.push(34, false, 600);
         assert_eq!(clock.counts(), (1, 1));
         assert_eq!(clock.pulled(600), None);
+    }
+
+    /// Which requests come while predicted frames are thrown away until the
+    /// next IDR: an age backlog's only while the sink itself waits for one,
+    /// as after an overflow; a user's never.
+    #[test]
+    fn requests_that_drop_predicted_frames_are_told_apart() {
+        use KeyframeReason::{Backlog, DecoderError, Gap, Stall, User};
+        let mut state = SinkState::new(Instant::now(), 60, false);
+        assert!(state.wait_key);
+        for (reason, discarding) in [
+            (Gap, true),
+            (DecoderError, true),
+            (Stall, true),
+            (Backlog, true),
+            (User, false),
+        ] {
+            assert_eq!(state.discarding(reason), discarding, "{reason:?}");
+        }
+        state.wait_key = false;
+        assert!(!state.discarding(Backlog));
+        assert!(!state.discarding(User));
+        assert!(state.discarding(Gap) && state.discarding(Stall));
     }
 
     /// The session streams before its consumer attaches, and the consumer's

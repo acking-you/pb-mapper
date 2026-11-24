@@ -190,6 +190,7 @@ class QualityPanel extends StatelessWidget {
     final queued = st.queueDelayMs ?? 0;
     final sent = st.sentBitrateBps;
     final (down, up) = (st.speedRxBps, st.speedTxBps);
+    final (toward, back) = (st.forwardQueueMs, st.reverseQueueMs);
     return [
       _Row('path', l10n.qualityPath, _path(context, s, st), mono: false),
       if (linkRtt != null)
@@ -205,6 +206,16 @@ class QualityPanel extends StatelessWidget {
         _ms(st.rttMs),
         detail: queued > 0 ? l10n.qualityQueued(queued) : null,
       ),
+      // From a host that reads this device's arrival times: the stream's
+      // queue toward it, and on the way back, where a busy upload here
+      // queues without slowing the picture.
+      if (toward != null)
+        _Row(
+          'one-way-queue',
+          l10n.qualityQueueToward,
+          _ms(toward),
+          detail: back != null && back > 0 ? l10n.qualityQueueBack(back) : null,
+        ),
       // Everything the session moves, each way, as RustDesk counts it.
       if (!s.connected || down != null)
         _Row(

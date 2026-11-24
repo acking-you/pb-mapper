@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    Display,
+    Display, KeyframeReason,
     outgoing::HostUnit,
     protocol::{HostMessage, NoticeCode, SessionState, VideoSize},
     shared::{CursorReport, CursorUpdate, EngineState},
@@ -181,7 +181,12 @@ async fn stale_generation_units_are_dropped_before_admission() {
 
     // The session continues, and the seq stays contiguous. Each report
     // goes out once, even at a position written before.
-    viewer.send(ViewerMessage::Received { seq: 2 }).await;
+    viewer
+        .send(ViewerMessage::Received {
+            seq: 2,
+            at_us: None,
+        })
+        .await;
     shared.cursor.send_replace(report(2));
     shared.outgoing.push(unit(2, 5, false));
     assert!(cursor(&viewer.next().await.0));
@@ -190,12 +195,22 @@ async fn stale_generation_units_are_dropped_before_admission() {
         unreachable!()
     };
     assert_eq!((stats.dropped_frames, stats.frames), (2, 3));
-    // A viewer that did not list `encoder_dwell` would reject the field.
+    // A viewer that did not list `encoder_dwell` would reject the field, and
+    // one that did not list `arrival_time` the one-way queues.
     assert_eq!(stats.encoder_dwell_ms, None);
+    assert_eq!(
+        (stats.forward_queue_ms, stats.reverse_queue_ms),
+        (None, None)
+    );
 
     // A receipt for video never sent is a protocol error, and the viewer
     // hears so before the close.
-    viewer.send(ViewerMessage::Received { seq: 9 }).await;
+    viewer
+        .send(ViewerMessage::Received {
+            seq: 9,
+            at_us: None,
+        })
+        .await;
     let (stopped, _) = viewer.next().await;
     assert!(
         matches!(
@@ -212,6 +227,217 @@ async fn stale_generation_units_are_dropped_before_admission() {
     assert!(rest.is_empty());
     drop(viewer);
     running.await.unwrap();
+}
+
+/// A viewer that listed `keyframe_seq` asks for an IDR having read seq 2,
+/// after the session's first IDR: the predicted units C makes before the
+/// next IDR are dropped without a seq, and only an IDR clears the skip; one
+/// slow to come is asked for again. One that listed `arrival_time` reads its
+/// one-way queues in `Stats`. A request after a seq never sent is a protocol
+/// error.
+#[tokio::test]
+async fn a_keyframe_request_after_a_seq_skips_predicted_units_until_the_idr() {
+    let (viewer, host) = tokio::io::duplex(1 << 20);
+    let (read, write) = tokio::io::split(viewer);
+    let mut viewer = Viewer { read, write };
+    let listed = [
+        CAPABILITY_ARRIVAL_TIME.to_owned(),
+        CAPABILITY_KEYFRAME_SEQ.to_owned(),
+    ];
+    let session = Session::new(
+        Arc::new(Policy::new(true)),
+        CancellationToken::new(),
+        VideoCodec::H264,
+        VideoLimits::for_viewer(60.0),
+        QualityPreset::Balanced,
+        &listed,
+        &listed,
+    );
+    let shared = session.shared.clone();
+    shared.state.send_replace(streaming(1));
+    let cancel = shared.cancel.clone();
+    let running = tokio::spawn(run(session.clone(), host, async move {
+        cancel.cancelled().await;
+        WorkerExit::Cancelled
+    }));
+
+    assert_eq!(state_generation(&viewer.next().await.0), 1);
+    shared.outgoing.push(unit(1, 1, true));
+    shared.outgoing.push(unit(1, 2, false));
+    let (first, payload) = viewer.next().await;
+    assert_eq!(video(&first), (1, 1, 1));
+    assert_eq!(payload.unwrap()[..], [1; 100]);
+    assert_eq!(video(&viewer.next().await.0), (2, 1, 2));
+    for seq in 1..=2 {
+        viewer
+            .send(ViewerMessage::Received {
+                seq,
+                at_us: Some(10_000 * seq),
+            })
+            .await;
+    }
+    viewer
+        .send(ViewerMessage::Keyframe {
+            reason: KeyframeReason::Gap,
+            after_seq: Some(2),
+        })
+        .await;
+    crate::test_util::until_within(Duration::from_secs(5), || {
+        shared.idr.lock().take_due(Instant::now())
+    })
+    .await;
+    shared.outgoing.push(unit(1, 3, false));
+    shared.outgoing.push(unit(1, 4, false));
+    shared.outgoing.push(unit(1, 5, true));
+    shared.outgoing.push(unit(1, 6, false));
+    assert_eq!(video(&viewer.next().await.0), (3, 1, 5));
+    assert_eq!(video(&viewer.next().await.0), (4, 1, 6));
+    let HostMessage::Stats(stats) = viewer.stats().await else {
+        unreachable!()
+    };
+    assert_eq!((stats.dropped_frames, stats.frames), (2, 4));
+    assert_eq!(stats.forward_queue_ms, Some(0));
+
+    // A skip never ends but at an IDR: one slow to come is asked for again,
+    // here at the next predicted unit, as by a skip `SKIP_ASK_AGAIN` old.
+    shared.idr.lock().answered(Instant::now());
+    assert_eq!(shared.idr.lock().due_at(Instant::now()), None);
+    let waited = Instant::now() - crate::credit::SKIP_ASK_AGAIN;
+    assert!(session.credit.lock().skip_to_keyframe(4, waited).unwrap());
+    shared.outgoing.push(unit(1, 7, false));
+    crate::test_util::until_within(Duration::from_secs(5), || {
+        shared.idr.lock().due_at(Instant::now()).is_some()
+    })
+    .await;
+    shared.outgoing.push(unit(1, 8, false));
+    shared.outgoing.push(unit(1, 9, true));
+    assert_eq!(video(&viewer.next().await.0), (5, 1, 9));
+
+    viewer
+        .send(ViewerMessage::Keyframe {
+            reason: KeyframeReason::Gap,
+            after_seq: Some(6),
+        })
+        .await;
+    let (stopped, _) = viewer.next().await;
+    assert!(
+        matches!(
+            stopped,
+            HostMessage::Stopped {
+                reason: StopReason::ProtocolError,
+                ..
+            }
+        ),
+        "{stopped:?}"
+    );
+    drop(viewer);
+    running.await.unwrap();
+}
+
+/// A session whose viewer, like the host, listed `listed`.
+fn session_listing(listed: &[&str]) -> Arc<Session> {
+    let listed: Vec<String> = listed.iter().map(|value| (*value).to_owned()).collect();
+    Session::new(
+        Arc::new(Policy::new(true)),
+        CancellationToken::new(),
+        VideoCodec::H264,
+        VideoLimits::for_viewer(60.0),
+        QualityPreset::Balanced,
+        &listed,
+        &listed,
+    )
+}
+
+/// `rounds` probes every 500 ms from `from` ms after `t0`, each written with
+/// a 5 KiB unit booked: the viewer reads both `read` ms after they went out,
+/// stamping them on its own clock (7 s off the host's), and its receipt and
+/// echo reach B-recv `back` ms after that. Returns when the last came.
+fn answer(session: &Session, t0: Instant, from: u64, rounds: u64, read: u64, back: u64) -> Instant {
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    let mut answered = at(from);
+    for round in 0..rounds {
+        let sent = from + round * 500;
+        let at_us = Some(7_000_000 + (sent + read) * 1_000);
+        answered = at(sent + read + back);
+        session.qos.lock().probe_sent(sent, at(sent), false);
+        let seq = session.credit.lock().book(5 * 1024, false, at(sent));
+        session
+            .handle(ViewerMessage::Received { seq, at_us }, answered)
+            .unwrap();
+        session
+            .handle(ViewerMessage::ProbeEcho { nonce: sent, at_us }, answered)
+            .unwrap();
+    }
+    answered
+}
+
+/// What the controller and the ledger read: the queue delay, the ack queue,
+/// and with arrival times the median queue on the way back.
+fn read_queues(session: &Session, now: Instant) -> (Option<u32>, Duration, Option<Duration>) {
+    let (delay, base) = {
+        let qos = session.qos.lock();
+        (qos.view(now).delay_ms, qos.base_rtt().unwrap_or_default())
+    };
+    let mut credit = session.credit.lock();
+    let reverse = credit.one_way_queues(now).and_then(|(_, reverse)| reverse);
+    (delay, credit.ack_queue(base, now), reverse)
+}
+
+/// B-recv hands a viewer's arrival times to the controller and the ledger
+/// when both ends listed `arrival_time`: 300 ms held on the viewer's uplink
+/// lengthens every round trip, which a session without them reads as a
+/// 300 ms queue, and moves neither the delay nor the ack queue, while the
+/// way back shows it. A new path, and a resume, forget the one-way minima.
+#[test]
+fn arrival_times_reach_the_controller_and_a_new_path_forgets_them() {
+    let one_way = session_listing(&[CAPABILITY_ARRIVAL_TIME]);
+    let rtt = session_listing(&[]);
+    // After the sessions began: the host times its sends from then.
+    let t0 = Instant::now();
+    let ms = Duration::from_millis;
+    let mut now = t0;
+    for session in [&one_way, &rtt] {
+        answer(session, t0, 0, 6, 10, 10);
+        now = answer(session, t0, 3_000, 6, 10, 310);
+    }
+    assert_eq!(read_queues(&rtt, now), (Some(300), ms(300), None));
+    assert_eq!(read_queues(&one_way, now), (Some(0), ms(0), Some(ms(300))));
+
+    // A new path: the queue the uplink still holds is the new least.
+    one_way
+        .handle(
+            ViewerMessage::Path {
+                route: Route::Direct,
+            },
+            now,
+        )
+        .unwrap();
+    assert_eq!(read_queues(&one_way, now).2, None);
+    let now = answer(&one_way, t0, 6_000, 3, 10, 310);
+    assert_eq!(read_queues(&one_way, now).2, Some(ms(0)));
+    // It drains, then queues again; a resume forgets that too.
+    answer(&one_way, t0, 7_500, 3, 10, 10);
+    let now = answer(&one_way, t0, 9_000, 3, 10, 310);
+    assert_eq!(read_queues(&one_way, now).2, Some(ms(300)));
+    one_way.handle(ViewerMessage::Resume {}, now).unwrap();
+    assert_eq!(read_queues(&one_way, now).2, None);
+
+    // On a 2 ms path, shorter than the RTT floor, 154 ms queued toward the
+    // viewer reads as the round trip read it: the floor hides as much of it
+    // from the arrival times.
+    let one_way = session_listing(&[CAPABILITY_ARRIVAL_TIME]);
+    let rtt = session_listing(&[]);
+    let t0 = Instant::now();
+    let mut now = t0;
+    for session in [&one_way, &rtt] {
+        answer(session, t0, 0, 6, 1, 1);
+        now = answer(session, t0, 3_000, 6, 155, 1);
+    }
+    assert_eq!(read_queues(&rtt, now), (Some(146), ms(146), None));
+    assert_eq!(
+        read_queues(&one_way, now),
+        (Some(146), ms(146), Some(ms(0)))
+    );
 }
 
 /// C publishes `streaming` and its first unit while B-send is in the

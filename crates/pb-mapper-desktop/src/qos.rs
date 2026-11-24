@@ -13,6 +13,14 @@
 //! show a standing queue too unless two probes in a row saw one, and a cut
 //! the receipts alone confirm at most halves fps.
 //!
+//! A viewer that stamps its echoes and receipts with arrival times
+//! (`arrival_time`) turns the delay one-way: each probe's queue toward the
+//! viewer (`oneway`) takes the place of its round trip above the baseline,
+//! and the receipts' witness is their own queue toward it. A queue on the
+//! viewer's uplink then moves nothing, while one toward it cuts as before.
+//! The round trip still sets the baseline the credit window is sized from,
+//! the short path and Balanced's fast start.
+//!
 //! `receipt_rate` estimates the link from the receipts in shadow: it is
 //! traced and feeds no decision.
 
@@ -384,7 +392,11 @@ pub(crate) struct Qos {
     /// `(echoed at, rtt)` over the last `RTT_WINDOW`.
     rtt: VecDeque<(Instant, Duration)>,
     last_rtt: Option<Duration>,
+    /// The newest untainted samples: round trips, or with arrival times,
+    /// queues toward the viewer.
     history: VecDeque<Duration>,
+    /// The viewer stamps arrival times: the delay is one-way.
+    one_way: bool,
     tainted: bool,
     viewer_cap: Option<u32>,
     paused: bool,
@@ -434,6 +446,7 @@ impl Qos {
             rtt: VecDeque::new(),
             last_rtt: None,
             history: VecDeque::with_capacity(DELAY_HISTORY),
+            one_way: false,
             tainted: false,
             viewer_cap: None,
             paused: false,
@@ -503,6 +516,16 @@ impl Qos {
         self.receipts.clear();
     }
 
+    /// The viewer stamps arrival times: from now on the delay, the witness
+    /// and the receipt-rate estimator read queues toward it, which the credit
+    /// ledger's one-way minima give (`CreditLedger::probe_queue`).
+    pub fn use_one_way(&mut self) {
+        self.one_way = true;
+        self.history.clear();
+        self.last_raw = None;
+        self.receipts.use_one_way();
+    }
+
     /// A new encoded size: bits per frame keep their 1080p-relative level.
     pub fn set_video_size(&mut self, width: u32, height: u32) {
         let scale = pixel_scale(width, height);
@@ -515,7 +538,8 @@ impl Qos {
 
     /// A transport receipt arrived: the viewer is alive. A new one, not a
     /// duplicate, of H.264 or H.265 video that is not paused also feeds the
-    /// receipt-rate estimator.
+    /// receipt-rate estimator, which with arrival times takes only receipts
+    /// whose stamp was a sample.
     pub fn on_receipt(&mut self, receipt: Option<Receipt>, now: Instant) {
         self.unresponsive = false;
         if let Some(receipt) = receipt
@@ -578,33 +602,68 @@ impl Qos {
         self.next_nonce = nonce + 1;
     }
 
+    /// When the outstanding probe went out, if `nonce` is its.
+    pub fn probe_sent_at(&self, nonce: u64) -> Option<Instant> {
+        self.outstanding
+            .as_ref()
+            .filter(|probe| probe.nonce == nonce)
+            .map(|probe| probe.sent)
+    }
+
     /// An echo of the outstanding probe; any other nonce is ignored.
-    /// `ack_queue` is the receipts' queue delay at the echo, the witness a cut
-    /// needs unless the probes' own delay persists.
-    pub fn on_probe_echo(&mut self, nonce: u64, now: Instant, ack_queue: Option<Duration>) {
+    /// `forward` is the probe's queue toward a viewer that stamps arrival
+    /// times, `None` when it stamped none or the stamp was no sample, in
+    /// which case its round trip still counts toward the baseline but moves
+    /// no decision. A round trip over `IO_TIMEOUT` is no sample of the path,
+    /// but its queue toward such a viewer still is: a queue on the viewer's
+    /// uplink lengthens the one and not the other. `ack_queue` is the
+    /// receipts' queue delay at the echo, the witness a cut needs unless the
+    /// probes' own delay persists.
+    pub fn on_probe_echo(
+        &mut self,
+        nonce: u64,
+        now: Instant,
+        forward: Option<Duration>,
+        ack_queue: Option<Duration>,
+    ) {
         let Some(probe) = self.outstanding.take_if(|probe| probe.nonce == nonce) else {
             return;
         };
         self.unresponsive = false;
         let elapsed = now.saturating_duration_since(probe.sent);
-        if elapsed > IO_TIMEOUT {
+        let timely = elapsed <= IO_TIMEOUT;
+        if !timely && !(self.one_way && forward.is_some()) {
             return;
         }
         let rtt = elapsed.max(DELAY_FLOOR);
-        self.last_rtt = Some(rtt);
-        while self
-            .rtt
-            .front()
-            .is_some_and(|(at, _)| now.saturating_duration_since(*at) > RTT_WINDOW)
-        {
-            self.rtt.pop_front();
+        if timely {
+            self.last_rtt = Some(rtt);
+            while self
+                .rtt
+                .front()
+                .is_some_and(|(at, _)| now.saturating_duration_since(*at) > RTT_WINDOW)
+            {
+                self.rtt.pop_front();
+            }
+            // Kept unfloored, so the one-way delay can hide what the floor
+            // hides.
+            self.rtt.push_back((now, elapsed));
         }
-        self.rtt.push_back((now, rtt));
         self.tainted = probe.tainted;
         let Some(base) = self.base_rtt() else {
             return;
         };
-        let raw = millis(rtt.saturating_sub(base));
+        // This probe's own sample: its queue toward the viewer, less what the
+        // floor hides of a round trip on a path shorter than it, or its round
+        // trip, whose excess over the baseline is its delay.
+        let (sample, raw) = match (self.one_way, forward) {
+            (true, Some(forward)) => {
+                let forward = forward.saturating_sub(self.floor_gap());
+                (forward, millis(forward))
+            }
+            (true, None) => return,
+            (false, _) => (rtt, millis(rtt.saturating_sub(base))),
+        };
         if probe.tainted {
             // Kept apart, for a window that has nothing else to go on.
             let max = &mut self.window.max_tainted;
@@ -614,7 +673,7 @@ impl Qos {
         if self.history.len() == DELAY_HISTORY {
             self.history.pop_front();
         }
-        self.history.push_back(rtt);
+        self.history.push_back(sample);
         let Some(delay) = self.delay_ms() else {
             return;
         };
@@ -679,8 +738,26 @@ impl Qos {
         (self.bpf * f64::from(self.pace(now))) as u64
     }
 
+    /// The least round trip over the last `RTT_WINDOW`, never below
+    /// `DELAY_FLOOR`.
     pub fn base_rtt(&self) -> Option<Duration> {
-        self.rtt.iter().map(|(_, rtt)| *rtt).min()
+        self.rtt
+            .iter()
+            .map(|(_, rtt)| *rtt)
+            .min()
+            .map(|least| least.max(DELAY_FLOOR))
+    }
+
+    /// How much of a queue the floor hides from a round trip: a path whose
+    /// least round trip is under `DELAY_FLOOR` shows only the part of a queue
+    /// above the difference. The one-way delay hides as much, so a queue
+    /// toward the viewer cuts exactly as the round trip's did.
+    pub fn floor_gap(&self) -> Duration {
+        self.rtt
+            .iter()
+            .map(|(_, rtt)| *rtt)
+            .min()
+            .map_or(Duration::ZERO, |least| DELAY_FLOOR.saturating_sub(least))
     }
 
     pub fn preset(&self) -> QualityPreset {
@@ -738,10 +815,15 @@ impl Qos {
         pace.max(1)
     }
 
-    /// The median of the recent untainted RTTs above the baseline; of two,
-    /// the lower. One stalled probe among them moves it not at all.
+    /// The median of the recent untainted RTTs above the baseline, or with
+    /// arrival times of their queues toward the viewer; of two, the lower.
+    /// One stalled probe among them moves it not at all.
     fn delay_ms(&self) -> Option<u32> {
-        let base = self.base_rtt()?;
+        let base = if self.one_way {
+            Duration::ZERO
+        } else {
+            self.base_rtt()?
+        };
         let mut recent = [Duration::ZERO; DELAY_HISTORY];
         for (slot, rtt) in recent.iter_mut().zip(&self.history) {
             *slot = *rtt;
@@ -984,8 +1066,31 @@ mod tests {
         qos.on_probe_echo(
             nonce,
             at + Duration::from_millis(rtt_ms),
+            None,
             Some(Duration::from_millis(ack_queue_ms)),
         );
+    }
+
+    /// `(rtt_ms, forward_ms, ack_queue_ms)` probes every 250 ms from `t0`,
+    /// from a viewer that stamps arrival times: each probe's queue toward
+    /// it, and the receipts'; fps after each.
+    fn one_way_probes(qos: &mut Qos, t0: Instant, script: &[(u64, u64, u64)]) -> Vec<u32> {
+        let mut at = t0;
+        script
+            .iter()
+            .map(|&(rtt, forward, queue)| {
+                let nonce = qos.probe_due(at).unwrap_or(qos.next_nonce);
+                qos.probe_sent(nonce, at, false);
+                qos.on_probe_echo(
+                    nonce,
+                    at + Duration::from_millis(rtt),
+                    Some(Duration::from_millis(forward)),
+                    Some(Duration::from_millis(queue)),
+                );
+                at += FAST_PROBE_INTERVAL;
+                qos.fps
+            })
+            .collect()
     }
 
     /// One probe round trip of `rtt_ms`, sent at `at`, with no receipt queue.
@@ -1216,7 +1321,7 @@ mod tests {
         qos.tick(s(13), &idle(), ProducedSnapshot::default());
         assert!(qos.unresponsive);
         let samples = qos.rtt.len();
-        qos.on_probe_echo(nonce, s(13), None);
+        qos.on_probe_echo(nonce, s(13), None, None);
         assert!(!qos.unresponsive && qos.rtt.len() == samples);
         // Receipts owed for 2 s count too; a receipt owed briefly does not.
         let owed = |since| CreditView {
@@ -1229,7 +1334,7 @@ mod tests {
         qos.tick(s(14), &owed(s(11)), ProducedSnapshot::default());
         assert!(qos.unresponsive);
         // A nonce that is not outstanding is ignored.
-        qos.on_probe_echo(99, s(14), None);
+        qos.on_probe_echo(99, s(14), None, None);
         assert!(qos.unresponsive);
 
         // The baseline is the minimum over the last 60 s, and a new path
@@ -1289,6 +1394,7 @@ mod tests {
                 delay: Duration::from_millis(120),
                 bytes: 4250,
                 behind_idr: false,
+                arrival: None,
             };
             qos.on_receipt(Some(receipt), at(2000 + 17 * n));
         }
@@ -1303,6 +1409,123 @@ mod tests {
         // A path change forgets the receipts.
         qos.reset_baseline();
         assert_eq!(qos.take_receipt_rate(now), ReceiptRateView::default());
+    }
+
+    /// A round trip under `DELAY_FLOOR` counts as the floor, which hides
+    /// the first part of any queue on such a path; the one-way delay hides
+    /// as much, so a queue toward the viewer moves the controller alike.
+    #[test]
+    fn a_path_under_the_floor_hides_as_much_of_a_queue_one_way() {
+        let t0 = Instant::now();
+        let mut rtt = balanced(t0);
+        let mut one_way = balanced(t0);
+        one_way.use_one_way();
+        // A 2 ms path, then 154 ms queued toward the viewer, twice.
+        probes(&mut rtt, t0, &[(2, 0), (2, 0), (156, 0), (156, 0)]);
+        one_way_probes(
+            &mut one_way,
+            t0,
+            &[(2, 0, 0), (2, 0, 0), (156, 154, 0), (156, 154, 0)],
+        );
+        assert_eq!(rtt.floor_gap(), Duration::from_millis(8));
+        assert_eq!(rtt.delay_ms(), Some(146));
+        assert_eq!(one_way.delay_ms(), rtt.delay_ms());
+        assert_eq!(one_way.fps, rtt.fps);
+        assert_eq!(rtt.base_rtt(), Some(DELAY_FLOOR));
+    }
+
+    /// With arrival times, a queue on the viewer's uplink alone (the round
+    /// trip 300 ms longer, nothing queued toward the viewer) never cuts, and
+    /// one toward it cuts as a round trip's did.
+    #[test]
+    fn a_reverse_only_delay_never_cuts_and_a_forward_one_does() {
+        let t0 = Instant::now();
+        let mut qos = balanced(t0);
+        qos.use_one_way();
+        let fps = one_way_probes(&mut qos, t0, &[(20, 0, 0); 8]);
+        assert_eq!(fps.last(), Some(&60));
+        let start = t0 + FAST_PROBE_INTERVAL * 8;
+        let fps = one_way_probes(&mut qos, start, &[(330, 2, 0); 12]);
+        assert!(fps.iter().all(|fps| *fps == 60), "{fps:?}");
+        assert_eq!(qos.delay_ms(), Some(2));
+        assert_eq!(qos.base_rtt(), Some(Duration::from_millis(20)));
+        assert_eq!(qos.last_rtt, Some(Duration::from_millis(330)));
+        // 250 ms toward the viewer, twice: Balanced's floor, as the round
+        // trip took it there (`a_sustained_queue_reaches_the_floor_...`).
+        let start = start + FAST_PROBE_INTERVAL * 12;
+        let fps = one_way_probes(&mut qos, start, &[(580, 250, 0), (580, 250, 0)]);
+        assert_eq!(fps, [60, 10]);
+        // A stamp that was no sample moves nothing, but the echo counts.
+        let at = start + FAST_PROBE_INTERVAL * 2;
+        let nonce = qos.next_nonce;
+        qos.probe_sent(nonce, at, false);
+        qos.on_probe_echo(nonce, at + Duration::from_millis(20), None, None);
+        assert_eq!((qos.fps, qos.delay_ms()), (10, Some(250)));
+        assert!(qos.outstanding.is_none());
+
+        // A queue on the uplink past `IO_TIMEOUT` makes every round trip too
+        // long to sample, while the way toward the viewer is still timed: a
+        // queue there still cuts, and the baseline stays as it was.
+        let mut qos = balanced(t0);
+        qos.use_one_way();
+        one_way_probes(&mut qos, t0, &[(20, 0, 0); 8]);
+        let samples = qos.rtt.len();
+        let start = t0 + FAST_PROBE_INTERVAL * 8;
+        let fps = one_way_probes(&mut qos, start, &[(3_520, 2, 0); 4]);
+        assert!(fps.iter().all(|fps| *fps == 60), "{fps:?}");
+        let start = start + FAST_PROBE_INTERVAL * 4;
+        let fps = one_way_probes(&mut qos, start, &[(3_770, 250, 0), (3_770, 250, 0)]);
+        assert_eq!(fps, [60, 10]);
+        assert_eq!(qos.rtt.len(), samples);
+        assert_eq!(qos.last_rtt, Some(Duration::from_millis(20)));
+        // Timed by round trips alone, those echoes are no samples at all.
+        let mut rtt = balanced(t0);
+        probes(&mut rtt, t0, &[(20, 0); 8]);
+        let fps = probes(&mut rtt, start, &[(3_770, 0); 2]);
+        assert_eq!(fps, [60, 60]);
+
+        // The receipt-rate estimator reads the same queues, on the viewer's
+        // clock: receipts the uplink bunches and holds 300 ms, of units that
+        // waited for nothing toward the viewer, would cut nothing ...
+        let mut qos = balanced(t0);
+        qos.use_one_way();
+        one_way_probes(&mut qos, t0, &[(20, 0, 0); 8]);
+        let receipt = |arrived_ms: u64, forward_ms: u64| Receipt {
+            delay: Duration::from_millis(330),
+            bytes: 4250,
+            behind_idr: false,
+            arrival: Some(crate::credit::Arrival {
+                at: Duration::from_millis(arrived_ms),
+                forward_queue: Duration::from_millis(forward_ms),
+            }),
+        };
+        let host = |n: u64| t0 + Duration::from_millis(2000 + 51 * (n / 3) + n % 3);
+        for n in 0..60 {
+            qos.on_receipt(Some(receipt(5_000 + 17 * n, 0)), host(n));
+        }
+        let view = qos.take_receipt_rate(host(59));
+        assert_eq!(view.standing, Some(Duration::ZERO), "{view:?}");
+        assert!(!view.would_cut, "{view:?}");
+        // ... while 2 Mbit/s with 100 ms of queue toward the viewer would.
+        for n in 60..120 {
+            qos.on_receipt(Some(receipt(5_000 + 17 * n, 100)), host(n));
+        }
+        let view = qos.take_receipt_rate(host(119));
+        assert_eq!(view.standing, Some(Duration::from_millis(100)), "{view:?}");
+        assert_eq!(view.busy_bps, Some(2_000_000), "{view:?}");
+        assert!(view.would_cut, "{view:?}");
+        // A receipt whose stamp was no sample is left out.
+        qos.on_receipt(
+            Some(Receipt {
+                arrival: None,
+                ..receipt(0, 0)
+            }),
+            host(120),
+        );
+        assert_eq!(
+            qos.take_receipt_rate(host(120)).standing,
+            Some(Duration::from_millis(100))
+        );
     }
 
     #[test]

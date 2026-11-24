@@ -4,7 +4,10 @@
 //!
 //! - `rtt_ms`: the last probe round trip, transport only (host `Stats`).
 //! - `queue_delay_ms`: the median of the host's last untainted probe round
-//!   trips minus its baseline.
+//!   trips minus its baseline; from a host that reads this viewer's arrival
+//!   times (`arrival_time`), the median of their queues toward it.
+//! - `forward_queue_ms`, `reverse_queue_ms`: from such a host, its receipts'
+//!   queue toward this viewer, and on their way back.
 //! - `picture_latency_ms`: `host_ms + rtt_ms / 2 + viewer_ms`, each a median
 //!   over 2 s. `host_ms` is encoder submit to socket write on the host;
 //!   `viewer_ms` is network receipt to presentation here. Each side uses its
@@ -207,8 +210,14 @@ pub struct ViewerStats {
     pub encoder_dwell_ms: Option<u32>,
     /// What the host sent, in bits per second.
     pub sent_bitrate: u32,
-    /// The host's receipt-based queue delay.
+    /// The host's receipt-based queue delay: toward this viewer alone when
+    /// `forward_queue_ms` is set.
     pub ack_queue_ms: Option<u32>,
+    /// The host's one-way queues from this viewer's arrival times: toward
+    /// this viewer, and back to the host, where a busy upload here queues.
+    /// `None` from a host that reads no arrival times.
+    pub forward_queue_ms: Option<u32>,
+    pub reverse_queue_ms: Option<u32>,
     /// What the host expects to send: bits per frame × pace.
     pub bitrate: u32,
     pub encoder_bitrate: u32,
