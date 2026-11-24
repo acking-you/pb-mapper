@@ -265,9 +265,9 @@ pub struct DirectLink {
     pub timings: SetupTimings,
     pub candidates: CandidateCounts,
     pub stats: LinkStats,
-    /// The controller this end's QUIC sends under: BBR for a desktop host's
-    /// video, Cubic elsewhere. `None` over TCP, whose controller is the
-    /// operating system's.
+    /// The controller this end's QUIC sends under, read from the connection:
+    /// Cubic, unless this end publishes and registered for another. `None`
+    /// over TCP, whose controller is the operating system's.
     pub congestion: Option<CongestionControl>,
 }
 
