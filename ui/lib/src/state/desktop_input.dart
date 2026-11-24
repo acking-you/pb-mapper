@@ -99,6 +99,11 @@ sealed class DesktopInput {
     bool dragStart,
   }) = DesktopButton;
 
+  /// [dx] and [dy] are counts the pointer moved by, at most
+  /// [DesktopMoveBy.maxDelta] each way. Only to a host that listed
+  /// `relative_pointer`.
+  factory DesktopInput.moveBy(int dx, int dy) = DesktopMoveBy;
+
   /// [horizontal] and [vertical] are wheel notches, at most 100 each way.
   factory DesktopInput.wheel(int horizontal, int vertical) = DesktopWheel;
 
@@ -129,6 +134,27 @@ final class DesktopMove extends DesktopInput {
       other is DesktopMove && other.x == x && other.y == y;
   @override
   int get hashCode => Object.hash(x, y);
+}
+
+/// A relative move: counts, about a host pixel each, positive right and
+/// down, which a host's program that reads the mouse itself gets as they
+/// are. What a viewer sends while it holds its own pointer over the
+/// picture, only to a host that listed `relative_pointer`.
+final class DesktopMoveBy extends DesktopInput {
+  DesktopMoveBy(int dx, int dy)
+    : dx = dx.clamp(-maxDelta, maxDelta),
+      dy = dy.clamp(-maxDelta, maxDelta);
+
+  /// The host's bound, each way.
+  static const maxDelta = 4096;
+  final int dx, dy;
+  @override
+  Map<String, Object?> toJson() => {'kind': 'move_by', 'dx': dx, 'dy': dy};
+  @override
+  bool operator ==(Object other) =>
+      other is DesktopMoveBy && other.dx == dx && other.dy == dy;
+  @override
+  int get hashCode => Object.hash(dx, dy);
 }
 
 final class DesktopButton extends DesktopInput {

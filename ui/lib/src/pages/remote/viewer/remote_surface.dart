@@ -13,6 +13,7 @@ import '../../../state/viewer_prefs.dart';
 import '../../../theme/motion.dart';
 import '../../../theme/viewer_palette.dart';
 import 'remote_input.dart';
+import 'remote_pointer_lock.dart';
 import 'remote_scroll.dart';
 import 'remote_viewport.dart';
 import 'touch_gestures.dart';
@@ -32,7 +33,11 @@ const kTouchIndicatorFade = Duration(milliseconds: 150);
 /// soft keyboard and reconnects change the transform only, never the
 /// child's element, so a native texture is never re-created (P1-4). The
 /// surface tells the viewport where it is in the view, so a pixel-exact
-/// picture lands on whole device pixels.
+/// picture lands on whole device pixels. A desktop viewer's [pointerLock]
+/// hears the mouse's buttons and moves: while it holds this computer's
+/// pointer, or Auto sends a hidden remote pointer relative moves, the mouse
+/// moves the host's pointer by counts and a press lands where that is; in
+/// Game mode, until a click holds the pointer, the mouse sends nothing.
 class RemoteSurface extends StatefulWidget {
   const RemoteSurface({
     super.key,
@@ -40,6 +45,7 @@ class RemoteSurface extends StatefulWidget {
     required this.input,
     required this.machine,
     required this.touchMode,
+    this.pointerLock,
     required this.child,
   });
 
@@ -47,6 +53,7 @@ class RemoteSurface extends StatefulWidget {
   final RemoteInput input;
   final TouchGestureMachine machine;
   final ValueListenable<TouchMode> touchMode;
+  final RemotePointerLock? pointerLock;
   final Widget child;
 
   @override
@@ -84,6 +91,7 @@ class _RemoteSurfaceState extends State<RemoteSurface>
   RemoteViewport get _viewport => widget.viewport;
   RemoteInput get _input => widget.input;
   TouchGestureMachine get _machine => widget.machine;
+  RemotePointerLock? get _lock => widget.pointerLock;
 
   @override
   void initState() {
@@ -161,6 +169,8 @@ class _RemoteSurfaceState extends State<RemoteSurface>
     _viewport.setOrigin(_originOf(e));
     final n = _viewport.toNormalized(e.localPosition);
     if (n == null || !_input.ready.value) return;
+    // The click that holds the pointer in Game mode goes nowhere.
+    if (_lock?.buttons(e.buttons) ?? false) return;
     _syncButtons(e.pointer, e.buttons, n);
   }
 
@@ -170,8 +180,17 @@ class _RemoteSurfaceState extends State<RemoteSurface>
       _arm();
       return;
     }
+    final lock = _lock;
+    if (lock != null && lock.buttons(e.buttons)) return;
     final held = _buttons[e.pointer];
     if (held == null || !_input.ready.value) return;
+    if (lock != null && (lock.relative || lock.paused)) {
+      // No point of the picture to go to: the motion goes as it comes, and
+      // a button pressed or released meanwhile where the pointer is.
+      lock.moved(e.delta, _devicePixelRatio);
+      _syncButtons(e.pointer, e.buttons, _input.cursor);
+      return;
+    }
     // A drag's moves keep its down's transform, stale if the stage moved
     // since: the origin came with the down, or with a layout since.
     _viewport.autoScrollTo(e.localPosition);
@@ -187,6 +206,7 @@ class _RemoteSurfaceState extends State<RemoteSurface>
       _arm();
       return;
     }
+    _lock?.buttons(0);
     for (final b in _buttons.remove(e.pointer) ?? const <RemoteButton>{}) {
       _input.release(b);
     }
@@ -198,6 +218,7 @@ class _RemoteSurfaceState extends State<RemoteSurface>
       _arm();
       return;
     }
+    _lock?.buttons(0);
     for (final b in _buttons.remove(e.pointer) ?? const <RemoteButton>{}) {
       _input.release(b);
     }
@@ -227,6 +248,11 @@ class _RemoteSurfaceState extends State<RemoteSurface>
   /// remote pointer goes to what is under the local one afterwards.
   void _hover(PointerHoverEvent e) {
     if (_isTouch(e)) return;
+    final lock = _lock;
+    if (lock != null && _input.ready.value) {
+      lock.moved(e.delta, _devicePixelRatio);
+      if (lock.relative || lock.paused) return;
+    }
     _viewport
       ..setOrigin(_originOf(e))
       ..autoScrollTo(e.localPosition);
@@ -345,6 +371,8 @@ class _RemoteSurfaceState extends State<RemoteSurface>
   /// 30 px of travel each. What falls short of a step waits for the next
   /// of its kind.
   void _scrollBy(double dx, double dy, {required bool trackpad}) {
+    // Game mode waiting for a click: nothing from the mouse.
+    if (_lock?.paused ?? false) return;
     final notch = trackpad
         ? null
         : wheelPxPerNotch(

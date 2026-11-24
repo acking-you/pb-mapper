@@ -11,6 +11,7 @@ import 'desktop_keyboard.dart';
 import 'modifier_latch.dart';
 import 'quality_panel.dart';
 import 'remote_input.dart';
+import 'remote_pointer_lock.dart';
 import 'remote_viewport.dart';
 import 'touch_gestures.dart';
 import 'viewer_menus.dart';
@@ -78,6 +79,7 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
   final _touchMode = ValueNotifier(TouchMode.direct);
   final _picture = FocusNode(debugLabel: 'remote picture');
   late final RemoteInput _input;
+  late final RemotePointerLock _pointerLock;
   late final DesktopKeyboard _keyboard;
   late final TouchGestureMachine _machine;
   late final ToolbarController _toolbar;
@@ -105,6 +107,11 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
       interactive: () => _input.ready.value,
       haptic: viewerHaptic,
     );
+    _pointerLock = RemotePointerLock(
+      desktop: _desktop,
+      input: _input,
+      prefs: widget.prefs,
+    );
     _keyboard = DesktopKeyboard(input: _input, picture: _picture);
     _toolbar = ToolbarController(pinned: widget.prefs.toolbarPinned)..start();
     _actions = _buildActions();
@@ -114,8 +121,8 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
     // Local input only: what is on screen belongs to the viewer's host, and
     // pausing a hidden app to the store.
     _lifecycle = AppLifecycleListener(
-      onInactive: _input.releaseAll,
-      onHide: _input.releaseAll,
+      onInactive: _localLost,
+      onHide: _localLost,
       onStateChange: _lifecycleChanged,
     );
     _lifecycleChanged(WidgetsBinding.instance.lifecycleState);
@@ -149,6 +156,9 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
     _desktop.session.removeListener(_keyboardSettingsChanged);
     _lifecycle.dispose();
     _keyboard.dispose();
+    // The lock lets this computer's pointer go, and its moves stay
+    // absolute, before the input goes.
+    _pointerLock.dispose();
     // The input releases through the machine, so it goes first.
     _input.dispose();
     _machine.dispose();
@@ -158,6 +168,21 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
     _touchMode.dispose();
     _picture.dispose();
     super.dispose();
+  }
+
+  /// The picture lost the keyboard, or the app went inactive or hidden:
+  /// what is held on the host is released, and this computer's pointer let
+  /// go.
+  void _localLost() {
+    _input.releaseAll();
+    _pointerLock.focusLost();
+  }
+
+  /// A key on the picture: an Esc held there lets a held pointer go, and
+  /// its repeats go nowhere; every other key goes as the input routes it.
+  KeyEventResult _key(FocusNode node, KeyEvent event) {
+    if (_pointerLock.key(event)) return KeyEventResult.handled;
+    return _input.handleHardwareKey(node, event);
   }
 
   /// The keyboard is this computer's: chosen in the Shortcuts menu, and
@@ -289,9 +314,9 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
                   child: Focus(
                     focusNode: _picture,
                     autofocus: true,
-                    onKeyEvent: _input.handleHardwareKey,
+                    onKeyEvent: _key,
                     onFocusChange: (focused) {
-                      if (!focused) _input.releaseAll();
+                      if (!focused) _localLost();
                     },
                     child: ViewerStage.of(
                       _desktop,
@@ -303,6 +328,7 @@ class _DesktopViewerState extends State<DesktopViewer> with WindowListener {
                       actions: _actions,
                       toolbarInset: _toolbar.inset,
                       localPointer: true,
+                      pointerLock: _pointerLock,
                     ),
                   ),
                 ),

@@ -470,6 +470,41 @@ List<ViewerMenuEntry> _keyboardItems(AppLocalizations l10n, ViewerActions a) {
   ];
 }
 
+/// What this device's mouse does over the picture of a computer that moves
+/// its pointer by counts (`relative_pointer`): on a desktop runner, which
+/// can hold the pointer. The choice is this device's ([ViewerPrefs]).
+List<ViewerMenuEntry> _pointerItems(AppLocalizations l10n, ViewerActions a) {
+  if (!desktopRunner || !a.input.relativePointer) return const [];
+  final mode = a.prefs.pointerMode;
+  String label(PointerMode m) => switch (m) {
+    PointerMode.auto => l10n.pointerModeAuto,
+    PointerMode.desktop => l10n.pointerModeDesktop,
+    PointerMode.game => l10n.pointerModeGame,
+  };
+  return [
+    ViewerMenuSubmenu(
+      key: const Key('pointer-mode'),
+      label: l10n.pointerMode,
+      value: label(mode),
+      note: l10n.pointerModeNote,
+      entries: [
+        for (final (choice, detail) in [
+          (PointerMode.auto, l10n.pointerModeAutoHint),
+          (PointerMode.desktop, l10n.pointerModeDesktopHint),
+          (PointerMode.game, l10n.pointerModeGameHint),
+        ])
+          ViewerMenuItem(
+            key: Key('pointer-${choice.name}'),
+            label: label(choice),
+            detail: detail,
+            checked: mode == choice,
+            onSelected: () => a.prefs.setPointerMode(choice),
+          ),
+      ],
+    ),
+  ];
+}
+
 /// The chords go as one sequence each; they neither apply nor consume a
 /// latch. Each is the host's own, named as its keyboard names it, and one
 /// the host has none for is left out. Ctrl+Alt+Del is shown on Windows and
@@ -481,6 +516,7 @@ List<ViewerMenuEntry> shortcutsMenu(AppLocalizations l10n, ViewerActions a) {
   final cad = RemoteShortcut.ctrlAltDel.keys(appleHost: apple);
   return [
     ..._keyboardItems(l10n, a),
+    ..._pointerItems(l10n, a),
     const ViewerMenuDivider(),
     for (final (s, key, label) in [
       (

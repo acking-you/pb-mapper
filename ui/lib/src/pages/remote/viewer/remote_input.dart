@@ -160,14 +160,40 @@ final class RemoteInput implements RemotePointerSink {
   @override
   void move(Offset n) => _moveTo(n);
 
+  /// Moves go as relative moves ([moveBy]), and a press or a click lands
+  /// where the host's pointer is: this viewer holds its pointer over the
+  /// picture, or Auto sends a hidden pointer relative moves
+  /// (`RemotePointerLock`). The session's cursor then follows every report
+  /// of the host's pointer, having no place of its own.
+  bool get relative => _relative;
+  bool _relative = false;
+  set relative(bool value) {
+    _relative = value;
+    _desktop.cursor.relative = value;
+  }
+
+  /// The host moves its pointer by counts: it listed `relative_pointer`.
+  bool get relativePointer =>
+      _desktop.session.value.capabilities.contains('relative_pointer');
+
+  /// The pointer moved by [dx] and [dy] counts, toward a host that takes
+  /// them ([relativePointer]) while moves go [relative].
+  void moveBy(int dx, int dy) {
+    final g = _live;
+    if (g == null || !_relative || !relativePointer || (dx == 0 && dy == 0)) {
+      return;
+    }
+    _desktop.send(DesktopInput.moveBy(dx, dy), geometryEpoch: g.epoch);
+  }
+
   @override
   void press(RemoteButton b, Offset n, {bool dragStart = false}) {
     final g = _live;
     if (g == null) return;
-    cursor = n;
+    if (!_relative) cursor = n;
     final mods = _latchedToWrap().difference(_buttonMods);
     final sent = _sequence(g, [
-      _moveInput(g, n),
+      if (!_relative) _moveInput(g, n),
       ..._waitingDowns,
       ..._downs(mods),
       DesktopInput.button(b, true, dragStart: dragStart),
@@ -192,13 +218,13 @@ final class RemoteInput implements RemotePointerSink {
   void click(RemoteButton b, Offset n) {
     final g = _live;
     if (g == null) return;
-    cursor = n;
+    if (!_relative) cursor = n;
     final waiting = _waitingDowns;
     _wrapped(
       g,
       const {},
       (mods) => [
-        _moveInput(g, n),
+        if (!_relative) _moveInput(g, n),
         ...waiting,
         ..._downs(mods),
         DesktopInput.button(b, true),
@@ -577,7 +603,7 @@ final class RemoteInput implements RemotePointerSink {
 
   void _moveTo(Offset n) {
     final g = _live;
-    if (g == null) return;
+    if (g == null || _relative) return;
     cursor = n;
     _desktop.send(_moveInput(g, n), geometryEpoch: g.epoch);
   }

@@ -11,6 +11,7 @@ import '../../../state/viewer_prefs.dart';
 import 'jpeg_picture.dart';
 import 'remote_cursor_layer.dart';
 import 'remote_input.dart';
+import 'remote_pointer_lock.dart';
 import 'remote_surface.dart';
 import 'remote_viewport.dart';
 import 'touch_gestures.dart';
@@ -48,6 +49,7 @@ class ViewerStage extends StatefulWidget {
     this.cursor,
     this.peerCursors,
     this.localPointer = false,
+    this.pointerLock,
     this.greyPicture,
   });
 
@@ -65,6 +67,7 @@ class ViewerStage extends StatefulWidget {
     ValueListenable<double>? toolbarInset,
     bool touchIndicator = true,
     bool localPointer = false,
+    RemotePointerLock? pointerLock,
   }) => ViewerStage(
     key: key,
     session: desktop.session,
@@ -84,6 +87,7 @@ class ViewerStage extends StatefulWidget {
     cursor: desktop.cursor,
     peerCursors: desktop.peerCursors,
     localPointer: localPointer,
+    pointerLock: pointerLock,
     greyPicture: desktop.greyPicture,
   );
 
@@ -121,6 +125,10 @@ class ViewerStage extends StatefulWidget {
   /// host's shape there while it controls (see [RemotePointerLook]).
   final bool localPointer;
 
+  /// A desktop viewer's pointer lock: the mouse moves the host's pointer by
+  /// counts while it says so, and the host's pointer is painted.
+  final RemotePointerLock? pointerLock;
+
   /// Greys a picture the runner presents itself (see [GreyStill]).
   final Future<void> Function(bool on)? greyPicture;
 
@@ -147,6 +155,7 @@ class _ViewerStageState extends State<ViewerStage> {
             controlling: widget.input.ready,
             geometry: widget.geometry,
             viewport: widget.viewport,
+            relative: widget.pointerLock?.relativeListenable,
           );
   }
 
@@ -157,6 +166,7 @@ class _ViewerStageState extends State<ViewerStage> {
         identical(oldWidget.input, widget.input) &&
         identical(oldWidget.geometry, widget.geometry) &&
         identical(oldWidget.viewport, widget.viewport) &&
+        identical(oldWidget.pointerLock, widget.pointerLock) &&
         oldWidget.localPointer == widget.localPointer) {
       return;
     }
@@ -244,6 +254,7 @@ class _ViewerStageState extends State<ViewerStage> {
             input: input,
             machine: machine,
             touchMode: touchMode,
+            pointerLock: widget.pointerLock,
             child: pointer != null && pointer.mouse
                 ? RemotePointerRegion(pointer: pointer, child: scene)
                 : scene,

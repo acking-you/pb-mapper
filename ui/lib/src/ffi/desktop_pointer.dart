@@ -37,8 +37,31 @@ abstract interface class DesktopPointerCursors {
   Future<void> delete(int id);
 }
 
+/// This computer's pointer held over the remote picture, from the same
+/// runners' channel: hidden, kept where it is (Windows confines it to that
+/// pixel, macOS dissociates it from the mouse, Linux grabs it, warping it
+/// back on X11 and locking it on Wayland), with the mouse's raw motion
+/// reported as it comes, summed over each turn of the runner's loop.
+abstract interface class DesktopPointerLock {
+  /// Holds the pointer until [unlock], and from then reports its motion to
+  /// [onMotion], in the mouse's counts (Windows' and Linux's raw ones, a
+  /// Mac's points in this computer's pixels), positive right and down. The
+  /// runner lets go by itself when this window loses the focus, and then
+  /// says so through [onLost]. Throws where the runner cannot hold it; a
+  /// pointer held already is held again with these callbacks.
+  Future<void> lock({
+    required void Function(int dx, int dy) onMotion,
+    required void Function() onLost,
+  });
+
+  /// Shows the pointer again where it was held and lets it move; none
+  /// held is no error.
+  Future<void> unlock();
+}
+
 /// The runners that serve `pb_mapper/desktop_pointer`: the desktop ones.
-/// Elsewhere a viewer paints the shapes the OS has no pointer for.
+/// Elsewhere a viewer paints the shapes the OS has no pointer for, and
+/// holds no pointer.
 bool get nativePointerCursors =>
     !kIsWeb &&
     switch (defaultTargetPlatform) {
@@ -52,6 +75,59 @@ bool get nativePointerCursors =>
 
 /// The channel-backed cursors.
 const DesktopPointerCursors desktopPointerCursors = _ChannelPointerCursors();
+
+/// The channel-backed pointer lock, where [nativePointerCursors] says a
+/// runner serves the channel.
+const DesktopPointerLock desktopPointerLock = _ChannelPointerLock();
+
+final class _ChannelPointerLock implements DesktopPointerLock {
+  const _ChannelPointerLock();
+
+  /// The lock's callbacks: one lock at a time, the newest's.
+  static void Function(int dx, int dy)? _onMotion;
+  static void Function()? _onLost;
+
+  static Future<Object?> _fromRunner(MethodCall call) async {
+    switch (call.method) {
+      case 'lock_motion':
+        final args = call.arguments;
+        if (args is Map) {
+          final dx = args['dx'], dy = args['dy'];
+          if (dx is int && dy is int) _onMotion?.call(dx, dy);
+        }
+      case 'lock_lost':
+        final lost = _onLost;
+        _onMotion = null;
+        _onLost = null;
+        lost?.call();
+    }
+    return null;
+  }
+
+  @override
+  Future<void> lock({
+    required void Function(int dx, int dy) onMotion,
+    required void Function() onLost,
+  }) async {
+    _onMotion = onMotion;
+    _onLost = onLost;
+    _ChannelPointerCursors._channel.setMethodCallHandler(_fromRunner);
+    try {
+      await _ChannelPointerCursors._channel.invokeMethod<void>('lock');
+    } catch (_) {
+      _onMotion = null;
+      _onLost = null;
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> unlock() {
+    _onMotion = null;
+    _onLost = null;
+    return _ChannelPointerCursors._channel.invokeMethod<void>('unlock');
+  }
+}
 
 /// The lines a notch of this computer's mouse wheel scrolls, where its
 /// runner says: Windows' `SPI_GETWHEELSCROLLLINES`, which the runner reads

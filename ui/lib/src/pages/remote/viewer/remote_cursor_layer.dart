@@ -49,7 +49,9 @@ class RemotePointerLook {
   /// [kind]: the host's shape, null from a host that sends none.
   /// [nativeBitmap]: the host's bitmap can be this computer's own pointer
   /// (`pb_mapper/desktop_pointer`). [platform]: the viewer's OS, by default
-  /// this one.
+  /// this one. [relative]: moves go as relative moves (`RemotePointerLock`),
+  /// so the local pointer has no place on the picture: it is hidden, and
+  /// the host's pointer painted where the host reports it.
   factory RemotePointerLook.of({
     required bool mouse,
     required bool controlling,
@@ -57,7 +59,14 @@ class RemotePointerLook {
     required DesktopCursorKind? kind,
     bool nativeBitmap = false,
     TargetPlatform? platform,
+    bool relative = false,
   }) {
+    if (relative) {
+      return RemotePointerLook(
+        SystemMouseCursors.none,
+        kind == null ? RemotePointerPaint.arrow : RemotePointerPaint.shape,
+      );
+    }
     if (kind == null) return generic;
     if (!mouse || !controlling) {
       return const RemotePointerLook(
@@ -164,12 +173,14 @@ final class RemotePointer extends ValueNotifier<RemotePointerLook> {
     required this.controlling,
     required this.geometry,
     required this.viewport,
+    this.relative,
     DesktopPointerCursors? native,
   }) : _native =
            native ?? (nativePointerCursors ? desktopPointerCursors : null),
        super(RemotePointerLook.generic) {
     cursor.addListener(_update);
     controlling.addListener(_update);
+    relative?.addListener(_update);
     _update();
   }
 
@@ -179,6 +190,10 @@ final class RemotePointer extends ValueNotifier<RemotePointerLook> {
 
   /// Control is live: the local pointer moves the host's.
   final ValueListenable<bool> controlling;
+
+  /// Moves go as relative moves (`RemotePointerLock.relativeListenable`):
+  /// the host's pointer is painted, the local one hidden.
+  final ValueListenable<bool>? relative;
   final ValueListenable<DesktopGeometry?> geometry;
   final RemoteViewport viewport;
 
@@ -237,6 +252,7 @@ final class RemotePointer extends ValueNotifier<RemotePointerLook> {
       atLocalPointer: _over && cursor.followsLocal,
       kind: shape?.definition.kind,
       nativeBitmap: _native != null && !_nativeFailed,
+      relative: mouse && controlling.value && (relative?.value ?? false),
     );
     _apply();
     // Another computer, or another viewer of it: its bitmaps are gone.
@@ -363,6 +379,7 @@ final class RemotePointer extends ValueNotifier<RemotePointerLook> {
     _disposed = true;
     cursor.removeListener(_update);
     controlling.removeListener(_update);
+    relative?.removeListener(_update);
     _forgetBitmaps();
     super.dispose();
   }

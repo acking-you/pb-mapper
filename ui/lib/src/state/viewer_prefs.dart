@@ -13,6 +13,24 @@ enum TouchMode { trackpad, direct }
 /// remote pixel to one device pixel.
 enum ViewerScaleMode { fit, original }
 
+/// What this device's mouse does over the picture of a computer that moves
+/// its pointer by counts (`relative_pointer`), as airhand's mouse modes.
+enum PointerMode {
+  /// Where the pointer is goes to the remote one, until the remote computer
+  /// hides its pointer while a button is held, or while the mouse moves for
+  /// 300 ms: then this computer's pointer is held over the picture and its
+  /// motion goes as it comes, until the remote pointer shows again with
+  /// every button up.
+  auto,
+
+  /// Always where the pointer is: never held.
+  desktop,
+
+  /// Always held over the picture once it is clicked, the motion going as
+  /// it comes: for games and 3D views.
+  game,
+}
+
 /// Whose input method composes what is typed on a computer.
 enum KeyboardMode {
   /// This device's: the host gets the text it commits.
@@ -85,6 +103,7 @@ class ViewerPrefs extends ChangeNotifier {
   static const _gestureSheetSeenKey = 'viewer_gestures_seen';
   static const _keyboardKey = 'viewer_keyboard';
   static const _decoderHintsKey = 'viewer_decoder_hints_dismissed';
+  static const _pointerModeKey = 'viewer_pointer_mode';
 
   /// Computers whose keyboard is kept, the most recently set: more than
   /// this device remembers.
@@ -117,6 +136,11 @@ class ViewerPrefs extends ChangeNotifier {
   /// Whether direct touch shows the on-screen mouse buttons and wheel.
   bool get virtualMouse => _virtualMouse;
   bool _virtualMouse = false;
+
+  /// What this device's mouse does over a picture whose computer moves its
+  /// pointer by counts.
+  PointerMode get pointerMode => _pointerMode;
+  PointerMode _pointerMode = PointerMode.auto;
 
   /// Whether the gesture sheet has been shown once on its own.
   bool get gestureSheetSeen => _gestureSheetSeen;
@@ -165,6 +189,11 @@ class ViewerPrefs extends ChangeNotifier {
         TouchMode.trackpad,
       );
       _virtualMouse = prefs.getBool(_virtualMouseKey) ?? false;
+      _pointerMode = _named(
+        PointerMode.values,
+        prefs.getString(_pointerModeKey),
+        PointerMode.auto,
+      );
       _gestureSheetSeen = prefs.getBool(_gestureSheetSeenKey) ?? false;
       // A hint from a build that knew others is dropped.
       for (final name in prefs.getStringList(_decoderHintsKey) ?? const []) {
@@ -249,6 +278,12 @@ class ViewerPrefs extends ChangeNotifier {
     if (v == _virtualMouse) return;
     _virtualMouse = v;
     await _changed((prefs) => prefs.setBool(_virtualMouseKey, v));
+  }
+
+  Future<void> setPointerMode(PointerMode v) async {
+    if (v == _pointerMode) return;
+    _pointerMode = v;
+    await _changed((prefs) => prefs.setString(_pointerModeKey, v.name));
   }
 
   Future<void> setGestureSheetSeen(bool v) async {

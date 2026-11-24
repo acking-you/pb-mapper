@@ -144,9 +144,17 @@ class _SampledNotifier<T> extends ValueNotifier<T> {
 /// injected for this viewer, so a report already seen is old news, however
 /// late a viewer comes to it; and while this viewer controls, Rust sets
 /// aside a report the host sampled before taking this viewer's newest move,
-/// which crossed that move on the way.
+/// which crossed that move on the way. While moves go [relative], this
+/// viewer has no place of its own for the pointer, and every report is
+/// followed.
 final class DesktopCursor extends ChangeNotifier {
   Offset _position = const Offset(0.5, 0.5);
+
+  bool _relative = false;
+
+  /// The newest report of this generation says the host's pointer is
+  /// hidden.
+  bool _hostHidden = false;
 
   /// The arrow is drawn: the host showed its cursor, or this viewer moved
   /// it since the host last said it is hidden.
@@ -177,6 +185,33 @@ final class DesktopCursor extends ChangeNotifier {
   /// The host's pointer shape; null from a host that sends none (before
   /// 0.12), or before it named one, which is drawn as the generic arrow.
   DesktopPointerShape? get shape => _shape;
+
+  /// Moves go as relative moves (`RemotePointerLock`): the host's pointer
+  /// goes where the OS takes it, and this cursor follows every report,
+  /// the newest one at once.
+  bool get relative => _relative;
+  set relative(bool value) {
+    if (value == _relative) return;
+    _relative = value;
+    final report = _report;
+    if (!value || report == null) return;
+    _position = report;
+    _local = false;
+    _shown = true;
+    notifyListeners();
+  }
+
+  /// The host's newest report of the picture's generation says its pointer
+  /// is hidden, as a game or a 3D view hides it (or that it is on another
+  /// display, which a report does not tell apart): what Auto holds this
+  /// computer's pointer for. False before a report of the generation.
+  bool get hostHidden => _hostHidden;
+
+  void _setHostHidden(bool hidden) {
+    if (hidden == _hostHidden) return;
+    _hostHidden = hidden;
+    notifyListeners();
+  }
 
   /// A local move: the arrow shows here.
   void moveTo(Offset normalized) {
@@ -216,7 +251,7 @@ final class DesktopCursor extends ChangeNotifier {
     }
     final first = g == null || g.epoch != _reportEpoch;
     _reportEpoch = g?.epoch;
-    final follow = first || !controlling || _apart(report, g);
+    final follow = first || !controlling || _relative || _apart(report, g);
     if (!follow && _shown) return false;
     if (follow) {
       _position = report;
@@ -243,6 +278,7 @@ final class DesktopCursor extends ChangeNotifier {
     _report = null;
     _reportEpoch = null;
     _local = false;
+    _setHostHidden(false);
     if (!_shown) return;
     _shown = false;
     notifyListeners();
@@ -1305,6 +1341,8 @@ class DesktopStore {
       _hasPicture = false;
       _releaseMedia();
       _cursor._reset();
+      _cursorSeq = 0;
+      _cursorSeqGeneration = -1;
       _resetPeerCursors();
       _h265Declined = false;
     }
@@ -1806,8 +1844,9 @@ class DesktopStore {
         _resendKept();
       } else if (session.controlling && geometry != null) {
         // Only the picture went stale: the newest move waits for the next
-        // fresh one.
-        final move = _takeMove()?.single;
+        // fresh one; relative motion meanwhile is dropped, as NOT_FRESH
+        // drops it.
+        final move = _takeMove()?.lastOrNull;
         _invalidateInput();
         if (move is DesktopMove) _keep(move, geometry.epoch);
       } else {
@@ -1885,6 +1924,20 @@ class DesktopStore {
   /// [cursor] draws changed.
   bool _publishCursor() {
     final view = _view, g = _geometry.value;
+    // A report counts as hidden only once one came in the picture's
+    // generation: a new generation's view says hidden of the last one's.
+    if (view != null && view.cursorSeq != _cursorSeq) {
+      _cursorSeq = view.cursorSeq;
+      _cursorSeqGeneration = view.generation;
+    }
+    final hidden =
+        view != null &&
+        g != null &&
+        view.cursorSeq > 0 &&
+        !view.cursorVisible &&
+        view.generation == g.generation &&
+        view.generation == _cursorSeqGeneration;
+    _cursor._setHostHidden(hidden);
     final report =
         view == null ||
             g == null ||
@@ -1903,6 +1956,10 @@ class DesktopStore {
       controlling: _session.value.controlling,
     );
   }
+
+  /// The view's report count as last read, and the generation it was read
+  /// in.
+  int _cursorSeq = 0, _cursorSeqGeneration = -1;
 
   int _peerCursorSeq = -1;
   int _peerCursorGen = -1;
@@ -2543,6 +2600,12 @@ class DesktopStore {
   /// The newest move not yet sent, with the input epoch it was sent in.
   (DesktopMove, int)? _pendingMove;
 
+  /// The relative moves not yet sent, summed, with the input epoch they
+  /// were sent in: they go after [_pendingMove], which a newer absolute
+  /// move replaces them with. Never kept for a fresh picture: motion the
+  /// host missed is not motion to make later.
+  (DesktopMoveBy, int)? _pendingDelta;
+
   /// The newest move refused because the picture was not fresh, or held
   /// back as it went stale, with the geometry epoch it belongs to. It goes
   /// with the next fresh picture, so the last position always reaches the
@@ -2560,6 +2623,7 @@ class DesktopStore {
   void _invalidateInput() {
     _inputEpoch++;
     _pendingMove = null;
+    _pendingDelta = null;
     _keptMove = null;
     _moveGate?.cancel();
     _moveGate = null;
@@ -2702,13 +2766,17 @@ class DesktopStore {
       _geometry.value?.epoch == geometryEpoch;
 
   /// False when dropped: not live, or [geometryEpoch] is not the current
-  /// one. Moves are coalesced to one per 4 ms; a pending or kept move goes
-  /// before any other input.
+  /// one. Moves go at most one batch per 4 ms: an absolute move replaces
+  /// the one waiting, and the relative moves waiting with it, and a
+  /// relative move adds itself to those waiting. What waits, or a kept
+  /// move, goes before any other input.
   bool send(DesktopInput input, {required int geometryEpoch}) {
     if (!_accepts(geometryEpoch)) return false;
     if (input is DesktopMove) {
       if (_moveGate != null) {
         _pendingMove = (input, _inputEpoch);
+        // Where the pointer goes now: motion before it is spent.
+        _pendingDelta = null;
         return true;
       }
       // Newer than any kept move.
@@ -2717,12 +2785,42 @@ class DesktopStore {
       _moveGate = Timer(_moveInterval, _flushMove);
       return true;
     }
+    if (input is DesktopMoveBy) {
+      // Motion from wherever the pointer is: a kept place is older.
+      _keptMove = null;
+      if (_moveGate != null) {
+        _addDelta(input);
+        return true;
+      }
+      if (!_deliver([input])) return false;
+      _moveGate = Timer(_moveInterval, _flushMove);
+      return true;
+    }
     return _deliver([...?_takeMove(), input]);
+  }
+
+  /// [by] joins the relative moves waiting behind the gate. Past one
+  /// move's bound on either axis, what waits goes now and [by] waits
+  /// alone, so no motion is lost.
+  void _addDelta(DesktopMoveBy by) {
+    final waiting = _pendingDelta;
+    if (waiting != null && waiting.$2 == _inputEpoch) {
+      final dx = waiting.$1.dx + by.dx, dy = waiting.$1.dy + by.dy;
+      const bound = DesktopMoveBy.maxDelta;
+      if (dx.abs() <= bound && dy.abs() <= bound) {
+        _pendingDelta = (DesktopMoveBy(dx, dy), _inputEpoch);
+        return;
+      }
+      final moves = _takeMove();
+      if (moves != null && !_deliver(moves)) return;
+    }
+    _pendingDelta = (by, _inputEpoch);
   }
 
   /// [inputs] go in one atomic, ordered batch, or not at all: on a refusal
   /// everything held is released, so no key stays down on the host (D16).
-  /// A pending or kept move goes first, unless [inputs] start with a move.
+  /// The moves waiting, or a kept move, go first, unless [inputs] start
+  /// with a move.
   bool sendSequence(List<DesktopInput> inputs, {required int geometryEpoch}) {
     assert(inputs.isNotEmpty && inputs.length <= kSequenceMax);
     if (inputs.isEmpty || inputs.length > kSequenceMax) return false;
@@ -2731,13 +2829,11 @@ class DesktopStore {
     // A sequence that puts the pointer somewhere is newer than any move not
     // sent yet.
     final move = inputs.first is DesktopMove ? null : unsent;
-    if (move != null && inputs.length == kSequenceMax) {
+    final fits = move == null || inputs.length + move.length <= kSequenceMax;
+    if (move != null && !fits) {
       if (!_deliver(move)) return false;
     }
-    final batch = [
-      if (move != null && inputs.length < kSequenceMax) ...move,
-      ...inputs,
-    ];
+    final batch = [if (move != null && fits) ...move, ...inputs];
     if (_deliver(batch)) return true;
     // A refusal releases what the batch would have held, but the position it
     // carried is not held input: a move kept as not fresh still goes with
@@ -2748,13 +2844,21 @@ class DesktopStore {
     return false;
   }
 
-  /// The newest move not sent yet: the pending one, else the kept one.
+  /// The moves not sent yet, in order: the pending move, else the kept
+  /// one, then the relative moves waiting since; null when none.
   List<DesktopInput>? _takeMove() {
-    final pending = _pendingMove, kept = _keptMove;
+    final pending = _pendingMove, delta = _pendingDelta, kept = _keptMove;
     _pendingMove = null;
+    _pendingDelta = null;
     _keptMove = null;
-    if (pending != null && pending.$2 == _inputEpoch) return [pending.$1];
-    return kept != null && kept.$2 == _geometry.value?.epoch ? [kept.$1] : null;
+    final moves = <DesktopInput>[
+      if (pending != null && pending.$2 == _inputEpoch)
+        pending.$1
+      else if (kept != null && kept.$2 == _geometry.value?.epoch)
+        kept.$1,
+      if (delta != null && delta.$2 == _inputEpoch) delta.$1,
+    ];
+    return moves.isEmpty ? null : moves;
   }
 
   /// The gate closes: the newest move waiting behind it goes, and opens the
@@ -2774,8 +2878,9 @@ class DesktopStore {
   }
 
   /// Rust stamps the frame id and sequence; Dart names only the generation.
-  /// `NOT_FRESH` drops the batch, but keeps its move for the next fresh
-  /// picture; any other refusal ends control.
+  /// `NOT_FRESH` drops the batch, but keeps its last move for the next
+  /// fresh picture, unless that was relative: motion the host missed is not
+  /// made later. Any other refusal ends control.
   bool _deliver(List<DesktopInput> inputs) {
     final geometry = _geometry.value;
     if (geometry == null) return false;
@@ -2783,10 +2888,13 @@ class DesktopStore {
       _api.input(geometry.generation, [for (final i in inputs) i.toJson()]);
       return true;
     } on DesktopCallException catch (e) {
+      final moved = inputs
+          .where((i) => i is DesktopMove || i is DesktopMoveBy)
+          .lastOrNull;
       if (e.code != 'NOT_FRESH') {
         _interruptInput();
-      } else if (inputs.whereType<DesktopMove>().lastOrNull case final move?) {
-        _keep(move, geometry.epoch);
+      } else if (moved is DesktopMove) {
+        _keep(moved, geometry.epoch);
       }
       return false;
     } catch (_) {
