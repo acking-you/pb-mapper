@@ -9,24 +9,31 @@
 //!
 //! - an IDR supersedes everything queued before it, and a JPEG picture any
 //!   older one;
-//! - while an IDR is awaited (after a drop, a new generation or a pause),
-//!   predicted frames are dropped and one is asked for;
-//! - when the head waited longer than `BACKLOG_AGE` behind enough units, or
-//!   the queue overflows, the consumer fell behind: the queue drops to the
-//!   next IDR, one is asked for, and the fps cap learns of it. No such drop
-//!   comes within `IDR_GRACE` of handing out an IDR, whose decode may be slow,
-//!   nor before the consumer took its first: until then the wait is the
-//!   hand-off to a consumer still attaching, so only overflow drops.
+//! - while only an IDR can be decoded (after an overflow, a new generation or
+//!   a pause), predicted frames are dropped and one is asked for;
+//! - when the head waited longer than `BACKLOG_AGE` behind enough units, the
+//!   consumer fell behind: a backlog episode opens, an IDR is asked for and
+//!   the fps cap learns of it, once. The queue is kept, and the consumer
+//!   drains it, so a consumer back from a stall shows newer and newer
+//!   pictures rather than a frozen one, until the IDR supersedes what is left.
+//!   The episode ends with that IDR, or once the head is younger than half
+//!   `BACKLOG_AGE`. No episode opens within `IDR_GRACE` of handing out an
+//!   IDR, whose decode may be slow, nor before the consumer took its first:
+//!   until then the wait is the hand-off to a consumer still attaching;
+//! - when the queue overflows, it drops to the next IDR and one is asked for,
+//!   at any time: the bound on memory and on the lag shown.
 //!
 //! The fps cap judges the consumer only from `IDR_GRACE` after its first IDR:
 //! what queued during the hand-off and its decoder's start, and an overflow
-//! then, are not its falling behind.
+//! then, are not its falling behind. The sink tells it what the consumer
+//! takes: each unit handed out, each time the consumer found nothing, and the
+//! time from each hand-off to that unit's accepted presentation.
 //!
 //! Keyframe requests go through the viewer's recovery state machine and its
 //! limiter, and the viewer tick runs the fps cap and the stall watchdog here.
 use super::{
     DecoderInfo, InputError, IntervalStats, ViewerShared,
-    fps_cap::FpsCap,
+    fps_cap::{FpsCap, Observed},
     recovery::{Recovery, STALL_WATCHDOG},
     stats::PresentStats,
 };
@@ -47,10 +54,11 @@ use std::{
 const SINK_MAX_UNITS: usize = 32;
 /// Bytes queued at most.
 const SINK_MAX_BYTES: usize = 8 * 1024 * 1024;
-/// A head older than this, with `BACKLOG_MIN_UNITS` queued, is a backlog.
+/// A head older than this, with `BACKLOG_MIN_UNITS` queued, is a backlog;
+/// one younger than half of it ends the backlog episode.
 const BACKLOG_AGE: Duration = Duration::from_millis(250);
 const BACKLOG_MIN_UNITS: usize = 3;
-/// No backlog drop this soon after an IDR was handed out, and no fps cap
+/// No backlog episode this soon after an IDR was handed out, and no fps cap
 /// judgment this soon after the first.
 const IDR_GRACE: Duration = Duration::from_millis(500);
 /// Longest decoder name kept for the overlay.
@@ -159,19 +167,10 @@ pub(super) struct SinkStats {
     pub viewer_ms: Option<u32>,
     /// Units the sink discarded without handing them out.
     pub discarded: u64,
-    /// Times the queue dropped to the next IDR, for age or overflow.
+    /// Backlog episodes and overflow drops.
     pub backlog_drops: u64,
     pub keyframes_requested: u64,
     pub decoder: DecoderInfo,
-}
-
-/// Why the queue dropped to the next IDR.
-#[derive(Clone, Copy, Debug)]
-enum Backlog {
-    /// The head waited longer than `BACKLOG_AGE`.
-    Age,
-    /// `SINK_MAX_UNITS` or `SINK_MAX_BYTES`.
-    Overflow,
 }
 
 struct SinkState {
@@ -194,7 +193,10 @@ struct SinkState {
     fps_cap: FpsCap,
     present: PresentStats,
     discarded: u64,
-    /// Times the queue dropped to the next IDR, for age or overflow.
+    /// A backlog episode is open: an IDR was asked for, and the queue drains
+    /// until it arrives or the head is fresh again.
+    backlog: bool,
+    /// Backlog episodes and overflow drops.
     backlog_drops: u64,
     /// The name and hardware flag the consumer reported; the state comes
     /// from `recovery`.
@@ -216,20 +218,26 @@ impl SinkState {
             handed: VecDeque::with_capacity(RECENT_FRAMES),
             presented: None,
             recovery: Recovery::default(),
-            fps_cap: FpsCap::new(max_fps, fps_override),
+            fps_cap: FpsCap::new(epoch, max_fps, fps_override),
             present: PresentStats::new(epoch),
             discarded: 0,
+            backlog: false,
             backlog_drops: 0,
             decoder: DecoderInfo::default(),
             decoder_error: String::new(),
         }
     }
-    /// Drops everything queued and returns how many units that was.
+    /// Drops everything queued, which ends a backlog episode, and returns how
+    /// many units that was.
     fn clear(&mut self) -> u64 {
         let dropped = self.queue.len() as u64;
         self.queue.clear();
         self.bytes = 0;
         self.discarded += dropped;
+        self.backlog = false;
+        if dropped > 0 {
+            self.fps_cap.on_cleared();
+        }
         dropped
     }
     /// Everything queued belongs to an older picture chain: start over at an IDR.
@@ -243,12 +251,15 @@ impl SinkState {
         self.bytes += unit.bytes.len();
         self.queue.push_back(unit);
     }
-    /// The consumer fell behind: the head waited longer than `BACKLOG_AGE`
-    /// with at least `BACKLOG_MIN_UNITS` queued (counting `arriving`), and the
-    /// consumer last took an IDR at least `IDR_GRACE` ago.
+    /// The consumer fell behind, outside a backlog episode: the head waited
+    /// longer than `BACKLOG_AGE` with at least `BACKLOG_MIN_UNITS` queued
+    /// (counting `arriving`), and the consumer last took an IDR at least
+    /// `IDR_GRACE` ago.
     fn backlogged(&self, now: Instant, arriving: usize) -> bool {
-        self.idr_pulled_at
-            .is_some_and(|at| now.saturating_duration_since(at) >= IDR_GRACE)
+        !self.backlog
+            && self
+                .idr_pulled_at
+                .is_some_and(|at| now.saturating_duration_since(at) >= IDR_GRACE)
             && self.queue.len() + arriving >= BACKLOG_MIN_UNITS
             && self
                 .queue
@@ -347,8 +358,9 @@ impl VideoSink {
         })
     }
 
-    /// The read task. Never blocks. Units that cannot be decoded and shown in
-    /// time are dropped here, and the sink asks for an IDR.
+    /// The read task. Never blocks. Units that cannot be decoded are dropped
+    /// here, and the sink asks for an IDR; so are all queued when the queue
+    /// overflows.
     pub(super) fn push(&self, unit: VideoUnit) {
         self.push_at(unit, Instant::now());
     }
@@ -367,6 +379,7 @@ impl VideoSink {
         if unit.generation != state.generation {
             state.restart();
             state.generation = unit.generation;
+            state.fps_cap.forget();
         }
         if unit.codec == VideoCodec::Jpeg {
             // Every JPEG stands alone: only the newest is worth showing.
@@ -389,6 +402,9 @@ impl VideoSink {
                 .last_size
                 .replace((unit.width, unit.height))
                 .is_some_and(|previous| previous != (unit.width, unit.height));
+            if resized {
+                state.fps_cap.forget();
+            }
             unit.discontinuity =
                 std::mem::take(&mut state.next_discontinuity) || superseded > 0 || resized;
             state.recovery.on_idr_received(now);
@@ -396,16 +412,17 @@ impl VideoSink {
             state.discarded += 1;
             self.request(state, KeyframeReason::Gap, now);
             return;
-        } else if state.backlogged(now, 1) {
-            state.discarded += 1;
-            self.drop_to_idr(state, Backlog::Age, now);
-            return;
-        } else if state.queue.len() >= SINK_MAX_UNITS
-            || state.bytes + unit.bytes.len() > SINK_MAX_BYTES
-        {
-            state.discarded += 1;
-            self.drop_to_idr(state, Backlog::Overflow, now);
-            return;
+        } else {
+            if state.backlogged(now, 1) {
+                self.open_backlog(state, now);
+            }
+            if state.queue.len() >= SINK_MAX_UNITS
+                || state.bytes + unit.bytes.len() > SINK_MAX_BYTES
+            {
+                state.discarded += 1;
+                self.overflow(state, now);
+                return;
+            }
         }
         state.enqueue(unit);
         drop(guard);
@@ -423,19 +440,35 @@ impl VideoSink {
         self.state.lock().recovery.on_idr_arriving();
     }
 
-    /// The consumer fell behind: drop the queue, wait for the next IDR and
-    /// ask for one, and let the fps cap know once it judges the consumer.
-    fn drop_to_idr(&self, state: &mut SinkState, cause: Backlog, now: Instant) {
-        let units = state.restart();
+    /// The consumer fell behind: ask for an IDR, which supersedes the queue
+    /// when it lands, and let the fps cap know once it judges the consumer.
+    /// The queue is kept: the consumer drains it meanwhile.
+    fn open_backlog(&self, state: &mut SinkState, now: Instant) {
+        state.backlog = true;
         state.backlog_drops += 1;
         if state.judged(now) {
-            state.fps_cap.on_backlog_drop();
+            state.fps_cap.on_backlog();
         }
         tracing::debug!(
             target: "pb_mapper_desktop::frames",
-            ?cause,
+            units = state.queue.len(),
+            "desktop_sink_backlog"
+        );
+        self.request(state, KeyframeReason::Backlog, now);
+    }
+
+    /// The queue overflowed: drop it, wait for the next IDR and ask for one,
+    /// and let the fps cap know once it judges the consumer.
+    fn overflow(&self, state: &mut SinkState, now: Instant) {
+        let units = state.restart();
+        state.backlog_drops += 1;
+        if state.judged(now) {
+            state.fps_cap.on_backlog();
+        }
+        tracing::debug!(
+            target: "pb_mapper_desktop::frames",
             units,
-            "desktop_sink_backlog_drop"
+            "desktop_sink_overflow_drop"
         );
         self.request(state, KeyframeReason::Backlog, now);
     }
@@ -453,6 +486,7 @@ impl VideoSink {
         if new_generation {
             state.restart();
             state.generation = generation;
+            state.fps_cap.forget();
         }
         state.recovery.on_host_state(available, new_generation, now);
     }
@@ -507,10 +541,14 @@ impl VideoSink {
         let mut guard = self.state.lock();
         let state = &mut *guard;
         let cap = if streaming && !paused && state.judged(now) {
-            let presented_fps = state.present.presented_fps(now);
-            state
-                .fps_cap
-                .tick(now, presented_fps, state.queue.len(), direct, quality)
+            let observed = Observed {
+                presented_fps: state.present.presented_fps(now),
+                queued: state.queue.len(),
+                head_wait: state.queue.front().map_or(Duration::ZERO, |head| {
+                    now.saturating_duration_since(head.received_at)
+                }),
+            };
+            state.fps_cap.tick(now, observed, direct, quality)
         } else {
             state.fps_cap.freeze();
             None
@@ -597,15 +635,27 @@ impl VideoSink {
     /// nothing is ready.
     fn take(&self, state: &mut SinkState, now: Instant, capacity: usize) -> Option<Pull> {
         if state.backlogged(now, 0) {
-            self.drop_to_idr(state, Backlog::Age, now);
-            return None;
+            self.open_backlog(state, now);
         }
-        let len = state.queue.front()?.bytes.len();
+        let Some(head) = state.queue.front() else {
+            state.fps_cap.on_starved();
+            return None;
+        };
+        let len = head.bytes.len();
         if len > capacity {
             return Some(Pull::NeedCapacity(len));
         }
         let unit = state.queue.pop_front()?;
         state.bytes -= len;
+        state.fps_cap.on_pull();
+        if state.backlog
+            && state.queue.front().is_none_or(|head| {
+                now.saturating_duration_since(head.received_at) < BACKLOG_AGE / 2
+            })
+        {
+            // Drained: the head is fresh again.
+            state.backlog = false;
+        }
         if state.handed.len() == RECENT_FRAMES {
             state.handed.pop_front();
         }
@@ -733,6 +783,9 @@ impl VideoConsumer {
         state
             .present
             .record(now, now.saturating_duration_since(handed.received_at));
+        state
+            .fps_cap
+            .on_presented(now, now.saturating_duration_since(handed.handed_at));
         state.recovery.on_presented(generation, frame_id);
         tracing::trace!(
             target: "pb_mapper_desktop::frames",
@@ -940,89 +993,220 @@ mod tests {
         );
     }
 
+    /// A sink on a synthetic clock, streaming generation 1, and its consumer.
+    struct Clocked {
+        sink: Arc<VideoSink>,
+        consumer: VideoConsumer,
+        start: Instant,
+    }
+    impl Clocked {
+        fn new() -> Self {
+            let sink = VideoSink::detached_for_test();
+            let consumer = sink.attach().unwrap();
+            let start = Instant::now();
+            sink.on_state_at(1, true, start);
+            Self {
+                sink,
+                consumer,
+                start,
+            }
+        }
+        fn at(&self, millis: u64) -> Instant {
+            self.start + Duration::from_millis(millis)
+        }
+        /// A unit received at `millis`, pushed then.
+        fn push(&self, frame_id: u64, keyframe: bool, millis: u64) {
+            let at = self.at(millis);
+            self.sink.push_at(video(1, frame_id, keyframe, at), at);
+        }
+        fn pull(&self, millis: u64) -> Option<VideoUnit> {
+            match self.consumer.pull_at(self.at(millis), 1 << 20) {
+                Some(Pull::Unit(unit)) => Some(unit),
+                None => None,
+                Some(other) => panic!("expected a unit, got {other:?}"),
+            }
+        }
+        fn pulled(&self, millis: u64) -> Option<u64> {
+            self.pull(millis).map(|unit| unit.frame_id)
+        }
+        fn presented(&self, frame_id: u64, millis: u64) -> bool {
+            self.consumer.presented_at(1, frame_id, self.at(millis))
+        }
+        fn tick(&self, millis: u64) -> Option<u32> {
+            self.sink
+                .tick(self.at(millis), true, true, QualityPreset::Balanced)
+        }
+        /// Backlog episodes and drops, and keyframes asked for.
+        fn counts(&self) -> (u64, u64) {
+            let stats = self.sink.snapshot(self.start);
+            (stats.backlog_drops, stats.keyframes_requested)
+        }
+        /// The awaited IDR, if any, was presented.
+        fn live(&self) -> bool {
+            self.sink.state.lock().recovery.live()
+        }
+    }
+
+    /// A consumer that fell behind drains the queue in order while the IDR
+    /// asked for is on its way, instead of freezing until it lands; the IDR
+    /// then supersedes what is left. One request and one word to the fps cap
+    /// per episode.
     #[test]
-    fn backlog_drops_to_next_idr_with_grace_and_limiter_backoff() {
-        let sink = VideoSink::detached_for_test();
-        let consumer = sink.attach().unwrap();
-        let start = Instant::now();
-        let at = |millis: u64| start + Duration::from_millis(millis);
-        // A unit received at `millis`, pushed then.
-        let push = |frame_id: u64, keyframe: bool, millis: u64| {
-            sink.push_at(video(1, frame_id, keyframe, at(millis)), at(millis));
-        };
-        let pull_at = |millis: u64| match consumer.pull_at(at(millis), 1 << 20) {
-            Some(Pull::Unit(unit)) => Some(unit),
-            None => None,
-            Some(other) => panic!("expected a unit, got {other:?}"),
-        };
-        let tick = |millis: u64| sink.tick(at(millis), true, true, QualityPreset::Balanced);
-        let requested = || sink.snapshot(start).keyframes_requested;
-        let backlog_drops = || sink.snapshot(start).backlog_drops;
+    fn an_age_backlog_drains_while_one_idr_is_asked_for() {
+        let clock = Clocked::new();
 
         // Streaming, with the first IDR shown.
-        sink.on_state_at(1, true, at(0));
-        push(1, true, 0);
-        assert!(pull_at(0).is_some_and(|unit| unit.discontinuity));
-        assert!(consumer.presented_at(1, 1, at(0)));
+        clock.push(1, true, 0);
+        assert!(clock.pull(0).is_some_and(|unit| unit.discontinuity));
+        assert!(clock.presented(1, 0));
+        assert!(clock.live());
 
         // A burst of fresh units is not a backlog, however many.
         for frame_id in 2..=9 {
-            push(frame_id, false, 1000);
+            clock.push(frame_id, false, 1000);
         }
         for frame_id in 2..=9 {
-            assert_eq!(pull_at(1010).map(|unit| unit.frame_id), Some(frame_id));
+            assert_eq!(clock.pulled(1010), Some(frame_id));
         }
-        assert!(consumer.presented_at(1, 9, at(1010)));
+        assert!(clock.presented(9, 1010));
 
         // Within IDR_GRACE of handing out an IDR, old units wait for the
-        // consumer; once it passed, the queue drops to the next IDR at push.
-        push(10, true, 2000);
-        assert!(pull_at(2000).is_some());
-        assert!(consumer.presented_at(1, 10, at(2000)));
-        push(11, false, 2000);
-        push(12, false, 2000);
-        push(13, false, 2300);
-        assert_eq!((backlog_drops(), requested()), (0, 0));
-        push(14, false, 2600);
-        assert_eq!((backlog_drops(), requested()), (1, 1));
-        assert!(pull_at(2600).is_none());
+        // consumer; once it passed, a backlog episode opens at push: an IDR
+        // is asked for, and the queue is kept.
+        clock.push(10, true, 2000);
+        assert_eq!(clock.pulled(2000), Some(10));
+        assert!(clock.presented(10, 2000));
+        clock.push(11, false, 2000);
+        clock.push(12, false, 2000);
+        clock.push(13, false, 2300);
+        assert_eq!(clock.counts(), (0, 0));
+        clock.push(14, false, 2600);
+        assert_eq!(clock.counts(), (1, 1));
+        // Units go on queueing behind it, and none asks again.
+        clock.push(15, false, 2650);
+        assert_eq!(clock.counts(), (1, 1));
+        // The fps cap learned of it.
+        assert_eq!(clock.tick(3099), Some(30));
 
-        // Until an IDR comes, predicted frames are dropped, and the request
-        // is repeated after 0.5, 1, 2, 4 and 4 s. The drop also capped fps.
-        push(15, false, 2650);
-        assert_eq!(requested(), 1);
-        assert_eq!(tick(3099), Some(30));
+        // The consumer drains the queue in order. Its pictures are accepted,
+        // but they do not end the recovery, which waits for the IDR.
+        assert_eq!(clock.pulled(3100), Some(11));
+        assert!(clock.presented(11, 3100));
+        assert!(!clock.live());
+        clock.push(16, false, 3150);
+        assert_eq!(clock.counts(), (1, 1));
+
+        // The IDR supersedes what is left and says so, which ends the
+        // episode; presenting it ends the recovery.
+        clock.push(17, true, 3200);
+        let idr = clock.pull(3200).unwrap();
+        assert!(idr.frame_id == 17 && idr.keyframe && idr.discontinuity);
+        assert_eq!(clock.pulled(3200), None);
+        assert!(!clock.live());
+        assert!(clock.presented(17, 3210));
+        assert!(clock.live());
+        // The fps cap was told once: nothing lowers it again.
+        assert_eq!(clock.tick(4100), None);
+
+        // The age rule also runs when the consumer pulls, from IDR_GRACE
+        // after the IDR: a second episode and a second request, and the
+        // consumer still gets the head.
+        for frame_id in 18..=20 {
+            clock.push(frame_id, false, 4200);
+        }
+        clock.push(21, false, 4790);
+        assert_eq!(clock.pulled(4800), Some(18));
+        assert_eq!(clock.counts(), (2, 2));
+        // It ends once the head is younger than half the backlog age, so the
+        // next backlog is another episode; its request waits for the
+        // limiter.
+        assert_eq!(clock.pulled(4800), Some(19));
+        assert_eq!(clock.pulled(4800), Some(20));
+        clock.push(22, false, 4800);
+        clock.push(23, false, 4800);
+        assert_eq!(clock.pulled(5100), Some(21));
+        assert_eq!(clock.counts(), (3, 2));
+    }
+
+    /// The queue's bound is unchanged: past 32 units it drops to the next
+    /// IDR, discards predicted frames until one comes, and asks again after
+    /// 0.5, 1, 2, 4 and 4 s.
+    #[test]
+    fn overflow_drops_to_the_next_idr_with_limiter_backoff() {
+        let clock = Clocked::new();
+        clock.push(1, true, 0);
+        assert!(clock.pull(0).is_some());
+        assert!(clock.presented(1, 0));
+
+        for frame_id in 2..=33 {
+            clock.push(frame_id, false, 1000);
+        }
+        assert_eq!(clock.counts(), (0, 0));
+        clock.push(34, false, 1000);
+        assert_eq!(clock.counts(), (1, 1));
+        assert_eq!(clock.pulled(1000), None);
+        clock.push(35, false, 1050);
+        assert_eq!(clock.pulled(1050), None);
+        assert_eq!(clock.counts(), (1, 1));
+        // The drop also capped fps.
+        assert_eq!(clock.tick(1499), Some(30));
         for (quiet, due) in [
-            (3099, 3100),
-            (4099, 4100),
-            (6099, 6100),
-            (10_099, 10_100),
-            (14_099, 14_100),
+            (1499, 1500),
+            (2499, 2500),
+            (4499, 4500),
+            (8499, 8500),
+            (12_499, 12_500),
         ] {
-            let before = requested();
-            tick(quiet);
-            assert_eq!(requested(), before);
-            tick(due);
-            assert_eq!(requested(), before + 1);
+            let (_, before) = clock.counts();
+            clock.tick(quiet);
+            assert_eq!(clock.counts().1, before);
+            clock.tick(due);
+            assert_eq!(clock.counts().1, before + 1);
         }
 
-        // An arriving IDR supersedes what is queued and says so.
-        push(16, true, 14_200);
-        push(17, false, 14_200);
-        push(18, false, 14_200);
-        push(19, true, 14_210);
-        let idr = pull_at(14_210).unwrap();
-        assert!(idr.frame_id == 19 && idr.keyframe && idr.discontinuity);
-        assert!(pull_at(14_210).is_none());
-        assert!(consumer.presented_at(1, 19, at(14_210)));
+        clock.push(36, true, 12_600);
+        let idr = clock.pull(12_600).unwrap();
+        assert!(idr.frame_id == 36 && idr.discontinuity);
+        assert!(!clock.live());
+        assert!(clock.presented(36, 12_610));
+        assert!(clock.live());
+    }
 
-        // The age rule also runs when the consumer pulls.
-        for frame_id in 20..=22 {
-            push(frame_id, false, 14_220);
+    /// Under backlog the cap follows what the consumer takes, measured from
+    /// its pulls, rather than halving from what it presented: 25 fps
+    /// arriving, a consumer that takes one unit every 125 ms and presents it
+    /// 120 ms later.
+    #[test]
+    fn the_cap_follows_what_the_consumer_takes_under_backlog() {
+        let clock = Clocked::new();
+        let mut presenting = VecDeque::new();
+        let mut caps = Vec::new();
+        for millis in 0..=1500u64 {
+            if millis.is_multiple_of(40) {
+                clock.push(millis / 40 + 1, millis == 0, millis);
+            }
+            if presenting.front().is_some_and(|(_, due)| *due == millis)
+                && let Some((frame_id, _)) = presenting.pop_front()
+            {
+                assert!(clock.presented(frame_id, millis));
+            }
+            if millis.is_multiple_of(125) {
+                let unit = clock.pull(millis).unwrap();
+                presenting.push_back((unit.frame_id, millis + 120));
+            }
+            if millis.is_multiple_of(250) && millis > 0 {
+                caps.push(clock.tick(millis));
+            }
         }
-        assert!(pull_at(14_800).is_none());
-        assert_eq!(backlog_drops(), 2);
-        assert_eq!(requested(), 7);
+        // The consumer is judged from 500 ms, where the take opened a
+        // backlog episode: presentations halve the cap, with nothing measured
+        // yet. A second of busy pulls (8 a second) then takes it to 90% of
+        // that, where presentations alone could only halve it again, to 15.
+        assert_eq!(
+            caps,
+            [None, Some(30), None, None, None, Some(7)],
+            "{caps:?}"
+        );
     }
 
     /// The session streams before its consumer attaches, and the consumer's

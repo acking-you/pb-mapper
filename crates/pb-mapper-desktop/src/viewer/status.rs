@@ -224,6 +224,9 @@ pub struct ViewerStats {
     pub rate_model: RateModel,
     pub keyframes: u64,
     pub keyframes_requested: u64,
+    /// Times the decoder fell behind: a backlog episode (the sink's oldest
+    /// unit waited too long, so it asked for an IDR and drained the queue
+    /// meanwhile) or an overflow that dropped the queue to the next IDR.
     pub backlog_drops: u64,
     pub dropped_frames: u64,
     pub present_interval: IntervalStats,
