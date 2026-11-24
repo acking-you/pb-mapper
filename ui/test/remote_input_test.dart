@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -217,6 +218,82 @@ void main() {
       h.dispose();
     },
   );
+
+  testWidgets('the frame that lays the stage out anew draws the cursor where '
+      'the picture now shows it', (tester) async {
+    final h = await ViewerHarness.live(tester);
+    h.api.viewValue = DesktopView(
+      generation: 1,
+      presentedFrameId: 1,
+      cursorSeq: 1,
+      displayWidth: 1920,
+      displayHeight: 1080,
+      videoWidth: 1920,
+      videoHeight: 1080,
+      cursorX: 960,
+      cursorY: 540,
+      state: 2,
+      cursorVisible: true,
+      controlling: true,
+      controlAllowed: true,
+      fresh: true,
+    );
+    final stage = ValueNotifier(const Size(800, 600));
+    addTearDown(stage.dispose);
+    await tester.pumpWidget(
+      Align(
+        alignment: Alignment.topLeft,
+        child: ValueListenableBuilder(
+          valueListenable: stage,
+          builder: (context, size, _) => SizedBox.fromSize(
+            size: size,
+            // As the surface does: the viewport is laid out with the
+            // stage, and tells its listeners only after the frame.
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                h.viewport.layout(constraints.biggest);
+                return RemoteCursorLayer(viewport: h.viewport, input: h.input);
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final boundary = tester.renderObject<RenderRepaintBoundary>(
+      find.descendant(
+        of: find.byType(RemoteCursorLayer),
+        matching: find.byType(RepaintBoundary),
+      ),
+    );
+    // The alpha at [at] in what the layer's last paint drew: its pictures
+    // as they are, not a paint made for the check.
+    Future<int> drawn(Offset at) async {
+      final pictures = boundary.debugLayer! as OffsetLayer;
+      final bytes = await tester.runAsync(() async {
+        final image = await pictures.toImage(Offset.zero & boundary.size);
+        try {
+          return await image.toByteData();
+        } finally {
+          image.dispose();
+        }
+      });
+      final width = boundary.size.width.ceil();
+      return bytes!.getUint8((at.dy.round() * width + at.dx.round()) * 4 + 3);
+    }
+
+    // Inside the arrow, whose tip is at the cursor.
+    const inside = Offset(3, 9);
+    const middle = Offset(0.5, 0.5);
+    expect(h.viewport.toLocal(middle), const Offset(400, 300));
+    expect(await drawn(const Offset(400, 300) + inside), 255);
+
+    stage.value = const Size(400, 300);
+    await tester.pump();
+    expect(h.viewport.toLocal(middle), const Offset(200, 150));
+    expect(await drawn(const Offset(200, 150) + inside), 255);
+    h.dispose();
+  });
 
   testWidgets(
     "the viewer's cursor is its own: no wait and no reopened viewer hands it "

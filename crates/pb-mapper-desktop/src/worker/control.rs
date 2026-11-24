@@ -1,6 +1,6 @@
 //! Thread C's input lane and the control grant.
 
-use super::{Clock, Engine, LeftPress, link_lost};
+use super::{Clock, Engine, LeftPress, ShapeLook, link_lost};
 use crate::{
     Backend, Button, Input, InputEvent,
     idr::IdrReason,
@@ -394,6 +394,12 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                         slot.cursor.injected(x, y);
                         self.last_pointer_owner = Some((slot.slot, x, y));
                         self.mover_moved_since_sample = true;
+                        // The shape the move gives the pointer goes to this
+                        // controller soon after the app sets it, not at the
+                        // next sample.
+                        if slot.cursor_shapes && self.cursor_shapes {
+                            self.shape_due = Some(ShapeLook::after_move(self.shape_due, now));
+                        }
                     }
                 }
                 if let Input::Move { x, y } = event.input {
