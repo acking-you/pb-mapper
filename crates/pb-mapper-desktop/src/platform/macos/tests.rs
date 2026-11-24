@@ -5,7 +5,7 @@
 #![cfg(target_os = "macos")]
 
 use super::{
-    desktop,
+    cf, desktop,
     encoder::{Admit, Encoder, Options},
     layout,
     modes::MacModes,
@@ -63,7 +63,8 @@ fn picture(width: usize, height: usize) -> CFRetained<CVPixelBuffer> {
 /// encoder drops, or outputs later than `LATE_OUTPUT` and so discards (a
 /// cold software encoder on a busy runner can take that long for its
 /// first), leaves no output and a keyframe due: it is submitted again as
-/// thread C would, as a keyframe.
+/// thread C would, as a keyframe. The first picture is new, and each repeat
+/// of it after it came out is a duplicate.
 #[test]
 fn keyframes_come_only_when_asked_and_carry_their_parameter_sets() {
     let wake = Wake::new();
@@ -120,6 +121,7 @@ fn keyframes_come_only_when_asked_and_carry_their_parameter_sets() {
         let parsed = AccessUnit::parse(&unit.bytes, &mut ranges).unwrap();
         assert_eq!(parsed.keyframe(VideoCodec::H264), keyframe, "frame {frame}");
         assert_eq!(unit.format.keyframe, keyframe, "frame {frame}");
+        assert_eq!(unit.format.duplicate, frame > 0, "frame {frame}");
         assert_eq!((unit.format.width, unit.format.height), (640, 360));
         if keyframe {
             let mut sets = ParameterSets::new(VideoCodec::H264);
@@ -423,10 +425,11 @@ fn a_bitrate_set_during_an_encode_returns_at_once_and_reaches_the_session() {
 }
 
 /// A low-latency session lets rate control give a picture a QP up to 51,
-/// so that it codes a picture it would otherwise drop. Without the bound a
-/// low-latency session reads back none (VideoToolbox keeps its own, lower);
-/// standard rate control's own already reads back 51. A Mac that refuses
-/// low latency, or reads back no bound, is reported.
+/// so that it codes a picture it would otherwise drop. Without the bound an
+/// M6's low-latency session reads back -1 (VideoToolbox keeps its own,
+/// lower). A Mac that refuses low latency, one older than macOS 12, which
+/// has no such bound, and one whose encoder refuses it, which the host
+/// tolerates, are reported.
 #[test]
 fn a_low_latency_session_lets_rate_control_reach_qp_51() {
     let wake = Wake::new();
@@ -452,15 +455,17 @@ fn a_low_latency_session_lets_rate_control_reach_qp_51() {
             return;
         }
     };
-    let Some(qp) = bound.max_qp() else {
+    // Spelled here as well, so that a misspelt key in the encoder fails.
+    let known = cf::symbol(c"kVTCompressionPropertyKey_MaxAllowedFrameQP").is_some();
+    if !known || bound.qp_refused() {
         let _ = writeln!(
             std::io::stderr(),
-            "{}: this Mac's encoder reads back no QP bound",
+            "{}: this Mac has no QP bound, or its encoder refuses it",
             module_path!()
         );
         return;
-    };
-    assert_eq!(qp, 51);
+    }
+    assert_eq!(bound.max_qp(), Some(51));
     assert_ne!(unbound.max_qp(), Some(51));
 }
 

@@ -65,7 +65,8 @@ use std::{
 struct Pending {
     token: u64,
     at: Instant,
-    unit: Unit,
+    /// The picture it carries (`Resubmit::submitted`).
+    picture: u64,
     keyframe: bool,
     pts_us: u64,
 }
@@ -85,7 +86,8 @@ struct State {
     keyframe_due: bool,
     /// Outputs VideoToolbox flagged `FrameDropped`, ever.
     dropped: u64,
-    /// The last picture is due again: the newest unit was dropped.
+    /// Which picture each unit carries and which the encoder kept, and
+    /// whether the last is due again: the newest unit was dropped.
     resubmit: Resubmit,
     /// What the output callback converts into, reused.
     sample: Vec<u8>,
@@ -149,6 +151,20 @@ impl State {
         self.job.is_some() || self.in_call
     }
 
+    /// Queue unit `token`, a `unit`, with the job: its dwell, lateness and
+    /// stall count from `now`, and a synchronous encoder outputs inside the
+    /// thread's call. It replaces any unit dropped before it.
+    fn hand(&mut self, token: u64, now: Instant, unit: Unit, keyframe: bool, pts_us: u64) {
+        let picture = self.resubmit.submitted(unit);
+        self.pending.push_back(Pending {
+            token,
+            at: now,
+            picture,
+            keyframe,
+            pts_us,
+        });
+    }
+
     /// Forget unit `token`, which never reached VideoToolbox or which it
     /// refused.
     fn forget(&mut self, token: u64) {
@@ -196,7 +212,9 @@ struct Shared {
     codec: VideoCodec,
     size: (u32, u32),
     gop: u32,
-    /// DataRateLimits caps the mean bitrate.
+    /// DataRateLimits caps the mean bitrate: always, but in a measurement
+    /// that leaves it off.
+    #[cfg(test)]
     capped: bool,
     /// VideoToolbox measures each unit's luma error.
     #[cfg(test)]
@@ -210,6 +228,7 @@ pub(super) struct Options {
     pub low_latency: bool,
     /// DataRateLimits caps the mean: always, but in a measurement that
     /// leaves it off.
+    #[cfg(test)]
     pub capped: bool,
     /// VideoToolbox measures each unit's luma error (`Probe::quality`).
     #[cfg(test)]
@@ -223,6 +242,7 @@ impl Options {
     fn new(low_latency: bool) -> Self {
         Self {
             low_latency,
+            #[cfg(test)]
             capped: true,
             #[cfg(test)]
             quality: false,
@@ -271,6 +291,9 @@ pub(crate) struct Encoder {
     /// The session, for a test to read back while the submit thread idles.
     #[cfg(test)]
     session: CFRetained<VTCompressionSession>,
+    /// VideoToolbox refused the QP bound.
+    #[cfg(test)]
+    qp_refused: bool,
 }
 
 fn codec_type(codec: VideoCodec) -> Result<CMVideoCodecType> {
@@ -288,7 +311,7 @@ const CONSTRAINED_HIGH: &std::ffi::CStr = c"kVTProfileLevel_H264_ConstrainedHigh
 /// Of macOS 12.0: the highest QP rate control may give a picture. Under low
 /// latency VideoToolbox's own is lower, and a picture it cannot fit at that
 /// QP is dropped: on an M6, fresh 1080p noise at 4 Mbit/s and 60 FPS lost
-/// 168 of 180 H.264 pictures with its own and 90 with 51, and H.265 135 and
+/// 169 of 180 H.264 pictures with its own and 90 with 51, and H.265 135 and
 /// 90 (`video_toolbox_drops`). 51 is the top of the 8-bit H.264 and H.265
 /// range.
 const MAX_QP: &std::ffi::CStr = c"kVTCompressionPropertyKey_MaxAllowedFrameQP";
@@ -504,6 +527,7 @@ impl Encoder {
             codec,
             size: (width, height),
             gop: 0,
+            #[cfg(test)]
             capped: options.capped,
             #[cfg(test)]
             quality: options.quality,
@@ -513,9 +537,13 @@ impl Encoder {
         // the log.
         let (mut capped, mut max_qp) = (false, false);
         #[cfg(test)]
-        let bound_qp = options.max_qp;
+        let (cap, bound_qp) = (options.capped, options.max_qp);
         #[cfg(not(test))]
-        let bound_qp = true;
+        let (cap, bound_qp) = (true, true);
+        // Whether VideoToolbox refused the QP bound, which a test tells from
+        // a session that never asked for it.
+        #[cfg(test)]
+        let mut qp_refused = false;
         let configured = (|| {
             // SAFETY: VideoToolbox's and Core Video's static keys and values.
             unsafe {
@@ -559,7 +587,7 @@ impl Encoder {
                     &cf::number(i64::from(bitrate)),
                 )?;
                 // A cap the session may not take; the mean still holds.
-                capped = options.capped
+                capped = cap
                     && set(
                         &session,
                         kVTCompressionPropertyKey_DataRateLimits,
@@ -570,8 +598,14 @@ impl Encoder {
                 // an encoder that refuses it keeps its own.
                 max_qp = low_latency
                     && bound_qp
-                    && cf::symbol(MAX_QP)
-                        .is_some_and(|key| set(&session, key, &cf::number(MAX_QP_VALUE)).is_ok());
+                    && cf::symbol(MAX_QP).is_some_and(|key| {
+                        let taken = set(&session, key, &cf::number(MAX_QP_VALUE)).is_ok();
+                        #[cfg(test)]
+                        {
+                            qp_refused = !taken;
+                        }
+                        taken
+                    });
                 #[cfg(test)]
                 if options.quality {
                     let key = cf::symbol(c"kVTCompressionPropertyKey_CalculateMeanSquaredError")
@@ -670,6 +704,8 @@ impl Encoder {
             submit: Some(submit),
             #[cfg(test)]
             session,
+            #[cfg(test)]
+            qp_refused,
         })
     }
 
@@ -737,8 +773,9 @@ impl Encoder {
         self.shared.state.lock().keyframe_due
     }
 
-    /// The newest unit was dropped: the next submit sends the last picture
-    /// again, as a new one, unless a new picture came.
+    /// The newest unit was dropped, and its picture never kept: the next
+    /// submit sends the last picture again, as a new one, unless a new
+    /// picture came.
     pub(crate) fn take_resubmit(&self) -> bool {
         self.shared.state.lock().resubmit.take()
     }
@@ -765,16 +802,7 @@ impl Encoder {
         self.pts_us = pts_us;
         self.next_token += 1;
         let token = self.next_token;
-        // Queued with the job: its dwell, lateness and stall count from now,
-        // and a synchronous encoder outputs inside the thread's call.
-        state.pending.push_back(Pending {
-            token,
-            at: now,
-            unit,
-            keyframe,
-            pts_us,
-        });
-        state.resubmit.submitted(unit);
+        state.hand(token, now, unit, keyframe, pts_us);
         state.gate.peak_in_flight = state.gate.peak_in_flight.max(state.in_flight());
         state.job = Some(Job {
             picture: picture.retain(),
@@ -883,11 +911,17 @@ impl Encoder {
     }
 
     /// The highest QP the session's rate control may give a picture, read
-    /// back while the submit thread idles; `None` where it has no bound of
-    /// ours.
+    /// back while the submit thread idles; `None` where it reads back none.
     #[cfg(test)]
     pub(super) fn max_qp(&self) -> Option<i64> {
         get::<CFNumber>(&self.session, cf::symbol(MAX_QP)?).and_then(|qp| qp.as_i64())
+    }
+
+    /// VideoToolbox refused the QP bound, which this encoder then runs
+    /// without.
+    #[cfg(test)]
+    pub(super) fn qp_refused(&self) -> bool {
+        self.qp_refused
     }
 
     /// Outputs VideoToolbox dropped, ever.
@@ -992,8 +1026,11 @@ fn serve(owned: SendSession, shared: &Shared) {
             // Off the main thread, with no pool of its own: VideoToolbox may
             // autorelease.
             objc2::rc::autoreleasepool(|_| {
-                let refused =
-                    rate.and_then(|bitrate| apply(&session, bitrate, shared.capped).err());
+                #[cfg(test)]
+                let capped = shared.capped;
+                #[cfg(not(test))]
+                let capped = true;
+                let refused = rate.and_then(|bitrate| apply(&session, bitrate, capped).err());
                 let encoded = job.filter(|_| refused.is_none()).map(|job| {
                     let started = Instant::now();
                     let status = encode_job(&session, &keyframe, &job);
@@ -1347,12 +1384,12 @@ fn receive(
     let previous = state.last_output.replace(now);
     let Some(sample) = sample.filter(|_| !flags.contains(VTEncodeInfoFlags::FrameDropped)) else {
         // Dropped: what follows still decodes; a keyframe asked for is
-        // asked for again, and the newest picture is sent again, as a later
-        // unit in flight would have replaced it (the mailbox's unit is
-        // pending too).
+        // asked for again, and the newest picture is sent again unless a
+        // later unit in flight replaces it (the mailbox's unit is pending
+        // too).
         state.dropped += 1;
-        let newest = state.pending.is_empty();
-        let resubmit = state.resubmit.dropped(pending.unit, newest);
+        let last = state.pending.is_empty();
+        let resubmit = state.resubmit.dropped(pending.picture, last);
         let keyframe = pending.keyframe && !std::mem::replace(&mut state.keyframe_due, true);
         return keyframe || resubmit;
     };
@@ -1380,7 +1417,7 @@ fn receive(
     match converted {
         Ok(bytes) => {
             state.wait_independent = false;
-            state.resubmit.kept(pending.unit);
+            let duplicate = state.resubmit.kept(pending.picture);
             #[cfg(test)]
             if shared.quality
                 && let Some(error) = luma_error(sample)
@@ -1395,7 +1432,7 @@ fn receive(
                     height: shared.size.1,
                     keyframe,
                     pts_us: pending.pts_us,
-                    duplicate: pending.unit.duplicate(),
+                    duplicate,
                     encode_us: u32::try_from(encode_us).unwrap_or(u32::MAX),
                     gop: shared.gop,
                 },
@@ -1405,4 +1442,99 @@ fn receive(
         Err(failure) => state.failure = Some(failure.to_string()),
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{codec::resubmit::MAX_RESUBMITS, scheduler::Wake};
+
+    /// A session's shared state with no session behind it: the test hands
+    /// units over as `encode` does and reports their outputs as
+    /// VideoToolbox's callback would.
+    struct Detached {
+        shared: Shared,
+        next_token: u64,
+    }
+
+    impl Detached {
+        fn new() -> Self {
+            Self {
+                shared: Shared {
+                    state: Mutex::new(State::default()),
+                    signal: Condvar::new(),
+                    waker: Waker(Wake::new()),
+                    codec: VideoCodec::H264,
+                    size: (640, 360),
+                    gop: 0,
+                    capped: true,
+                    quality: false,
+                },
+                next_token: 0,
+            }
+        }
+
+        /// Hand a `unit` over, as `encode` does: its token.
+        fn hand(&mut self, unit: Unit) -> u64 {
+            self.next_token += 1;
+            let token = self.next_token;
+            let mut state = self.shared.state.lock();
+            state.hand(token, Instant::now(), unit, false, token);
+            token
+        }
+
+        /// VideoToolbox dropped unit `token`: whether thread C is woken.
+        fn dropped(&self, token: u64) -> bool {
+            receive(
+                &self.shared,
+                token,
+                0,
+                VTEncodeInfoFlags::FrameDropped,
+                None,
+            )
+        }
+
+        /// What `take_resubmit` gives thread C.
+        fn take(&self) -> bool {
+            self.shared.state.lock().resubmit.take()
+        }
+    }
+
+    /// The output callback wakes thread C for a resubmit when VideoToolbox
+    /// drops the last unit handed over, not while a later one, the
+    /// mailbox's included, is pending; at most twice a picture, and not for
+    /// the liveness repeat after. It counts every drop.
+    #[test]
+    fn a_dropped_last_unit_wakes_thread_c_for_a_resubmit() {
+        let mut feed = Detached::new();
+        let only = feed.hand(Unit::Fresh);
+        assert!(feed.dropped(only) && feed.take());
+        // One in VideoToolbox, one in the mailbox.
+        let (first, second) = (feed.hand(Unit::Fresh), feed.hand(Unit::Fresh));
+        assert!(!feed.dropped(first) && !feed.take());
+        assert!(feed.dropped(second) && feed.take());
+        for made in 1..=MAX_RESUBMITS {
+            let again = feed.hand(Unit::Resubmit);
+            assert_eq!(feed.dropped(again), made < MAX_RESUBMITS, "{made}");
+            assert_eq!(feed.take(), made < MAX_RESUBMITS);
+        }
+        let repeat = feed.hand(Unit::Repeat);
+        assert!(!feed.dropped(repeat) && !feed.take());
+        let state = feed.shared.state.lock();
+        assert_eq!(state.dropped, 6);
+        assert!(state.pending.is_empty() && state.failure.is_none());
+    }
+
+    /// A drop reported after thread C took the flag and before it handed
+    /// the next unit over leaves nothing due once that unit is handed over.
+    #[test]
+    fn a_unit_handed_over_after_a_drop_cancels_its_resubmit() {
+        let mut feed = Detached::new();
+        let dropped = feed.hand(Unit::Fresh);
+        assert!(!feed.take());
+        assert!(feed.dropped(dropped));
+        feed.hand(Unit::Fresh);
+        assert!(!feed.take());
+        assert!(!feed.shared.state.lock().resubmit.due());
+    }
 }
