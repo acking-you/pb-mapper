@@ -241,10 +241,10 @@ impl Outbound {
         self.update(|slots| slots.lifecycle = Some(lifecycle));
     }
     /// Only the sink's keyframe limiter calls this. `discarding`: predicted
-    /// frames are thrown away until the next IDR, so the request names the
+    /// frames are of no use before the next IDR, so the request names the
     /// last seq read, for a host that reads it. A request that replaces one
     /// not yet written keeps its seq when it names none: the frames are still
-    /// thrown away.
+    /// of no use.
     pub fn keyframe(&self, reason: KeyframeReason, discarding: bool) {
         let keyframe_seq = self.keyframe_seq;
         self.update(|slots| {

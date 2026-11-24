@@ -271,12 +271,16 @@ impl SinkState {
                 .front()
                 .is_some_and(|head| now.saturating_duration_since(head.received_at) > BACKLOG_AGE)
     }
-    /// Whether a request for `reason` comes while predicted frames are thrown
-    /// away until the next IDR, so the host may stop sending them: the sink's
-    /// own wait for one (a gap, an overflow, a new generation), or a decoder's,
-    /// which asks after a gap, a failure or a stall and drops them until its
-    /// next keyframe, as the stall watchdog's request assumes. A backlog
-    /// episode keeps decoding its queue, and a user's request drops nothing.
+    /// Whether a request for `reason` comes while predicted frames are of no
+    /// use before the next IDR, so the host may stop sending them until it:
+    /// the sink's own wait for one (a gap, an overflow, a new generation), a
+    /// runner's after a gap or a failure, which drops them until its next
+    /// keyframe, or a stall, after which the Linux runner rebuilds its
+    /// pipeline at the next keyframe and the watchdog's decoder presents
+    /// nothing. The host ends such a skip only at an IDR, so a decoder that
+    /// keeps decoding is never sent a frame whose reference was skipped. A
+    /// backlog episode keeps decoding its queue, and a user's request drops
+    /// nothing.
     fn discarding(&self, reason: KeyframeReason) -> bool {
         match reason {
             KeyframeReason::User => false,

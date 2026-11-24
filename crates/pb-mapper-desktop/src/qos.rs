@@ -614,8 +614,11 @@ impl Qos {
     /// `forward` is the probe's queue toward a viewer that stamps arrival
     /// times, `None` when it stamped none or the stamp was no sample, in
     /// which case its round trip still counts toward the baseline but moves
-    /// no decision. `ack_queue` is the receipts' queue delay at the echo, the
-    /// witness a cut needs unless the probes' own delay persists.
+    /// no decision. A round trip over `IO_TIMEOUT` is no sample of the path,
+    /// but its queue toward such a viewer still is: a queue on the viewer's
+    /// uplink lengthens the one and not the other. `ack_queue` is the
+    /// receipts' queue delay at the echo, the witness a cut needs unless the
+    /// probes' own delay persists.
     pub fn on_probe_echo(
         &mut self,
         nonce: u64,
@@ -628,20 +631,24 @@ impl Qos {
         };
         self.unresponsive = false;
         let elapsed = now.saturating_duration_since(probe.sent);
-        if elapsed > IO_TIMEOUT {
+        let timely = elapsed <= IO_TIMEOUT;
+        if !timely && !(self.one_way && forward.is_some()) {
             return;
         }
         let rtt = elapsed.max(DELAY_FLOOR);
-        self.last_rtt = Some(rtt);
-        while self
-            .rtt
-            .front()
-            .is_some_and(|(at, _)| now.saturating_duration_since(*at) > RTT_WINDOW)
-        {
-            self.rtt.pop_front();
+        if timely {
+            self.last_rtt = Some(rtt);
+            while self
+                .rtt
+                .front()
+                .is_some_and(|(at, _)| now.saturating_duration_since(*at) > RTT_WINDOW)
+            {
+                self.rtt.pop_front();
+            }
+            // Kept unfloored, so the one-way delay can hide what the floor
+            // hides.
+            self.rtt.push_back((now, elapsed));
         }
-        // Kept unfloored, so the one-way delay can hide what the floor hides.
-        self.rtt.push_back((now, elapsed));
         self.tainted = probe.tainted;
         let Some(base) = self.base_rtt() else {
             return;
@@ -1456,6 +1463,27 @@ mod tests {
         assert_eq!((qos.fps, qos.delay_ms()), (10, Some(250)));
         assert!(qos.outstanding.is_none());
 
+        // A queue on the uplink past `IO_TIMEOUT` makes every round trip too
+        // long to sample, while the way toward the viewer is still timed: a
+        // queue there still cuts, and the baseline stays as it was.
+        let mut qos = balanced(t0);
+        qos.use_one_way();
+        one_way_probes(&mut qos, t0, &[(20, 0, 0); 8]);
+        let samples = qos.rtt.len();
+        let start = t0 + FAST_PROBE_INTERVAL * 8;
+        let fps = one_way_probes(&mut qos, start, &[(3_520, 2, 0); 4]);
+        assert!(fps.iter().all(|fps| *fps == 60), "{fps:?}");
+        let start = start + FAST_PROBE_INTERVAL * 4;
+        let fps = one_way_probes(&mut qos, start, &[(3_770, 250, 0), (3_770, 250, 0)]);
+        assert_eq!(fps, [60, 10]);
+        assert_eq!(qos.rtt.len(), samples);
+        assert_eq!(qos.last_rtt, Some(Duration::from_millis(20)));
+        // Timed by round trips alone, those echoes are no samples at all.
+        let mut rtt = balanced(t0);
+        probes(&mut rtt, t0, &[(20, 0); 8]);
+        let fps = probes(&mut rtt, start, &[(3_770, 0); 2]);
+        assert_eq!(fps, [60, 60]);
+
         // The receipt-rate estimator reads the same queues, on the viewer's
         // clock: receipts the uplink bunches and holds 300 ms, of units that
         // waited for nothing toward the viewer, would cut nothing ...
@@ -1469,7 +1497,6 @@ mod tests {
             arrival: Some(crate::credit::Arrival {
                 at: Duration::from_millis(arrived_ms),
                 forward_queue: Duration::from_millis(forward_ms),
-                reverse_queue: Duration::from_millis(300),
             }),
         };
         let host = |n: u64| t0 + Duration::from_millis(2000 + 51 * (n / 3) + n % 3);

@@ -1676,11 +1676,17 @@ admission, and one late receipt never widens it. In the slow-link suite, 300 ms
 queued on the viewer's uplink alone left the pace at 60 FPS and the window
 unclamped at 27 frames, where both probes and receipts had taken it to 4 FPS
 and a 32 KiB window
-([measurements](benchmarks/2026-11-24-arrival-time/README.md)). A stamp is an observation,
-never authority: one that goes backwards for its kind, or a delay more than
-3 s above its least, is ignored, and only a malformed message breaks the
-protocol. The least resets on a path change and on a resume. The frame and
-byte maximums, the IDR's headroom and JPEG's window stay as above.
+([measurements](benchmarks/2026-11-24-arrival-time/README.md)).
+
+A stamp is an observation, never authority. One that goes backwards for its
+kind is ignored, and so is each direction whose delay lies more than 3 s above
+its least. The two directions are judged apart: a queue longer than that on
+the viewer's uplink still leaves the way toward the viewer timed, so a queue
+there still clamps the window. A stamp that puts one direction more than 3 s
+above its least and the other more than 3 s below its own is off, not queued,
+and is ignored whole, so it never drags a least down. Only a malformed message
+breaks the protocol. The least resets on a path change and on a resume. The
+frame and byte maximums, the IDR's headroom and JPEG's window stay as above.
 
 Receipts reach only the credit ledger and the QoS controller. They never reach
 the input ledger, the backend or the control lease, and no authorisation method
@@ -1708,12 +1714,16 @@ other sample steps on, and the receipts' witness below is their forward ack
 queue. A round trip counts as at least 10 ms, which on a shorter path hides
 the first (10 ms − its least round trip) of any queue; the one-way samples and
 the forward ack queue hide as much, so a queue toward the viewer moves the
-controller exactly as the round trip's did. A queue on the viewer's uplink (a cloud backup, a photo sync or a video
-call on the viewer's side, or a cellular uplink's scheduling) then lengthens
-the round trip without moving the frame rate or bits per frame, while a queue
-toward the viewer cuts as before. The round trip still sets the base RTT that
-sizes the window, the short path and Balanced's fast start. An echo whose
-stamp is no sample counts toward the base RTT and moves nothing else.
+controller exactly as the round trip's did. A queue on the viewer's uplink (a
+cloud backup, a photo sync or a video call on the viewer's side, or a cellular
+uplink's scheduling) then lengthens the round trip without moving the frame
+rate or bits per frame, while a queue toward the viewer cuts as before. The
+round trip still sets the base RTT that sizes the window, the short path and
+Balanced's fast start. An echo whose stamp is no sample counts toward the base
+RTT and moves nothing else. A round trip over 3 s is no sample of the path,
+with or without arrival times, but the queue toward the viewer that its stamp
+shows still is one: an uplink queue longer than that leaves a queue toward the
+viewer cutting as before.
 
 Frame rate follows RustDesk's delay steps on that delay, scaled by
 `max(1, ceiling / 30)`. Below 50 ms it climbs, with a quick step after three
@@ -1963,20 +1973,27 @@ session with `decoder_failed`. No request is sent while paused or while the
 host reports capture unavailable.
 
 Toward a host that listed `keyframe_seq`, a request made while predicted
-frames are thrown away until the next IDR also names the last seq the reader
-had read (`after_seq`): the sink's own after a gap or an overflow, and every
-decoder's after a gap, a failure or a stall, which the native decoders drop
-predicted frames after until their next keyframe. A backlog episode keeps
+frames are of no use before the next IDR also names the last seq the reader
+had read (`after_seq`): the sink's own after a gap or an overflow, a native
+decoder's after a gap or a failure, which the runners drop predicted frames
+after until their next keyframe, the Linux runner's after a stall, which
+rebuilds its pipeline at the next keyframe, and the stall watchdog's, sent
+while the decoder takes frames but presents none. A backlog episode keeps
 decoding its queue and a user's request drops nothing, so neither names one.
 The host asks its encoder for the IDR as before. Unless it has admitted an IDR
 after that seq, which is then on its way to the viewer, B-send also drops this
 session's predicted units before they get a seq, as it drops a stale
-generation's, until it admits the next IDR or for 2 s, and counts them in
+generation's, until it admits the next IDR, and counts them in
 `dropped_frames`: the link stops carrying frames the viewer would discard, and
-the IDR reaches it sooner. Receipts outrank keyframe requests in the viewer's
-writer, which is why the request names the seq. Other viewers of a room and
-the host's own resyncs are untouched, and a seq beyond the last one sent is a
-protocol error.
+the IDR reaches it sooner. Only an IDR ends the skip. Every predicted unit
+after the first one dropped refers to a picture the viewer never got, so a
+decoder that is not waiting for a keyframe, as the Windows and macOS runners
+are not after the watchdog's request, is never given one it cannot decode. If
+no IDR has been admitted 2 s into a skip, B-send asks the encoder for one
+again, and again every 2 s. Receipts outrank keyframe requests in the
+viewer's writer, which is why the request names the seq. Other viewers of a
+room and the host's own resyncs are untouched, and a seq beyond the last one
+sent is a protocol error.
 
 `pause` revokes control, tells the host to stop capturing and clears the sink;
 probes are still echoed and pings sent, so the host sees a live, paused viewer.

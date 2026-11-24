@@ -41,8 +41,8 @@ pub(crate) const DELIVERY_FACTOR: f64 = 1.25;
 pub(crate) const JPEG_WINDOW_FRAMES: usize = 4;
 pub(crate) const JPEG_WINDOW_BYTES: usize = 2 * 1024 * 1024;
 /// How long B-send drops predicted units for a viewer that asked for an IDR
-/// at most, if no IDR is admitted first.
-pub(crate) const SKIP_TO_KEYFRAME_MAX: Duration = Duration::from_secs(2);
+/// before it asks C for one again, if none was booked meanwhile.
+pub(crate) const SKIP_ASK_AGAIN: Duration = Duration::from_secs(2);
 
 const _: () = assert!(
     FRAME_WINDOW_MIN <= FRAME_WINDOW_MAX,
@@ -105,20 +105,29 @@ pub(crate) struct Receipt {
     /// The newest unit it covered was behind an IDR.
     pub behind_idr: bool,
     /// The newest unit's arrival, from a viewer that stamps them and a stamp
-    /// taken as a sample.
+    /// taken as a sample of the way toward it.
     pub arrival: Option<Arrival>,
 }
 
-/// When the viewer read the newest unit a receipt covered, and the queues
-/// either way that time shows.
+/// When the viewer read the newest unit a receipt covered, and the queue
+/// toward it that time shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Arrival {
     /// On the viewer's clock: since its session began.
     pub at: Duration,
     /// Toward the viewer: the unit's wait above the least seen.
     pub forward_queue: Duration,
-    /// Back to the host: the receipt's wait above the least seen.
-    pub reverse_queue: Duration,
+}
+
+/// What B-send does with a predicted unit at the head of its queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Skip {
+    Send,
+    /// Drop it: the viewer waits for an IDR and would throw it away.
+    Drop,
+    /// Drop it and ask C for the IDR again: none was booked for
+    /// `SKIP_ASK_AGAIN`.
+    DropAndAsk,
 }
 
 /// How much may be in flight before the next admission.
@@ -168,9 +177,9 @@ pub(crate) struct CreditLedger {
     floor_gap: Duration,
     /// The newest IDR booked.
     last_keyframe: Option<u64>,
-    /// While set, B-send drops predicted units: until an IDR is booked, or
-    /// this instant.
-    skip_until: Option<Instant>,
+    /// While set, B-send drops predicted units until an IDR is booked, and
+    /// asks C for one again at this instant.
+    skip_ask_at: Option<Instant>,
 }
 impl CreditLedger {
     /// `arrival_time`: the viewer stamps its receipts and probe echoes.
@@ -190,7 +199,7 @@ impl CreditLedger {
             one_way: arrival_time.then(|| OneWay::new(now)),
             floor_gap: Duration::ZERO,
             last_keyframe: None,
-            skip_until: None,
+            skip_ask_at: None,
         }
     }
 
@@ -274,7 +283,7 @@ impl CreditLedger {
                 self.idr_inflight = Some(seq);
             }
             self.last_keyframe = Some(seq);
-            self.skip_until = None;
+            self.skip_ask_at = None;
         }
         seq
     }
@@ -282,9 +291,10 @@ impl CreditLedger {
     /// The viewer asked for an IDR having read up to `after_seq`, and throws
     /// predicted frames away until the next one. Unless an IDR was booked
     /// after that seq, which is on its way to the viewer, B-send drops
-    /// predicted units from now until one is booked, or for at most
-    /// `SKIP_TO_KEYFRAME_MAX`. Returns whether it does. A seq beyond the last
-    /// admitted one is a protocol error.
+    /// predicted units from now until one is booked: never fewer, since
+    /// every one after the first it drops refers to one it dropped. Returns
+    /// whether it does. A seq beyond the last admitted one is a protocol
+    /// error.
     pub fn skip_to_keyframe(
         &mut self,
         after_seq: u64,
@@ -299,14 +309,22 @@ impl CreditLedger {
         {
             return Ok(false);
         }
-        self.skip_until = Some(now + SKIP_TO_KEYFRAME_MAX);
+        self.skip_ask_at = Some(now + SKIP_ASK_AGAIN);
         Ok(true)
     }
 
-    /// Whether B-send drops predicted units now.
-    pub fn skipping(&mut self, now: Instant) -> bool {
-        self.skip_until.take_if(|until| now >= *until);
-        self.skip_until.is_some()
+    /// What B-send does with a predicted unit at the head now. A skip ends
+    /// only when an IDR is booked; one that waited `SKIP_ASK_AGAIN` for it
+    /// asks C again, and again as long after.
+    pub fn skipping(&mut self, now: Instant) -> Skip {
+        let Some(ask_at) = &mut self.skip_ask_at else {
+            return Skip::Send;
+        };
+        if now < *ask_at {
+            return Skip::Drop;
+        }
+        *ask_at = now + SKIP_ASK_AGAIN;
+        Skip::DropAndAsk
     }
 
     /// A cumulative receipt: every unit up to `seq` was read off the network,
@@ -339,16 +357,17 @@ impl CreditLedger {
             self.in_flight.pop_front();
         }
         let receipt = newest.map(|(sent_at, behind_idr)| {
+            // The way back is kept in the one-way state for the window; the
+            // receipt carries the way toward the viewer.
             let arrival = self
                 .one_way
                 .as_mut()
                 .zip(at_us)
                 .and_then(|(one_way, at_us)| {
-                    let queues = one_way.receipt(at_us, sent_at, now)?;
+                    let forward_queue = one_way.receipt(at_us, sent_at, now).forward?;
                     Some(Arrival {
                         at: Duration::from_micros(at_us),
-                        forward_queue: queues.forward,
-                        reverse_queue: queues.reverse,
+                        forward_queue,
                     })
                 });
             Receipt {
@@ -686,14 +705,8 @@ mod tests {
             let seq = credit.book(5 * KIB, false, ms(sent));
             last = ms(read + 10 + back);
             let receipt = credit.on_receipt(seq, last, stamp(read)).unwrap().unwrap();
-            let arrival = receipt.arrival.map(|arrival| {
-                (
-                    arrival.forward_queue.as_millis(),
-                    arrival.reverse_queue.as_millis(),
-                )
-            });
-            let expected = arrival_time.then_some((u128::from(toward), u128::from(back)));
-            assert_eq!(arrival, expected);
+            let forward = receipt.arrival.map(|arrival| arrival.forward_queue);
+            assert_eq!(forward, arrival_time.then(|| Duration::from_millis(toward)));
         }
         let base = Some(Duration::from_millis(20));
         let window = credit.window(VideoCodec::H264, 60, 4_000_000, base, last);
@@ -722,7 +735,12 @@ mod tests {
         assert_eq!(credit.ack_queue(base, now), Duration::from_millis(300));
         assert_eq!(credit.one_way_queues(now), None);
         assert_eq!(credit.probe_queue(1, now, now), None);
-        // 150 ms toward the viewer is congestion: the forward queue clamps.
+        // 150 ms toward the viewer is congestion: the forward queue clamps,
+        // and still does behind a queue on the uplink past `IO_TIMEOUT`,
+        // whose receipts then time the way toward the viewer alone.
+        let (mut credit, window) = one_way_window(true, 150, 3_500);
+        assert_eq!((window.frames, window.clamped), (8, true), "{window:?}");
+        assert_eq!(credit.ack_queue(base, now), Duration::from_millis(150));
         let (mut credit, window) = one_way_window(true, 150, 0);
         assert_eq!((window.frames, window.clamped), (8, true), "{window:?}");
         assert_eq!(credit.ack_queue(base, now), Duration::from_millis(150));
@@ -740,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn a_keyframe_request_skips_predicted_units_until_an_idr_or_two_seconds() {
+    fn a_keyframe_request_skips_predicted_units_until_an_idr() {
         let t0 = Instant::now();
         let ms = |n| t0 + Duration::from_millis(n);
         let mut credit = CreditLedger::new(t0, false);
@@ -752,19 +770,26 @@ mod tests {
         assert!(credit.skip_to_keyframe(6, ms(50)).is_err());
         // An IDR booked after the seq the viewer read is on its way to it.
         assert!(!credit.skip_to_keyframe(first - 1, ms(50)).unwrap());
-        assert!(!credit.skipping(ms(50)));
+        assert_eq!(credit.skipping(ms(50)), Skip::Send);
         // None was: predicted units are dropped until the next IDR is booked.
         assert!(credit.skip_to_keyframe(3, ms(60)).unwrap());
-        assert!(credit.skipping(ms(70)));
+        assert_eq!(credit.skipping(ms(70)), Skip::Drop);
         let idr = credit.book(100 * KIB, true, ms(80));
-        assert!(!credit.skipping(ms(90)));
+        assert_eq!(credit.skipping(ms(90)), Skip::Send);
         // A request made before that IDR, arriving after it, skips nothing.
         assert!(!credit.skip_to_keyframe(5, ms(100)).unwrap());
-        assert!(!credit.skipping(ms(100)));
-        // With no IDR coming, the skip ends after two seconds.
+        assert_eq!(credit.skipping(ms(100)), Skip::Send);
+        // With no IDR booked, the skip never ends by itself: every predicted
+        // unit after a dropped one refers to it. B-send asks for the IDR
+        // again every `SKIP_ASK_AGAIN`.
         assert!(credit.skip_to_keyframe(idr, ms(200)).unwrap());
-        assert!(credit.skipping(ms(200) + SKIP_TO_KEYFRAME_MAX - Duration::from_millis(1)));
-        assert!(!credit.skipping(ms(200) + SKIP_TO_KEYFRAME_MAX));
-        assert!(!credit.skipping(ms(300)));
+        let due = ms(200) + SKIP_ASK_AGAIN;
+        let early = due - Duration::from_millis(1);
+        assert_eq!(credit.skipping(early), Skip::Drop);
+        assert_eq!(credit.skipping(due), Skip::DropAndAsk);
+        assert_eq!(credit.skipping(due + Duration::from_millis(1)), Skip::Drop);
+        assert_eq!(credit.skipping(due + SKIP_ASK_AGAIN), Skip::DropAndAsk);
+        credit.book(100 * KIB, true, due + SKIP_ASK_AGAIN);
+        assert_eq!(credit.skipping(due + 2 * SKIP_ASK_AGAIN), Skip::Send);
     }
 }

@@ -3,6 +3,7 @@
 use super::{STATS_INTERVAL, STOP_WRITE_TIMEOUT, Session, shapes::ShapeSlots};
 use crate::{
     VideoCodec,
+    credit::Skip,
     idr::IdrReason,
     outgoing::OUTGOING_MAX_AGE,
     protocol::{
@@ -401,7 +402,8 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
     /// credit. Units of a generation older than the last `State` are dropped
     /// without a seq, so the seq stays contiguous, and so are predicted units
     /// while the viewer waits for an IDR it asked for and drops what comes
-    /// before it (`CreditLedger::skip_to_keyframe`). A head that ages past
+    /// before it (`CreditLedger::skip_to_keyframe`), until an IDR is booked;
+    /// one that is slow to come is asked for again. A head that ages past
     /// `OUTGOING_MAX_AGE` is replaced by an IDR, but never while one is in
     /// flight: on a link where an IDR takes longer than that to cross, the
     /// P-frames behind it would age out into another IDR, and that one into
@@ -433,16 +435,25 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
             }
             let (aging, skip) = {
                 let mut credit = self.session.credit.lock();
-                (
-                    credit.aging_since(head.ready_at),
-                    !head.keyframe && credit.skipping(now),
-                )
+                let skip = if head.keyframe {
+                    Skip::Send
+                } else {
+                    credit.skipping(now)
+                };
+                (credit.aging_since(head.ready_at), skip)
             };
-            if skip {
-                if shared.outgoing.pop_if(head.frame_id).is_some() {
-                    self.counters.dropped += 1;
+            match skip {
+                Skip::Send => {}
+                Skip::Drop | Skip::DropAndAsk => {
+                    if skip == Skip::DropAndAsk {
+                        shared.idr.lock().request(IdrReason::HostResync);
+                        shared.wake.notify();
+                    }
+                    if shared.outgoing.pop_if(head.frame_id).is_some() {
+                        self.counters.dropped += 1;
+                    }
+                    continue;
                 }
-                continue;
             }
             if aging.is_some_and(|since| now.saturating_duration_since(since) > OUTGOING_MAX_AGE) {
                 self.counters.dropped += shared.outgoing.clear() as u64;

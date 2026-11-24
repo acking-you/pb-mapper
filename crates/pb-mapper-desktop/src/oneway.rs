@@ -16,11 +16,15 @@
 //!   receipt for it at the host: the viewer's writer and its uplink alone.
 //!   Only receipts feed it; the credit window reads the newest few.
 //!
-//! A stamp is an observation, never authority: a sample whose stamp goes
-//! backwards for its kind, or whose delay lies more than `IO_TIMEOUT` above
-//! its minimum, is ignored. Instants are monotonic on both ends, so no
-//! clock ever jumps. Both minima reserve their bounded tables once: a sample
-//! allocates nothing.
+//! A stamp is an observation, never authority. One that goes backwards for
+//! its kind is ignored, and so is each direction whose delay lies more than
+//! `IO_TIMEOUT` above its minimum: the two are judged apart, so a queue past
+//! that on the viewer's uplink still leaves the way toward it timed. A stamp
+//! that puts one direction more than `IO_TIMEOUT` above its minimum and the
+//! other more than that below its own is off, not queued, and ignored whole,
+//! so it never drags a minimum down. Instants are monotonic on both ends, so
+//! no clock ever jumps. Both minima reserve their bounded tables once: a
+//! sample allocates nothing.
 use crate::{qos::RTT_WINDOW, wire::IO_TIMEOUT};
 use std::{
     collections::VecDeque,
@@ -99,11 +103,12 @@ impl WindowMin {
     }
 }
 
-/// One receipt's queues.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One receipt's queues: each `None` when the stamp is no sample of that
+/// direction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Queues {
-    pub forward: Duration,
-    pub reverse: Duration,
+    pub forward: Option<Duration>,
+    pub reverse: Option<Duration>,
 }
 
 /// One session's one-way minima and its newest reverse queues.
@@ -135,38 +140,45 @@ impl OneWay {
     }
 
     /// A receipt the viewer stamped `at_us`, for a unit booked at `sent`,
-    /// that came back at `received`. `None` when the stamp is no sample.
-    pub fn receipt(&mut self, at_us: u64, sent: Instant, received: Instant) -> Option<Queues> {
+    /// that came back at `received`: the queue of each direction the stamp
+    /// is a sample of.
+    pub fn receipt(&mut self, at_us: u64, sent: Instant, received: Instant) -> Queues {
         if self.receipt_at.is_some_and(|last| at_us < last) {
-            return None;
+            return Queues::default();
         }
-        let at = i64::try_from(at_us).ok()?;
-        let forward = at.saturating_sub(self.host_us(sent));
-        let reverse = self.host_us(received).saturating_sub(at);
-        if !within(&self.forward, forward) || !within(&self.reverse, reverse) {
-            return None;
+        let Some((forward, reverse)) = self.delays(at_us, sent, received) else {
+            return Queues::default();
+        };
+        let (forward_ok, reverse_ok) = (
+            within(&self.forward, forward),
+            within(&self.reverse, reverse),
+        );
+        if !forward_ok && !reverse_ok {
+            return Queues::default();
         }
         self.receipt_at = Some(at_us);
         let queues = Queues {
-            forward: queue(&mut self.forward, forward, received),
-            reverse: queue(&mut self.reverse, reverse, received),
+            forward: forward_ok.then(|| queue(&mut self.forward, forward, received)),
+            reverse: reverse_ok.then(|| queue(&mut self.reverse, reverse, received)),
         };
-        if let Some(slot) = self.recent.get_mut(self.next) {
-            *slot = queues.reverse;
+        if let Some(reverse) = queues.reverse {
+            if let Some(slot) = self.recent.get_mut(self.next) {
+                *slot = reverse;
+            }
+            self.next = (self.next + 1) % RECENT_REVERSE;
+            self.filled = (self.filled + 1).min(RECENT_REVERSE);
         }
-        self.next = (self.next + 1) % RECENT_REVERSE;
-        self.filled = (self.filled + 1).min(RECENT_REVERSE);
-        Some(queues)
+        queues
     }
 
     /// A probe the viewer stamped `at_us`, written at `sent`, echoed at
-    /// `received`: its forward queue. `None` when the stamp is no sample.
+    /// `received`: its forward queue. `None` when the stamp is no sample of
+    /// it. Its way back only checks the stamp against the receipts'.
     pub fn probe(&mut self, at_us: u64, sent: Instant, received: Instant) -> Option<Duration> {
         if self.probe_at.is_some_and(|last| at_us < last) {
             return None;
         }
-        let at = i64::try_from(at_us).ok()?;
-        let forward = at.saturating_sub(self.host_us(sent));
+        let (forward, _) = self.delays(at_us, sent, received)?;
         if !within(&self.forward, forward) {
             return None;
         }
@@ -206,17 +218,40 @@ impl OneWay {
         self.probe_at = None;
     }
 
+    /// The one-way delays either way a stamp shows, each carrying its
+    /// clock's offset; `None` for a stamp that is off rather than queued:
+    /// past `i64`, or putting one direction more than `IO_TIMEOUT` above its
+    /// least and the other more than that below its own, as a stamp shifted
+    /// that far would.
+    fn delays(&self, at_us: u64, sent: Instant, received: Instant) -> Option<(i64, i64)> {
+        let at = i64::try_from(at_us).ok()?;
+        let forward = at.saturating_sub(self.host_us(sent));
+        let reverse = self.host_us(received).saturating_sub(at);
+        let (up, back) = (rise(&self.forward, forward), rise(&self.reverse, reverse));
+        let limit = limit_us();
+        let shifted = |above: i64, below: i64| above > limit && below < limit.saturating_neg();
+        (!shifted(up, back) && !shifted(back, up)).then_some((forward, reverse))
+    }
+
     fn host_us(&self, at: Instant) -> i64 {
         i64::try_from(at.saturating_duration_since(self.epoch).as_micros()).unwrap_or(i64::MAX)
     }
 }
 
+/// `IO_TIMEOUT` in microseconds: the most a delay may lie above its least.
+fn limit_us() -> i64 {
+    i64::try_from(IO_TIMEOUT.as_micros()).unwrap_or(i64::MAX)
+}
+
+/// How far `delay` lies above the least seen, negative below it; zero
+/// before any.
+fn rise(window: &WindowMin, delay: i64) -> i64 {
+    window.min().map_or(0, |least| delay.saturating_sub(least))
+}
+
 /// Whether `delay` lies within `IO_TIMEOUT` of the least seen.
 fn within(window: &WindowMin, delay: i64) -> bool {
-    let limit = i64::try_from(IO_TIMEOUT.as_micros()).unwrap_or(i64::MAX);
-    window
-        .min()
-        .is_none_or(|least| delay.saturating_sub(least) <= limit)
+    rise(window, delay) <= limit_us()
 }
 
 /// Push `delay` and return how far it lies above the window's least.
@@ -268,6 +303,14 @@ mod tests {
         assert_eq!((window.len(), window.min()), (1, Some(10)));
     }
 
+    /// Both directions' queues of a receipt.
+    fn both(forward: u64, reverse: u64) -> Queues {
+        Queues {
+            forward: Some(ms(forward)),
+            reverse: Some(ms(reverse)),
+        }
+    }
+
     /// The viewer's clock runs from its own session start: any offset of
     /// either sign, however large, leaves the queues alone.
     #[test]
@@ -282,27 +325,9 @@ mod tests {
                 let read_us = (sent + forward) as i64 * 1_000 + 10_000_000_000 + offset;
                 one_way.receipt(read_us as u64, at(sent), at(sent + forward + reverse))
             };
-            assert_eq!(
-                receipt(0, 20, 20),
-                Some(Queues {
-                    forward: Duration::ZERO,
-                    reverse: Duration::ZERO
-                })
-            );
-            assert_eq!(
-                receipt(100, 70, 20),
-                Some(Queues {
-                    forward: ms(50),
-                    reverse: Duration::ZERO
-                })
-            );
-            assert_eq!(
-                receipt(200, 20, 320),
-                Some(Queues {
-                    forward: Duration::ZERO,
-                    reverse: ms(300)
-                })
-            );
+            assert_eq!(receipt(0, 20, 20), both(0, 0));
+            assert_eq!(receipt(100, 70, 20), both(50, 0));
+            assert_eq!(receipt(200, 20, 320), both(0, 300));
             // A probe shares the forward minimum.
             let read_us = (330 + 45) * 1_000 + 10_000_000_000 + offset;
             assert_eq!(
@@ -313,47 +338,69 @@ mod tests {
     }
 
     #[test]
-    fn a_backwards_or_far_stamp_is_no_sample_and_reset_forgets() {
+    fn a_backwards_shifted_or_far_stamp_is_no_sample_and_reset_forgets() {
         let t0 = Instant::now();
         let at = |n: u64| t0 + ms(n);
         let us = |n: u64| n * 1_000;
+        let none = Queues::default();
+        let past = IO_TIMEOUT.as_millis() as u64 + 500;
         let mut one_way = OneWay::new(t0);
-        assert!(one_way.receipt(us(20), at(0), at(40)).is_some());
+        assert_eq!(one_way.receipt(us(20), at(0), at(40)), both(0, 0));
         // Backwards for receipts; a probe read earlier, echoed later, is not.
-        assert_eq!(one_way.receipt(us(19), at(1), at(41)), None);
+        assert_eq!(one_way.receipt(us(19), at(1), at(41)), none);
         assert!(one_way.probe(us(10), at(0), at(60)).is_some());
         assert_eq!(one_way.probe(us(9), at(0), at(60)), None);
-        // More than `IO_TIMEOUT` above the least (the probe's 10 ms), either
-        // way.
-        let late = us(100) + IO_TIMEOUT.as_micros() as u64 + us(20);
-        assert_eq!(one_way.receipt(late, at(100), at(5_000)), None);
-        assert_eq!(one_way.probe(late, at(100), at(5_000)), None);
-        let held = 1_000 + IO_TIMEOUT.as_millis() as u64 + 1;
-        assert_eq!(
-            one_way.receipt(us(1_020), at(1_000), at(1_020 + held)),
-            None
-        );
+        // A stamp shifted more than `IO_TIMEOUT` puts one direction that far
+        // above its least and the other that far below its own: it is off,
+        // not queued, and drags no least down.
+        let shifted = us(120 + past);
+        assert_eq!(one_way.receipt(shifted, at(100), at(140)), none);
+        assert_eq!(one_way.probe(shifted, at(100), at(140)), None);
         // A stamp past i64 is none either.
-        assert_eq!(one_way.receipt(u64::MAX, at(2_000), at(2_040)), None);
-        // What a refused sample would have moved stayed put: the probe's
-        // 10 ms is still the least forward.
+        assert_eq!(one_way.receipt(u64::MAX, at(2_000), at(2_040)), none);
+        // What a refused stamp would have moved stayed put: the probe's
+        // 10 ms is still the least forward, the first receipt's the least
+        // back.
         assert_eq!(
             one_way.receipt(us(2_020), at(2_000), at(2_040)),
-            Some(Queues {
-                forward: ms(10),
-                reverse: Duration::ZERO
-            })
+            both(10, 0)
         );
+
+        // A queue past `IO_TIMEOUT` one way leaves the other way timed. The
+        // uplink holds a receipt that long, of a unit that waited 160 ms
+        // toward the viewer ...
+        let held = one_way.receipt(us(2_270), at(2_100), at(2_290 + past));
+        let forward_only = Queues {
+            forward: Some(ms(160)),
+            reverse: None,
+        };
+        assert_eq!(held, forward_only);
+        assert_eq!(one_way.reverse_queue(), Some(Duration::ZERO));
+        // ... a unit waits that long toward the viewer, and its receipt comes
+        // straight back ...
+        let queued = one_way.receipt(us(2_320 + past), at(2_300), at(2_340 + past));
+        let reverse_only = Queues {
+            forward: None,
+            reverse: Some(Duration::ZERO),
+        };
+        assert_eq!(queued, reverse_only);
+        // ... and one that waited that long both ways is no sample at all.
+        let both_ways = one_way.receipt(us(2_420 + past), at(2_400), at(2_440 + 2 * past));
+        assert_eq!(both_ways, none);
+        // A probe is judged on its way toward the viewer alone: one that
+        // waited too long there is none, and one whose echo the uplink held
+        // that long still times that way.
+        let late = us(4_000 + past);
+        assert_eq!(one_way.probe(late, at(3_980), at(4_020 + past)), None);
+        assert_eq!(
+            one_way.probe(us(6_020), at(6_000), at(6_000 + past)),
+            Some(ms(10))
+        );
+
         // After a reset, the next sample is the new least, whatever it is.
         one_way.reset();
         assert_eq!(one_way.reverse_queue(), None);
-        assert_eq!(
-            one_way.receipt(us(10), at(3_000), at(3_500)),
-            Some(Queues {
-                forward: Duration::ZERO,
-                reverse: Duration::ZERO
-            })
-        );
+        assert_eq!(one_way.receipt(us(10), at(9_000), at(9_500)), both(0, 0));
     }
 
     #[test]
@@ -362,31 +409,27 @@ mod tests {
         let at = |n: u64| t0 + ms(n);
         let mut one_way = OneWay::new(t0);
         // A clean receipt sets both minima.
-        one_way.receipt(20_000, at(0), at(40)).unwrap();
+        one_way.receipt(20_000, at(0), at(40));
         assert_eq!(one_way.reverse_term(), Duration::ZERO);
         // Two receipts 300 ms late: three samples, but the clean one is least.
         for n in 1..=2 {
             let sent = 100 * n;
-            one_way
-                .receipt((sent + 20) * 1_000, at(sent), at(sent + 340))
-                .unwrap();
+            one_way.receipt((sent + 20) * 1_000, at(sent), at(sent + 340));
         }
         assert_eq!(one_way.reverse_term(), Duration::ZERO);
         assert_eq!(one_way.reverse_queue(), Some(ms(300)));
         // A third: the uplink's queue stands, and the window takes it in.
-        one_way.receipt(320_000, at(300), at(640)).unwrap();
+        one_way.receipt(320_000, at(300), at(640));
         assert_eq!(one_way.reverse_term(), ms(300));
         // One fast receipt among them brings it down at once ...
-        one_way.receipt(420_000, at(400), at(440)).unwrap();
+        one_way.receipt(420_000, at(400), at(440));
         assert_eq!(one_way.reverse_term(), Duration::ZERO);
         // ... and the term never passes its bound.
         let mut stalled = OneWay::new(t0);
-        stalled.receipt(20_000, at(0), at(40)).unwrap();
+        stalled.receipt(20_000, at(0), at(40));
         for n in 1..=3 {
             let sent = 100 * n;
-            stalled
-                .receipt((sent + 20) * 1_000, at(sent), at(sent + 2_540))
-                .unwrap();
+            stalled.receipt((sent + 20) * 1_000, at(sent), at(sent + 2_540));
         }
         assert_eq!(stalled.reverse_term(), REVERSE_TERM_MAX);
         assert_eq!(stalled.reverse_queue(), Some(ms(2_500)));

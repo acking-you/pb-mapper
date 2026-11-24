@@ -198,9 +198,10 @@ pub(crate) enum ViewerMessage {
     Keyframe {
         reason: KeyframeReason,
         /// The last `Video` seq the viewer had read when it asked, sent only
-        /// while it throws predicted frames away until the next IDR: the host
-        /// then stops sending them unless it admitted an IDR after this seq.
-        /// Only to a host that listed `keyframe_seq`.
+        /// while predicted frames are of no use to it before the next IDR:
+        /// the host then stops sending them until it admits an IDR, unless it
+        /// admitted one after this seq. Only to a host that listed
+        /// `keyframe_seq`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after_seq: Option<u64>,
     },
