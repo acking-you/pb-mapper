@@ -127,8 +127,8 @@ privilege adjustment and distinguishes session-query failures from an absent
 owner login. Build 919 replaces the separate installed-app launch with an
 acknowledged, automatic restart after helper installation. Builds 920 to 927
 were consumed by later issue #50 test distributions (version 0.10.2), and
-0.11.0 uses 928. Release 0.12.0 uses 929, 0.12.1 uses 930 and 0.13.0 uses 931. The next
-distribution must use at least 932. The build counter is independent of the
+0.11.0 uses 928. Release 0.12.0 uses 929, 0.12.1 uses 930 and 0.13.0 uses 931. Release 0.14.0 uses 932. The next
+distribution must use at least 933. The build counter is independent of the
 public version.
 
 To build and verify the Windows installer and zip without publishing a
