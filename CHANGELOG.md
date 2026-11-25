@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.1] - 2026-11-26
+
+- Complete the 0.15 desktop and mobile UI release across macOS, Windows, Linux and Android: guard SF Symbol availability in `PermissionHelper.swift` for the macOS Runner's 10.15 deployment target and forward `Backend::unlock` in the Windows `input_acceptance` example. Includes all 0.15.0 additions: drag-to-authorize live macOS permission granting without restarting, remote wake and password unlock for locked Macs, deep-standby display wake recovery after long idle, and one-click in-place UI updates on macOS (`.dmg`) and portable Windows/Linux (`.zip`).
+
 ## [0.15.0] - 2026-11-26
 
 - Granting Screen Recording and Accessibility on macOS no longer requires hunting through Finder or restarting pb-mapper: clicking **Allow in System Settings** opens the matching Privacy & Security pane with a floating drag-to-authorize card holding pb-mapper's app icon (drag into the list and switch on), and pb-mapper detects both Accessibility (`AXIsProcessTrusted` + `IOHIDCheckAccess`) and Screen Recording (`com.apple.tcc.access.changed` + live `ScreenCaptureKit` probe) immediately while running.

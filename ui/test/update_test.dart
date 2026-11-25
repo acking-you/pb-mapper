@@ -757,30 +757,34 @@ void main() {
     return null;
   }();
 
-  test('the native check accepts a real Ed25519 signature and nothing else', () {
-    // A throwaway key, generated and signed with OpenSSL; not the release
-    // key.
-    final key = base64Decode('NRMpmBFknjIWE2u07GKRJJJ2nWkZUfknRG0i6jtLGYY=');
-    final signature = base64Decode(
-      'p+RF3TPJxMSi0EG1QWDB7KNJI0HNilMSyXuUAtu7anLvLtGrGWfBDb+oKxh1FZXuC++EK71nCuBbVenPeCPHCw==',
-    );
-    final message = utf8.encode('{"version":"0.9.1","assets":[]}');
-    final verifier = NativeSignatureVerifier(DynamicLibrary.open(library!));
-    expect(verifier.verify(message, signature, key), isTrue);
-    expect(
-      verifier.verify(
-        utf8.encode('{"version":"0.9.2","assets":[]}'),
-        signature,
-        key,
-      ),
-      isFalse,
-    );
-    expect(
-      verifier.verify(message, signature, base64Decode(updatePublicKey)),
-      isFalse,
-    );
-    expect(verifier.verify(message, signature.sublist(1), key), isFalse);
-  }, skip: library == null ? 'no built pb_mapper_ffi library' : false);
+  test(
+    'the native check accepts a real Ed25519 signature and nothing else',
+    () {
+      // A throwaway key, generated and signed with OpenSSL; not the release
+      // key.
+      final key = base64Decode('NRMpmBFknjIWE2u07GKRJJJ2nWkZUfknRG0i6jtLGYY=');
+      final signature = base64Decode(
+        'p+RF3TPJxMSi0EG1QWDB7KNJI0HNilMSyXuUAtu7anLvLtGrGWfBDb+oKxh1FZXuC++EK71nCuBbVenPeCPHCw==',
+      );
+      final message = utf8.encode('{"version":"0.9.1","assets":[]}');
+      final verifier = NativeSignatureVerifier(DynamicLibrary.open(library!));
+      expect(verifier.verify(message, signature, key), isTrue);
+      expect(
+        verifier.verify(
+          utf8.encode('{"version":"0.9.2","assets":[]}'),
+          signature,
+          key,
+        ),
+        isFalse,
+      );
+      expect(
+        verifier.verify(message, signature, base64Decode(updatePublicKey)),
+        isFalse,
+      );
+      expect(verifier.verify(message, signature.sublist(1), key), isFalse);
+    },
+    skip: library == null ? 'no built pb_mapper_ffi library' : false,
+  );
 
   testWidgets('the About card fits a small phone in Chinese', (tester) async {
     final world = _World();

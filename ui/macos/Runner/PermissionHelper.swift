@@ -208,20 +208,27 @@ final class PermissionCardPanel: NSPanel {
     background.layer?.masksToBounds = true
     contentView = background
 
-    let arrow = NSImageView(
-      image: NSImage(systemSymbolName: "arrow.up", accessibilityDescription: nil) ?? NSImage())
+    let arrow = NSImageView()
+    if #available(macOS 11.0, *) {
+      arrow.image = NSImage(systemSymbolName: "arrow.up", accessibilityDescription: nil)
+      arrow.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+    }
     arrow.contentTintColor = .controlAccentColor
-    arrow.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
 
     titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
     titleLabel.textColor = .labelColor
     subtitleLabel.font = .systemFont(ofSize: 12)
     subtitleLabel.textColor = .secondaryLabelColor
 
-    let close = NSButton(
-      image: NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close")
-        ?? NSImage(),
-      target: self, action: #selector(closeTapped))
+    let closeImage: NSImage = {
+      if #available(macOS 11.0, *),
+        let symbol = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close")
+      {
+        return symbol
+      }
+      return NSImage(named: NSImage.stopProgressFreestandingTemplateName) ?? NSImage()
+    }()
+    let close = NSButton(image: closeImage, target: self, action: #selector(closeTapped))
     close.isBordered = false
     close.contentTintColor = .tertiaryLabelColor
 

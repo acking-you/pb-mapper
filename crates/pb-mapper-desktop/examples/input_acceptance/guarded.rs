@@ -132,6 +132,9 @@ impl Backend for Guarded {
     fn presented(&mut self, expected: &DesktopContext) -> Result<()> {
         self.inner.presented(expected)
     }
+    fn unlock(&mut self, password: &str) -> Result<()> {
+        self.inner.unlock(password)
+    }
     fn release(&mut self) {
         self.inner.release();
     }
