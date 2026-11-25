@@ -81,6 +81,8 @@ class CarrierMove {
 class ConfigStatus {
   final String serverAddress;
   final bool keepAliveEnabled;
+  final bool keepAwake;
+  final String? keepAwakeError;
   final String msgHeaderKey;
 
   /// How this computer reaches the relay.
@@ -100,6 +102,8 @@ class ConfigStatus {
   const ConfigStatus({
     required this.serverAddress,
     required this.keepAliveEnabled,
+    this.keepAwake = false,
+    this.keepAwakeError,
     required this.msgHeaderKey,
     this.relayTransport = RelayTransport.tcp,
     this.lanFirst = true,
@@ -115,6 +119,8 @@ class ConfigStatus {
         fallback: 'localhost:7666',
       ),
       keepAliveEnabled: _asBool(map['keepAliveEnabled'], fallback: true),
+      keepAwake: map['keepAwake'] == true,
+      keepAwakeError: map['keepAwakeError'] as String?,
       msgHeaderKey: _asString(map['msgHeaderKey']),
       relayTransport: RelayTransport.parse(map['relayTransport']),
       lanFirst: _asBool(map['lanFirst'], fallback: true),
@@ -652,6 +658,7 @@ abstract interface class PbMapperApiClient {
   Future<OperationResult> setAppDirectoryPath(String path);
 
   Future<ConfigStatus> fetchConfig();
+  Future<OperationResult> setKeepAwake(bool enabled);
   Future<String> revealIsolatedRelayAdminKey();
 
   /// Save the relay settings, whether this computer tries a shared local
@@ -804,6 +811,11 @@ class PbMapperApi implements PbMapperApiClient {
       msgHeaderKey: '',
     );
   }
+
+  @override
+  Future<OperationResult> setKeepAwake(bool enabled) async => _resultFrom(
+    await _service.desktopCall({'op': 'set_keep_awake', 'enabled': enabled}),
+  );
 
   @override
   Future<String> revealIsolatedRelayAdminKey() async {

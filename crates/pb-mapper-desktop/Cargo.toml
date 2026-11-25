@@ -38,6 +38,7 @@ subtle.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+pb-mapper-core = { workspace = true, features = ["system-awake"] }
 xcap.workspace = true
 windows-capture.workspace = true
 enigo.workspace = true

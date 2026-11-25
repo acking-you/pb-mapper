@@ -1,4 +1,7 @@
 {
+  "powerSettings": "Power",
+  "keepComputerAwake": "Keep this computer awake",
+  "keepComputerAwakeHelp": "Keep pb-mapper available when nobody is connected. The display can turn off. This increases battery use.",
   "@@locale": "en",
   "appTitle": "pb-mapper",
 

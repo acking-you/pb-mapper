@@ -49,6 +49,9 @@ static GLOBAL_MIMALLOC: MiMalloc = MiMalloc;
     arg_required_else_help = true
 )]
 struct Cli {
+    /// Prevent idle system sleep while this process runs. The display may turn off.
+    #[arg(long, global = true)]
+    keep_awake: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -113,6 +116,11 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
+    let _awake = if cli.keep_awake {
+        Some(pb_mapper_core::power::SystemAwake::acquire().await?)
+    } else {
+        None
+    };
     match cli.command {
         Command::Server(args) => run_server(args).await?,
         Command::Register(args) => run_register(args).await?,

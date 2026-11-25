@@ -23,11 +23,12 @@ use crate::state::{AppConfig, RelayTunnels};
 pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) -> *mut c_char {
     // SAFETY: null or live, as the caller guarantees.
     respond(unsafe { handle.as_ref() }, |handle| {
-        let (config, isolated_admin_key_set) = handle.runtime.block_on(async {
+        let (config, isolated_admin_key_set, awake_error) = handle.runtime.block_on(async {
             let state = handle.state.lock().await;
             (
                 state.get_config_status(),
                 state.isolated_admin_key().is_some(),
+                state.awake_error.clone(),
             )
         });
         Ok(Reply::Data(json!({
@@ -36,6 +37,8 @@ pub unsafe extern "C" fn pb_mapper_get_config_json(handle: *mut PbMapperHandle) 
             "msgHeaderKey": config.msg_header_key,
             "relayTransport": config.relay_transport,
             "lanFirst": config.lan_first,
+            "keepAwake": config.keep_awake.unwrap_or_default(),
+            "keepAwakeError": awake_error,
             "lanTransport": config.lan_transport,
             "isolatedRelayAdminKeySet": isolated_admin_key_set,
         })))

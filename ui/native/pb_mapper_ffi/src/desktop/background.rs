@@ -511,6 +511,7 @@ pub(super) fn resume_options(
         credential,
         relay_transport: config.relay_transport,
         lan_first: config.lan_first,
+        keep_awake: config.keep_awake.unwrap_or_default(),
     };
     Options::resume(&saved, target, move_relay).map_err(|failure| {
         if failure.kind() == std::io::ErrorKind::PermissionDenied {
@@ -519,6 +520,34 @@ pub(super) fn resume_options(
             err(failure)
         }
     })
+}
+
+#[cfg(windows)]
+pub(super) async fn sync_keep_awake(desktop: &DesktopState, enabled: bool) -> Result<(), CtlError> {
+    let (helper, ready) = super::blocking(desktop::privileged::background::readiness).await?;
+    // Other users' installations have their own preferences. An absent or
+    // disabled host picks up this setting when the owner starts sharing.
+    if !helper.owned_by_user
+        || !helper.background_saved
+        || (helper.startup_disabled && !helper.running)
+    {
+        return Ok(());
+    }
+    helper.ensure_ready().map_err(|failure| {
+        err(format!("App power setting saved. Update or enable the Windows desktop service to apply it there: {failure}"))
+    })?;
+    let ready = ready.ok_or_else(|| {
+        err("App power setting saved. The Windows desktop service is unavailable.")
+    })?;
+    let result = desktop::privileged::background::set_keep_awake(ready, enabled)
+        .await
+        .map_err(|failure| {
+            err(format!(
+                "App power setting saved. The Windows desktop service could not apply it: {failure}"
+            ))
+        })?;
+    desktop.cache_background(result.into());
+    Ok(())
 }
 
 pub(super) async fn stop_background(state: &DesktopState) -> Result<(), CtlError> {
@@ -632,6 +661,7 @@ pub(super) async fn start_background(
                 display_device: trust::display_device(start.display_id),
                 allow_control: start.allow_control,
                 allow_direct: !start.relay_only,
+                keep_awake: config.keep_awake.unwrap_or_default(),
                 auto_start: start.auto_start,
             },
             lan_first: config.lan_first,
@@ -840,6 +870,7 @@ async fn enable(
             display_device: trust::display_device(display_id),
             allow_control,
             allow_direct: true,
+            keep_awake: config.keep_awake.unwrap_or_default(),
             auto_start: true,
         },
         lan_first: config.lan_first,

@@ -17,26 +17,9 @@
 //! `awake::Watchdog`'s decision; this module only carries it out.
 
 use crate::platform::awake::{Power, Touches, Wait, Watchdog};
-use std::{
-    os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-    sync::OnceLock,
-    thread::Thread,
-    time::Instant,
-};
-use windows::{
-    Win32::{
-        Foundation::HANDLE,
-        System::{
-            Power::{
-                ES_DISPLAY_REQUIRED, POWER_REQUEST_TYPE, PowerClearRequest, PowerCreateRequest,
-                PowerRequestDisplayRequired, PowerRequestSystemRequired, PowerSetRequest,
-                SetThreadExecutionState,
-            },
-            Threading::{POWER_REQUEST_CONTEXT_SIMPLE_STRING, REASON_CONTEXT, REASON_CONTEXT_0},
-        },
-    },
-    core::{PCWSTR, PWSTR, w},
-};
+use pb_mapper_core::power::windows::PowerRequest;
+use std::{sync::OnceLock, thread::Thread, time::Instant};
+use windows::Win32::System::Power::{ES_DISPLAY_REQUIRED, SetThreadExecutionState};
 
 static TOUCHES: Touches = Touches::new();
 /// The watchdog, once the first touch started it; `None` if it could not be.
@@ -95,11 +78,11 @@ fn watch() {
 /// The power request while the watchdog holds it; `None` if Windows would
 /// not create it.
 #[derive(Default)]
-struct Awake(Option<Request>);
+struct Awake(Option<PowerRequest>);
 
 impl Power for Awake {
     fn acquire(&mut self) {
-        self.0 = Request::create()
+        self.0 = PowerRequest::for_capture()
             .inspect_err(|failure| {
                 tracing::warn!(
                     target: "pb_mapper_desktop::session",
@@ -129,53 +112,6 @@ impl Power for Awake {
     }
 }
 
-/// `powercfg /requests` shows it beside the process.
-const REASON: PCWSTR = w!("pb-mapper: a remote desktop viewer is watching this screen");
-/// `POWER_REQUEST_CONTEXT_VERSION`, in a module this crate does not build.
-const CONTEXT_VERSION: u32 = 0;
-const KINDS: [POWER_REQUEST_TYPE; 2] = [PowerRequestDisplayRequired, PowerRequestSystemRequired];
-
-/// One power request with the display and the system required. Dropping it
-/// clears both and closes it.
-struct Request(OwnedHandle);
-
-impl Request {
-    fn create() -> windows::core::Result<Self> {
-        let reason = REASON_CONTEXT {
-            Version: CONTEXT_VERSION,
-            Flags: POWER_REQUEST_CONTEXT_SIMPLE_STRING,
-            Reason: REASON_CONTEXT_0 {
-                SimpleReasonString: PWSTR(REASON.as_ptr().cast_mut()),
-            },
-        };
-        // SAFETY: `reason` and the static string it names outlive the call,
-        // which only reads them.
-        let handle = unsafe { PowerCreateRequest(&reason) }?;
-        // SAFETY: a valid handle that nothing else owns or closes.
-        let request = Self(unsafe { OwnedHandle::from_raw_handle(handle.0) });
-        for kind in KINDS {
-            // SAFETY: the request's own open handle. On failure, drop
-            // clears what was set and closes it.
-            unsafe { PowerSetRequest(request.handle(), kind) }?;
-        }
-        Ok(request)
-    }
-
-    fn handle(&self) -> HANDLE {
-        HANDLE(self.0.as_raw_handle())
-    }
-}
-
-impl Drop for Request {
-    fn drop(&mut self) {
-        for kind in KINDS {
-            // SAFETY: the request's own open handle; clearing a kind that
-            // was never set only fails. The handle closes after this.
-            let _ = unsafe { PowerClearRequest(self.handle(), kind) };
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,8 +119,8 @@ mod tests {
     /// Windows takes the request as built: the reason context and both
     /// kinds are accepted. Dropping it clears and closes it.
     #[test]
-    fn a_power_request_sets_both_kinds() -> windows::core::Result<()> {
-        drop(Request::create()?);
+    fn a_power_request_sets_both_kinds() -> std::io::Result<()> {
+        drop(PowerRequest::for_capture()?);
         Ok(())
     }
 }

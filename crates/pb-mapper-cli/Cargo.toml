@@ -27,7 +27,7 @@ doc = false
 [dependencies]
 pb-mapper-auth.workspace = true
 pb-mapper-client.workspace = true
-pb-mapper-core.workspace = true
+pb-mapper-core = { workspace = true, features = ["system-awake"] }
 pb-mapper-protocol.workspace = true
 pb-mapper-server.workspace = true
 

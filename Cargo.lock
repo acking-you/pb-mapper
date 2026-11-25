@@ -3139,6 +3139,8 @@ version = "0.13.0"
 dependencies = [
  "base64 0.23.1",
  "hickory-resolver",
+ "objc2",
+ "objc2-foundation",
  "parking_lot",
  "rand 0.10.2",
  "ring",
@@ -3146,6 +3148,7 @@ dependencies = [
  "snafu",
  "tokio",
  "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]

@@ -2,7 +2,8 @@
 //! service, which keeps sharing while the app is closed.
 pub use crate::platform::windows::helper::background::{
     Options, Ready, Settings, Snapshot, configure, configure_with_identity, end_session, readiness,
-    restore_display_mode, revoke_scope, set_control_allowed, status, status_of, stop,
+    restore_display_mode, revoke_scope, set_control_allowed, set_keep_awake, status, status_of,
+    stop,
 };
 use crate::{Host, Result, StopReason, error};
 use pb_mapper_client::sdk::RelayTransport;
@@ -18,6 +19,7 @@ pub struct ResumeTarget {
     pub credential: String,
     pub relay_transport: RelayTransport,
     pub lan_first: bool,
+    pub keep_awake: bool,
 }
 
 impl Options {
@@ -46,6 +48,7 @@ impl Options {
             relay_transport: target.relay_transport,
             settings: Settings {
                 auto_start: true,
+                keep_awake: target.keep_awake,
                 ..settings
             },
             lan_first: target.lan_first,
@@ -128,6 +131,7 @@ mod tests {
                     display_device: None,
                     allow_control: false,
                     allow_direct: true,
+                    keep_awake: false,
                     auto_start: true,
                 },
                 lan_first: true,

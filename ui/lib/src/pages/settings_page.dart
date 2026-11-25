@@ -7,6 +7,7 @@ import 'package:pb_mapper_ui/src/ffi/pb_mapper_api.dart';
 import 'package:pb_mapper_ui/src/shell/app_prefs.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
 import 'package:pb_mapper_ui/src/shell/page_frame.dart';
+import 'package:pb_mapper_ui/src/shell/window_chrome.dart';
 import 'package:pb_mapper_ui/src/state/app_store.dart';
 import 'package:pb_mapper_ui/src/state/tunnel.dart';
 import 'package:pb_mapper_ui/src/theme/app_icons.dart';
@@ -46,6 +47,10 @@ class SettingsPage extends StatelessWidget {
               const SizedBox(height: 16),
               _DirectCard(store: scope.store),
               const SizedBox(height: 16),
+              if (isFramelessDesktop) ...[
+                _PowerCard(store: scope.store),
+                const SizedBox(height: 16),
+              ],
               _AppearanceCard(prefs: scope.prefs),
               // A compact window's bar has no Logs: it lives here.
               if (!ShellLayout.wideOf(context)) ...[
@@ -732,6 +737,65 @@ class _DirectCardState extends State<_DirectCard> {
       ),
     );
   }
+}
+
+class _PowerCard extends StatefulWidget {
+  const _PowerCard({required this.store});
+  final AppStore store;
+
+  @override
+  State<_PowerCard> createState() => _PowerCardState();
+}
+
+class _PowerCardState extends State<_PowerCard> {
+  bool _saving = false;
+
+  Future<void> _save(bool enabled) async {
+    setState(() => _saving = true);
+    try {
+      final result = await widget.store.setKeepAwake(enabled);
+      if (!result.success && mounted) {
+        showToast(context, result.message, kind: ToastKind.error);
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => GroupCard(
+    title: context.l10n.powerSettings,
+    icon: AppIcons.computer,
+    child: ListenableBuilder(
+      listenable: widget.store,
+      builder: (context, _) {
+        final config = widget.store.config;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SwitchListTile(
+              key: const Key('settings-keep-awake'),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+              title: Text(context.l10n.keepComputerAwake),
+              subtitle: Text(context.l10n.keepComputerAwakeHelp),
+              value: config.keepAwake,
+              onChanged: _saving ? null : _save,
+            ),
+            if (config.keepAwakeError case final error?) ...[
+              Text(
+                error,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+              TextButton(
+                onPressed: _saving ? null : () => _save(config.keepAwake),
+                child: Text(context.l10n.retry),
+              ),
+            ],
+          ],
+        );
+      },
+    ),
+  );
 }
 
 class _AppearanceCard extends StatelessWidget {

@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- Add **Settings → Power → Keep this computer awake** and the CLI flag `--keep-awake` on macOS, Windows and Linux with logind. They keep pb-mapper available between connections while allowing the display to sleep. Update the installed Windows desktop service to keep background sharing available after the app exits.
+
 ## [0.13.0] - 2026-11-25
 
 - A remote desktop viewer whose picture comes directly across the internet now keeps a second, paused session to the same computer through the relay, and switches to it when the direct path stops carrying anything while the relay still works (UDP blocked mid-session, a NAT that changes the computer's address, a lost port mapping): after about 1.5 s without a byte, instead of the session ending at the 4 s read timeout and reconnecting. The computer keeps the viewer's place, its control and a changed display resolution across the switch, and the picture comes back from one keyframe. A session that had to start on the relay because a direct path failed for a moment tries direct beside it, under the usual pause after such a failure, and moves onto it once it connects. In a loopback test with the live path holding every byte, the switched session's first picture came 1568 ms after the block (median of 10), where the session without one ended 3991 ms after it before any reconnect. Each such viewer costs the relay one more stream (6.8 kbit/s both ways in that test). Both computers need this version; a change of the viewer's own network still ends both connections. SDK: a hidden `Client::connect_tcp_direct` sets up direct-only sessions through a reusable `DirectDialer`, never taking the relay; the desktop protocol gains the `standby` capability, `Accepted::ticket` and `Authenticate::standby_for`.

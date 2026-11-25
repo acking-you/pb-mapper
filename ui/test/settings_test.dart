@@ -30,6 +30,27 @@ Future<void> _reveal(WidgetTester tester, Finder target) async {
 }
 
 void main() {
+  testWidgets(
+    'idle power can be toggled without restarting a running service',
+    (tester) async {
+      final api = FakePbMapperApi(
+        services: [fakeService(serviceKey: 'active')],
+      );
+      await _open(tester, api);
+      final tile = find.byKey(const Key('settings-keep-awake'));
+      await _reveal(tester, tile);
+      for (final enabled in [true, false]) {
+        await tester.tap(tile);
+        await settle(tester);
+        expect(tester.widget<SwitchListTile>(tile).value, enabled);
+        expect(api.config.keepAwake, enabled);
+      }
+      expect(api.calls, ['setKeepAwake(true)', 'setKeepAwake(false)']);
+      await finish(tester);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+  );
+
   testWidgets('the relay form is filled from the saved config', (tester) async {
     await _open(tester, FakePbMapperApi());
     final field = tester.widget<TextField>(

@@ -5,7 +5,7 @@ use crate::{HostStatus, Result, error};
 use pb_mapper_client::sdk::RelayTransport;
 use serde::{Deserialize, Serialize};
 
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v12";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-background.v13";
 const _: () = assert!(
     super::names_protocol(PIPE, super::HELPER_PROTOCOL),
     "the background pipe's name ends in .v and HELPER_PROTOCOL"
@@ -28,6 +28,8 @@ pub struct Settings {
     /// first, then direct, then the relay.
     #[serde(default = "allow_direct_by_default")]
     pub allow_direct: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_awake: bool,
     pub auto_start: bool,
 }
 fn allow_direct_by_default() -> bool {
@@ -106,6 +108,9 @@ enum Command {
     RevokeScope {
         server: String,
         namespace: Option<u64>,
+    },
+    SetKeepAwake {
+        enabled: bool,
     },
     Permission {
         allow_control: bool,
@@ -225,6 +230,11 @@ pub async fn revoke_scope(server: String, namespace: Option<u64>) -> Result<Snap
     }
     call(Command::RevokeScope { server, namespace }).await
 }
+/// Update the power preference of an existing grant without restarting its host.
+pub async fn set_keep_awake(ready: Ready, enabled: bool) -> Result<Snapshot> {
+    call_with(ready, Command::SetKeepAwake { enabled }).await
+}
+
 pub async fn set_control_allowed(allow_control: bool) -> Result<Snapshot> {
     call(Command::Permission { allow_control }).await
 }
@@ -272,6 +282,7 @@ mod tests {
                 display_device: None,
                 allow_control: false,
                 allow_direct: true,
+                keep_awake: false,
                 auto_start: true,
             },
             lan_first: true,
