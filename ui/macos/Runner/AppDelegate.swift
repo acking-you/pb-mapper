@@ -12,6 +12,33 @@ class AppDelegate: FlutterAppDelegate {
     return true
   }
 
+  /// A quit sent by logout, restart or shutdown proceeds immediately without
+  /// FlutterAppDelegate's two-step `.terminateCancel` reply, which loginwindow
+  /// treats as refusing to quit.
+  override func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    if Self.systemIsEndingSession() {
+      return .terminateNow
+    }
+    return super.applicationShouldTerminate(sender)
+  }
+
+  private static func systemIsEndingSession() -> Bool {
+    guard let event = NSAppleEventManager.shared().currentAppleEvent,
+      event.eventClass == AEEventClass(kCoreEventClass),
+      event.eventID == AEEventID(kAEQuitApplication)
+    else {
+      return false
+    }
+    let keyword = AEKeyword(kAEQuitReason)
+    guard
+      let reason = event.attributeDescriptor(forKeyword: keyword)
+        ?? event.paramDescriptor(forKeyword: keyword)
+    else {
+      return false
+    }
+    return reason.typeCodeValue != 0
+  }
+
   /// Bring the window back when the app is reopened while hidden.
   ///
   /// Hiding to the tray orders the window out, and AppKit only offers to reopen

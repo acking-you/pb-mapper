@@ -69,3 +69,28 @@ impl std::fmt::Display for InputError {
     }
 }
 impl std::error::Error for InputError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnlockError {
+    Closed,
+    /// The host did not list the `unlock` capability.
+    NotOffered,
+    /// The host has not allowed remote control.
+    ControlNotAllowed,
+    /// The password is empty, exceeds the protocol bound, or contains line breaks.
+    Invalid(&'static str),
+}
+impl std::fmt::Display for UnlockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Closed => f.write_str("the desktop session is closed"),
+            Self::NotOffered => f.write_str("the remote computer does not support remote unlock"),
+            Self::ControlNotAllowed => {
+                f.write_str("control of the remote computer is not allowed at the host")
+            }
+            Self::Invalid(message) => f.write_str(message),
+        }
+    }
+}
+impl std::error::Error for UnlockError {}

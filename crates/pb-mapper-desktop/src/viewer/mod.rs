@@ -34,7 +34,7 @@ mod stats;
 mod status;
 
 pub use config::{ConnectStage, Decoders, ViewerConfig};
-pub use error::{ConnectError, InputError};
+pub use error::{ConnectError, InputError, UnlockError};
 pub use sink::{AttachError, Pull, VideoConsumer, VideoSink, VideoUnit};
 pub use status::{
     DecoderInfo, DecoderState, DesktopView, IntervalStats, NoticeInfo, PresentedInfo, VideoInfo,
@@ -48,8 +48,9 @@ use crate::{
     protocol::{
         CAPABILITY_ARRIVAL_TIME, CAPABILITY_CURSOR_SHAPE, CAPABILITY_DISPLAY_MODE,
         CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS, CAPABILITY_PHYSICAL_KEYS,
-        CAPABILITY_WHEEL_HIRES, CURSOR_SLOTS, DesktopKind, MAX_PEER_CURSORS, MAX_VIEWERS,
-        NoticeCode, Route, SessionState, ShapeSlot, StateRecord, VideoSize,
+        CAPABILITY_UNLOCK, CAPABILITY_WHEEL_HIRES, CURSOR_SLOTS, DesktopKind, MAX_PEER_CURSORS,
+        MAX_VIEWERS, NoticeCode, Route, SessionState, ShapeSlot, StateRecord, UnlockSecret,
+        VideoSize,
     },
     security, valid_service,
 };
@@ -734,7 +735,10 @@ impl Viewer {
                 | flag(state.controlling(), DesktopView::FLAG_CONTROLLING)
                 | flag(state.control_allowed(), DesktopView::FLAG_CONTROL_ALLOWED)
                 | flag(
-                    host.is_some_and(|host| host.desktop == DesktopKind::Secure),
+                    host.is_some_and(|host| {
+                        host.desktop == DesktopKind::Secure
+                            || host.reason == Some(crate::StateReason::SecureDesktop)
+                    }),
                     DesktopView::FLAG_SECURE_DESKTOP,
                 )
                 | flag(fresh, DesktopView::FLAG_FRESH)
@@ -948,6 +952,29 @@ impl Viewer {
             self.shared.outbound.display_mode(request);
         }
         Ok(mode)
+    }
+
+    /// Wake a locked host display and submit its login password without
+    /// requiring a fresh video frame (macOS hides the lock screen from
+    /// ScreenCaptureKit). Needs a host that listed `unlock` and allows
+    /// remote control; the host answers with the unlocked `State`, or a
+    /// `NoticeCode::UnlockFailed` notice when it refuses or stays locked.
+    pub fn unlock(&self, password: String) -> std::result::Result<(), UnlockError> {
+        let secret = UnlockSecret::new(password).map_err(UnlockError::Invalid)?;
+        {
+            let state = self.shared.state.lock();
+            if self.cancel.is_cancelled() || state.stopped.is_some() {
+                return Err(UnlockError::Closed);
+            }
+            if !state.listed(CAPABILITY_UNLOCK) {
+                return Err(UnlockError::NotOffered);
+            }
+            if !state.control_allowed() {
+                return Err(UnlockError::ControlNotAllowed);
+            }
+        }
+        self.shared.outbound.unlock(secret);
+        Ok(())
     }
 
     /// The viewer is hidden: control ends, the host stops capturing, and the

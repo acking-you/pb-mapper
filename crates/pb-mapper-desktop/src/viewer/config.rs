@@ -7,6 +7,7 @@ use crate::{
         CAPABILITY_ARRIVAL_TIME, CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE,
         CAPABILITY_DISPLAY_MODE, CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE,
         CAPABILITY_H265, CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS, CAPABILITY_STANDBY,
+        CAPABILITY_UNLOCK,
     },
 };
 use serde::Serialize;
@@ -125,6 +126,7 @@ impl ViewerConfig {
             CAPABILITY_ARRIVAL_TIME.to_owned(),
             CAPABILITY_KEYFRAME_SEQ.to_owned(),
             CAPABILITY_STANDBY.to_owned(),
+            CAPABILITY_UNLOCK.to_owned(),
         ];
         if self.codecs.contains(&VideoCodec::H265) {
             capabilities.push(CAPABILITY_H265.to_owned());

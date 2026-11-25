@@ -19,14 +19,14 @@ use std::time::{Duration, Instant};
 /// frame at 60 FPS, and one pointer sample.
 pub(crate) const REUSE: Duration = Duration::from_millis(16);
 
-/// The last passing session check, and the last geometry read (`G`), each
-/// with when it was taken.
-pub(crate) struct Reuse<G> {
-    session: Option<Instant>,
+/// The last passing session check (`S`), and the last geometry read (`G`),
+/// each with when it was taken.
+pub(crate) struct Reuse<G, S = ()> {
+    session: Option<(Instant, S)>,
     geometry: Option<(Instant, G)>,
 }
 
-impl<G> Default for Reuse<G> {
+impl<G, S> Default for Reuse<G, S> {
     fn default() -> Self {
         Self {
             session: None,
@@ -35,7 +35,7 @@ impl<G> Default for Reuse<G> {
     }
 }
 
-impl<G: Copy> Reuse<G> {
+impl<G: Copy, S: Copy> Reuse<G, S> {
     /// The session check at `now`. With `recent`, one that passed within
     /// [`REUSE`] answers, and `check` does not run; otherwise it does, and a
     /// pass is kept from `now`.
@@ -43,14 +43,17 @@ impl<G: Copy> Reuse<G> {
         &mut self,
         now: Instant,
         recent: bool,
-        check: impl FnOnce() -> Result<()>,
-    ) -> Result<()> {
-        if recent && self.session.is_some_and(|at| within(at, now)) {
-            return Ok(());
+        check: impl FnOnce() -> Result<S>,
+    ) -> Result<S> {
+        if recent
+            && let Some((at, value)) = self.session
+            && within(at, now)
+        {
+            return Ok(value);
         }
         let checked = check();
         match &checked {
-            Ok(()) => self.session = Some(now),
+            Ok(value) => self.session = Some((now, *value)),
             Err(_) => self.forget(),
         }
         checked
@@ -85,6 +88,12 @@ impl<G: Copy> Reuse<G> {
             return Ok(true);
         }
         Ok(fits(&self.geometry(now, read)?))
+    }
+
+    /// Forget only the cached geometry (as when the lock state flips while
+    /// the fresh session check itself just passed).
+    pub(crate) fn forget_geometry(&mut self) {
+        self.geometry = None;
     }
 
     /// Nothing is reused until a check passes again.

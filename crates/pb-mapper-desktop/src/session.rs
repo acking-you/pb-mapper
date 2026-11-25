@@ -21,8 +21,8 @@ use crate::{
     protocol::{
         CAPABILITY_ARRIVAL_TIME, CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE,
         CAPABILITY_DISPLAY_MODE, CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE,
-        CAPABILITY_H265, CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS, PeerSlot, RateModel,
-        Route, StateReason, StateRecord, StopReason, ViewerMessage,
+        CAPABILITY_H265, CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS, CAPABILITY_UNLOCK,
+        PeerSlot, RateModel, Route, StateReason, StateRecord, StopReason, ViewerMessage,
     },
     qos::{ClosingRate, Qos, TargetValues},
     scheduler::Wake,
@@ -79,6 +79,8 @@ enum Violation {
     FpsCap(u32),
     /// A display mode request from a viewer this host offered none.
     DisplayModeNotOffered,
+    /// An unlock request from a viewer this host offered none.
+    UnlockNotOffered,
     /// A malformed or oversized message, as the framing reported it.
     Framing(&'static str),
 }
@@ -92,6 +94,7 @@ impl fmt::Display for Violation {
             Self::DisplayModeNotOffered => {
                 f.write_str("a display mode request without the capability")
             }
+            Self::UnlockNotOffered => f.write_str("an unlock request without the capability"),
             Self::Framing(framing) => f.write_str(framing),
         }
     }
@@ -126,6 +129,9 @@ pub(crate) struct Session {
     /// Both ends listed `display_mode`: the viewer reads the modes and may
     /// change them.
     display_mode: bool,
+    /// Both ends listed `unlock`: the viewer may ask to wake and unlock the
+    /// lock screen, and reads `NoticeCode::UnlockFailed`.
+    pub(super) unlock: bool,
     /// Both ends listed `cursor_shape`: the viewer reads the pointer's shape.
     pub cursor_shape: bool,
     /// Both ends listed `peer_cursors`: the viewer reads other peers' pointers.
@@ -248,6 +254,7 @@ impl Session {
             encoder_dwell: listed(CAPABILITY_ENCODER_DWELL),
             cursor_sequence: listed(CAPABILITY_CURSOR_SEQUENCE),
             display_mode: both(CAPABILITY_DISPLAY_MODE),
+            unlock: both(CAPABILITY_UNLOCK),
             cursor_shape: both(CAPABILITY_CURSOR_SHAPE),
             peer_cursors: both(CAPABILITY_PEER_CURSORS),
             arrival_time,
@@ -573,6 +580,17 @@ impl Session {
                 self.display_mode(ModeCommand::Set(Mode { width, height }))?;
             }
             ViewerMessage::RestoreDisplayMode {} => self.display_mode(ModeCommand::Restore)?,
+            ViewerMessage::Unlock { password } => {
+                if !self.unlock {
+                    return Err(Violation::UnlockNotOffered);
+                }
+                if !shared.policy.allowed() {
+                    self.control_denied.store(true, Ordering::Release);
+                    self.credit_changed.notify_one();
+                } else {
+                    shared.lane.push(LaneCommand::Unlock(password));
+                }
+            }
         }
         Ok(())
     }

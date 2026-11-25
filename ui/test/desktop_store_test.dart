@@ -1891,4 +1891,102 @@ void main() {
       store.dispose();
     }
   });
+
+  testWidgets(
+    'capture_unavailable with secure_desktop reason marks session as secureDesktop and preserves hostOs',
+    (tester) async {
+      final parsed = DesktopViewerStatus.fromJson(const {
+        'state': 'capture_unavailable',
+        'reason': 'secure_desktop',
+        'message': 'the screen is locked',
+        'desktop': 'ordinary',
+        'host_os': 'macos',
+        'control_allowed': true,
+        'controlling': false,
+        'fresh': false,
+        'paused': false,
+        'generation': 0,
+      });
+      expect(parsed.secureDesktop, isTrue);
+      expect(parsed.hostOs, 'macos');
+
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final viewer = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = parsed;
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(store.session.value.phase, DesktopPhase.waitingForDesktop);
+      expect(store.session.value.secureDesktop, isTrue);
+      expect(store.session.value.hostOs, 'macos');
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
+
+  testWidgets(
+    'unlockRemote queues unlock on an authorized Mac session and parses unlock_failed notices',
+    (tester) async {
+      final lockedMac = DesktopViewerStatus.fromJson(const {
+        'state': 'capture_unavailable',
+        'reason': 'secure_desktop',
+        'message': 'the screen is locked',
+        'desktop': 'secure',
+        'host_os': 'macos',
+        'capabilities': ['os_macos', 'unlock'],
+        'control_allowed': true,
+        'controlling': false,
+        'fresh': false,
+        'paused': false,
+        'generation': 1,
+      });
+
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final viewer = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = lockedMac;
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(store.unlockRemote(''), isFalse);
+      expect(store.unlockRemote('S3cr3t!'), isTrue);
+      expect(api.argsOf('unlock'), [
+        {'password': 'S3cr3t!'},
+      ]);
+      expect(store.session.value.controlWanted, isTrue);
+
+      api.viewerStatusValue = DesktopViewerStatus.fromJson(const {
+        'state': 'capture_unavailable',
+        'reason': 'secure_desktop',
+        'message': 'the screen is locked',
+        'desktop': 'secure',
+        'host_os': 'macos',
+        'capabilities': ['os_macos', 'unlock'],
+        'control_allowed': true,
+        'controlling': false,
+        'fresh': false,
+        'paused': false,
+        'generation': 1,
+        'notice': {
+          'code': 'unlock_failed',
+          'message': 'incorrect Mac login password',
+          'seq': 1,
+          'age_ms': 10,
+        },
+      });
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(
+        store.session.value.notice,
+        const DesktopNotice(
+          DesktopNoticeCode.unlockFailed,
+          'incorrect Mac login password',
+        ),
+      );
+
+      viewer.dispose();
+      store.dispose();
+    },
+  );
 }

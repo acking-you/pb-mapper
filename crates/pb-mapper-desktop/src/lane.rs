@@ -1,7 +1,7 @@
 //! The ordered input lane from B-recv to thread C. B-recv pushes and
 //! never waits; C drains the whole lane ahead of and after every backend
 //! capture call.
-use crate::{InputEvent, modes::ModeCommand, scheduler::Wake};
+use crate::{InputEvent, modes::ModeCommand, protocol::UnlockSecret, scheduler::Wake};
 use std::{
     collections::VecDeque,
     sync::atomic::{AtomicBool, Ordering},
@@ -22,6 +22,8 @@ pub(crate) enum LaneCommand {
     EndControl,
     /// Change or restore the display's mode, in order with input.
     DisplayMode(ModeCommand),
+    /// Wake a locked host display and enter its login password.
+    Unlock(UnlockSecret),
 }
 
 pub(crate) struct InputLane {

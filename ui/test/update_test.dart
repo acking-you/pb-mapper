@@ -84,9 +84,24 @@ class _FakeVerifier implements SignatureVerifier {
 
 class _FakeInstaller implements UpdateInstaller {
   final List<String> calls = [];
+  Object? macBundleError;
   Object? appImageError;
+  Object? portableError;
   Object? installerError;
   Object? androidError;
+
+  @override
+  Future<void> replaceMacBundle(
+    File diskImage, {
+    required Version version,
+    String? bundleId,
+  }) async {
+    if (macBundleError case final error?) throw error;
+    calls.add(
+      'macbundle ${diskImage.uri.pathSegments.last} $version'
+      '${bundleId == null ? '' : ' $bundleId'}',
+    );
+  }
 
   @override
   Future<void> startInstaller(File installer) async {
@@ -98,6 +113,12 @@ class _FakeInstaller implements UpdateInstaller {
   Future<void> replaceAppImage(File download, String appImage) async {
     if (appImageError case final error?) throw error;
     calls.add('appimage $appImage');
+  }
+
+  @override
+  Future<void> replacePortable(File archive) async {
+    if (portableError case final error?) throw error;
+    calls.add('portable ${archive.uri.pathSegments.last}');
   }
 
   @override
@@ -265,7 +286,7 @@ void main() {
       );
       expect(
         plan(const UpdateHost(os: 'windows', arch: 'x64')),
-        'pb-mapper-windows-x86_64.zip saveDownload',
+        'pb-mapper-windows-x86_64.zip replacePortable',
       );
       expect(
         plan(const UpdateHost(os: 'linux', arch: 'x64', appImage: '/a')),
@@ -273,15 +294,15 @@ void main() {
       );
       expect(
         plan(const UpdateHost(os: 'linux', arch: 'x64')),
-        'pb-mapper-linux.zip saveDownload',
+        'pb-mapper-linux.zip replacePortable',
       );
       expect(
         plan(const UpdateHost(os: 'macos', arch: 'arm64')),
-        'pb-mapper-macos-arm64.dmg saveDownload',
+        'pb-mapper-macos-arm64.dmg replaceBundle',
       );
       expect(
         plan(const UpdateHost(os: 'macos', arch: 'x64')),
-        'pb-mapper-macos-x86_64.dmg saveDownload',
+        'pb-mapper-macos-x86_64.dmg replaceBundle',
       );
       expect(
         plan(const UpdateHost(os: 'android', arch: 'arm')),
@@ -487,6 +508,99 @@ void main() {
     });
 
     test(
+      'macOS replaces the running bundle and quits, or saves when unwritable',
+      () async {
+        final world = _World();
+        final updates = world.controller(
+          host: const UpdateHost(
+            os: 'macos',
+            arch: 'arm64',
+            bundleId: 'com.pb-mapper.ui',
+          ),
+        );
+        await updates.check();
+        expect(updates.plan?.method, UpdateMethod.replaceBundle);
+        await updates.start();
+        expect(world.installer.calls, [
+          'macbundle pb-mapper-macos-arm64.dmg 0.9.1 com.pb-mapper.ui',
+        ]);
+        expect(updates.stage, UpdateStage.installing);
+        expect(world.quits, 1);
+        expect(world.record.pending?.to, const Version(0, 9, 1));
+
+        final updated = world.controller(installed: '0.9.1');
+        final outcome = await updated.takeOutcome();
+        expect(outcome?.installed, isTrue);
+
+        // When `/Applications` is not writable, the verified DMG is saved.
+        final readonlyWorld = _World()
+          ..installer.macBundleError = const FileSystemException('read-only');
+        final readonlyUpdates = readonlyWorld.controller(
+          host: const UpdateHost(os: 'macos', arch: 'arm64'),
+        );
+        await readonlyUpdates.check();
+        await readonlyUpdates.start();
+        expect(readonlyWorld.installer.calls, [
+          'save pb-mapper-macos-arm64.dmg',
+        ]);
+        expect(readonlyUpdates.stage, UpdateStage.saved);
+        expect(readonlyWorld.quits, 0);
+      },
+    );
+
+    test(
+      'a macOS bundle that fails signature verification stops before quitting',
+      () async {
+        final world = _World()
+          ..installer.macBundleError = const UpdateException(
+            UpdateFailure.verification,
+            'TeamIdentifier mismatch',
+          );
+        final updates = world.controller(
+          host: const UpdateHost(os: 'macos', arch: 'arm64'),
+        );
+        await updates.check();
+        await updates.start();
+        expect(updates.stage, UpdateStage.failed);
+        expect(updates.failure?.kind, UpdateFailure.verification);
+        expect(world.quits, 0);
+        expect(world.record.pending, isNull);
+      },
+    );
+
+    test(
+      'portable Windows updates in place and quits, or saves when unwritable',
+      () async {
+        final world = _World();
+        final updates = world.controller(
+          host: const UpdateHost(os: 'windows', arch: 'x64'),
+        );
+        await updates.check();
+        expect(updates.plan?.method, UpdateMethod.replacePortable);
+        await updates.start();
+        expect(world.installer.calls, [
+          'portable pb-mapper-windows-x86_64.zip',
+        ]);
+        expect(updates.stage, UpdateStage.installing);
+        expect(world.quits, 1);
+        expect(world.record.pending?.to, const Version(0, 9, 1));
+
+        final readonlyWorld = _World()
+          ..installer.portableError = const FileSystemException('read-only');
+        final readonlyUpdates = readonlyWorld.controller(
+          host: const UpdateHost(os: 'windows', arch: 'x64'),
+        );
+        await readonlyUpdates.check();
+        await readonlyUpdates.start();
+        expect(readonlyWorld.installer.calls, [
+          'save pb-mapper-windows-x86_64.zip',
+        ]);
+        expect(readonlyUpdates.stage, UpdateStage.saved);
+        expect(readonlyWorld.quits, 0);
+      },
+    );
+
+    test(
       'Android downloads and verifies before opening the system installer',
       () async {
         final world = _World();
@@ -643,34 +757,30 @@ void main() {
     return null;
   }();
 
-  test(
-    'the native check accepts a real Ed25519 signature and nothing else',
-    () {
-      // A throwaway key, generated and signed with OpenSSL; not the release
-      // key.
-      final key = base64Decode('NRMpmBFknjIWE2u07GKRJJJ2nWkZUfknRG0i6jtLGYY=');
-      final signature = base64Decode(
-        'p+RF3TPJxMSi0EG1QWDB7KNJI0HNilMSyXuUAtu7anLvLtGrGWfBDb+oKxh1FZXuC++EK71nCuBbVenPeCPHCw==',
-      );
-      final message = utf8.encode('{"version":"0.9.1","assets":[]}');
-      final verifier = NativeSignatureVerifier(DynamicLibrary.open(library!));
-      expect(verifier.verify(message, signature, key), isTrue);
-      expect(
-        verifier.verify(
-          utf8.encode('{"version":"0.9.2","assets":[]}'),
-          signature,
-          key,
-        ),
-        isFalse,
-      );
-      expect(
-        verifier.verify(message, signature, base64Decode(updatePublicKey)),
-        isFalse,
-      );
-      expect(verifier.verify(message, signature.sublist(1), key), isFalse);
-    },
-    skip: library == null ? 'no built pb_mapper_ffi library' : false,
-  );
+  test('the native check accepts a real Ed25519 signature and nothing else', () {
+    // A throwaway key, generated and signed with OpenSSL; not the release
+    // key.
+    final key = base64Decode('NRMpmBFknjIWE2u07GKRJJJ2nWkZUfknRG0i6jtLGYY=');
+    final signature = base64Decode(
+      'p+RF3TPJxMSi0EG1QWDB7KNJI0HNilMSyXuUAtu7anLvLtGrGWfBDb+oKxh1FZXuC++EK71nCuBbVenPeCPHCw==',
+    );
+    final message = utf8.encode('{"version":"0.9.1","assets":[]}');
+    final verifier = NativeSignatureVerifier(DynamicLibrary.open(library!));
+    expect(verifier.verify(message, signature, key), isTrue);
+    expect(
+      verifier.verify(
+        utf8.encode('{"version":"0.9.2","assets":[]}'),
+        signature,
+        key,
+      ),
+      isFalse,
+    );
+    expect(
+      verifier.verify(message, signature, base64Decode(updatePublicKey)),
+      isFalse,
+    );
+    expect(verifier.verify(message, signature.sublist(1), key), isFalse);
+  }, skip: library == null ? 'no built pb_mapper_ffi library' : false);
 
   testWidgets('the About card fits a small phone in Chinese', (tester) async {
     final world = _World();
@@ -798,6 +908,40 @@ void main() {
           ),
         );
         expect(ready.existsSync(), isFalse);
+      },
+    );
+
+    test(
+      'detects both Inno Setup installations and protected helper copies',
+      () {
+        final sep = Platform.pathSeparator;
+        final installed = Directory('${dir.path}${sep}installed')..createSync();
+        File('${installed.path}${sep}pb_mapper_ui.exe').writeAsStringSync('');
+        expect(
+          WindowsInstallerUpdate.isInstalled(
+            '${installed.path}${sep}pb_mapper_ui.exe',
+          ),
+          isFalse,
+        );
+        File('${installed.path}${sep}unins000.exe').writeAsStringSync('');
+        expect(
+          WindowsInstallerUpdate.isInstalled(
+            '${installed.path}${sep}pb_mapper_ui.exe',
+          ),
+          isTrue,
+        );
+
+        final helperRoot = Directory('${dir.path}${sep}pb-mapper-desktop')
+          ..createSync();
+        final releaseDir = Directory('${helperRoot.path}${sep}release-abc123')
+          ..createSync();
+        final helperExe = '${releaseDir.path}${sep}pb_mapper_ui.exe';
+        File(helperExe).writeAsStringSync('');
+        expect(WindowsInstallerUpdate.isInstalled(helperExe), isFalse);
+        File(
+          '${helperRoot.path}${sep}installation.json',
+        ).writeAsStringSync('{}');
+        expect(WindowsInstallerUpdate.isInstalled(helperExe), isTrue);
       },
     );
   });

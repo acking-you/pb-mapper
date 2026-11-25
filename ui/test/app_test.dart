@@ -175,8 +175,11 @@ void main() {
       addTearDown(() => messenger.setMockMethodCallHandler(window, null));
       // The test font draws every glyph a full em wide, about twice real
       // text: measure the bar with the real faces instead.
-      await loadRealFonts();
-      await _loadSegoeUiStandIn();
+      await tester.runAsync(() async {
+        await loadRealFonts();
+        await _loadSegoeUiStandIn();
+      });
+      await tester.pump();
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
       try {
         for (final size in const [Size(720, 640), Size(1180, 780)]) {

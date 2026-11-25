@@ -65,8 +65,7 @@ impl Platform for Windows {
         std::future::ready(desktop::resolve(selection).map(|display| ((), display)))
     }
     fn open(_: &(), display: &Display) -> Result<Parts<Self>> {
-        desktop::available()?;
-        parts(desktop::WinDesktop::open(display)?)
+        parts(desktop::WinDesktop::open(display))
     }
     fn default_state_dir() -> Option<PathBuf> {
         std::env::var_os("LOCALAPPDATA")
@@ -91,7 +90,7 @@ pub(crate) fn open_bound(
 ) -> Result<crate::native::PlatformBackend<Windows>> {
     let mut binding = helper::binding::DesktopBinding::new(session)?;
     binding.enter(|| {})?;
-    let desktop = desktop::WinDesktop::bound(display_id, display_device, binding)?;
+    let desktop = desktop::WinDesktop::bound(display_id, display_device, binding);
     Ok(crate::native::PlatformBackend::from_parts(
         std::sync::Arc::new(()),
         parts(desktop)?,

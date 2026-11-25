@@ -358,6 +358,10 @@ enum ViewerRequest {
     CursorShape {
         shape: u16,
     },
+    /// Wake a locked Mac display and submit its login password (`Viewer::unlock`).
+    Unlock {
+        password: String,
+    },
 }
 
 /// `ModeTarget` as the hot op takes it.
@@ -433,6 +437,18 @@ fn display_mode_error(failure: DisplayModeError) -> CtlError {
         _ => (ErrorCode::Io, "desktop is disconnected"),
     };
     CtlError::new(code, message)
+}
+
+fn unlock_error(failure: desktop::UnlockError) -> CtlError {
+    let code = match &failure {
+        desktop::UnlockError::Closed => ErrorCode::Io,
+        desktop::UnlockError::NotOffered | desktop::UnlockError::Invalid(_) => {
+            ErrorCode::InvalidArgument
+        }
+        desktop::UnlockError::ControlNotAllowed => ErrorCode::NotControlling,
+        _ => ErrorCode::Io,
+    };
+    CtlError::new(code, failure.to_string())
 }
 
 pub(super) fn invitation_error(failure: InvitationError) -> CtlError {
@@ -673,6 +689,10 @@ fn viewer_call(state: &DesktopState, request: ViewerRequest) -> Result<Value, Ct
                 "rgba": base64::engine::general_purpose::STANDARD.encode(shape.rgba()),
             }));
         }
+        ViewerRequest::Unlock { password } => viewer
+            .ok_or_else(disconnected)?
+            .unlock(password)
+            .map_err(unlock_error)?,
     }
     Ok(json!({}))
 }

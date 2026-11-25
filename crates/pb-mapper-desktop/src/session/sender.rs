@@ -253,12 +253,15 @@ impl<'a, W: AsyncWrite + Unpin> Sender<'a, W> {
         let notice = match &self.engine.notice {
             Some((code, message, serial)) if *serial > self.notice_serial => {
                 self.notice_serial = *serial;
-                // A display mode notice only to a viewer that reads them.
-                (*code != NoticeCode::DisplayModeFailed || self.session.display_mode).then(|| {
-                    HostMessage::Notice {
-                        code: *code,
-                        message: message.clone(),
-                    }
+                // Capability-gated notices go only to viewers that listed them.
+                let send_notice = match *code {
+                    NoticeCode::DisplayModeFailed => self.session.display_mode,
+                    NoticeCode::UnlockFailed => self.session.unlock,
+                    NoticeCode::Locked | NoticeCode::LockFailed => true,
+                };
+                send_notice.then(|| HostMessage::Notice {
+                    code: *code,
+                    message: message.clone(),
                 })
             }
             _ => None,

@@ -262,6 +262,11 @@ pub trait Backend: 'static {
     fn restore_display_mode(&mut self) -> Result<bool> {
         Ok(false)
     }
+    /// Wake and unlock a locked desktop with `password`.
+    fn unlock(&mut self, password: &str) -> Result<()> {
+        let _ = password;
+        Err(BackendError::new(FailureKind::Unsupported, "unlock the desktop").into())
+    }
 }
 
 /// `capture` on `backend`, kept only while its desktop is `expected` both
@@ -384,6 +389,9 @@ impl<B: Backend + ?Sized> Backend for Box<B> {
     fn restore_display_mode(&mut self) -> Result<bool> {
         (**self).restore_display_mode()
     }
+    fn unlock(&mut self, password: &str) -> Result<()> {
+        (**self).unlock(password)
+    }
 }
 
 /// When the display presented a picture a backend submitted
@@ -423,6 +431,8 @@ pub struct Description {
 pub struct BackendCaps {
     pub h265: bool,
     pub lock: bool,
+    /// It wakes and unlocks a locked desktop with `ViewerMessage::Unlock`.
+    pub unlock: bool,
     pub display_modes: bool,
     pub os: Option<HostOs>,
     pub cursor: CursorMode,
@@ -449,6 +459,9 @@ impl BackendCaps {
         let lock = self
             .lock
             .then(|| crate::protocol::CAPABILITY_LOCK.to_string());
+        let unlock = self
+            .unlock
+            .then(|| crate::protocol::CAPABILITY_UNLOCK.to_string());
         let modes = self
             .display_modes
             .then(|| crate::protocol::CAPABILITY_DISPLAY_MODE.to_string());
@@ -463,6 +476,7 @@ impl BackendCaps {
             .hires_wheel
             .then(|| crate::protocol::CAPABILITY_WHEEL_HIRES.to_string());
         lock.into_iter()
+            .chain(unlock)
             .chain(modes)
             .chain(os)
             .chain(physical_keys)

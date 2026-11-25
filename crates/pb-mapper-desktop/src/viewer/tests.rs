@@ -4,8 +4,8 @@ use crate::{
     protocol::{
         CAPABILITY_ARRIVAL_TIME, CAPABILITY_CURSOR_SEQUENCE, CAPABILITY_CURSOR_SHAPE,
         CAPABILITY_ENCODER_DWELL, CAPABILITY_FPS_OVERRIDE, CAPABILITY_H265,
-        CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS, CAPABILITY_STANDBY, HostMessage,
-        PeerColor, PeerSlot, RejectReason, StopReason, ViewerMessage,
+        CAPABILITY_KEYFRAME_SEQ, CAPABILITY_PEER_CURSORS, CAPABILITY_STANDBY, CAPABILITY_UNLOCK,
+        HostMessage, PeerColor, PeerSlot, RejectReason, StopReason, ViewerMessage,
     },
     wire,
 };
@@ -197,7 +197,8 @@ async fn scripted_host_session_acknowledges_first_and_authorises_input_by_presen
             CAPABILITY_PEER_CURSORS,
             CAPABILITY_ARRIVAL_TIME,
             CAPABILITY_KEYFRAME_SEQ,
-            CAPABILITY_STANDBY
+            CAPABILITY_STANDBY,
+            crate::protocol::CAPABILITY_UNLOCK,
         ]
     );
 
@@ -358,6 +359,7 @@ async fn h265_is_offered_as_a_capability_and_accepted_only_when_offered() {
             CAPABILITY_ARRIVAL_TIME,
             CAPABILITY_KEYFRAME_SEQ,
             CAPABILITY_STANDBY,
+            CAPABILITY_UNLOCK,
             CAPABILITY_H265,
             CAPABILITY_FPS_OVERRIDE
         ]
@@ -1124,6 +1126,132 @@ async fn peer_cursors_require_capability_and_track_generation_and_visibility() {
 
     send(&mut host, msg(2, 1, 2, 320, 240, false), None).await;
     eventually(|| viewer.view().peer_count == 0).await;
+    drop(host);
+    viewer.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn secure_desktop_reason_marks_capture_unavailable_view_as_secure() {
+    let (viewer, mut host, _) = connect(HostMessage::Accepted {
+        codec: VideoCodec::H264,
+        limits: VideoLimits::for_viewer(60.0),
+        nominal_fps: 60,
+        quality: QualityPreset::Balanced,
+        capabilities: vec!["os_macos".into()],
+        ticket: None,
+    })
+    .await;
+    let viewer = viewer.unwrap();
+    send(
+        &mut host,
+        HostMessage::State(StateRecord {
+            state: SessionState::CaptureUnavailable,
+            reason: Some(crate::StateReason::SecureDesktop),
+            message: "the screen is locked".into(),
+            control_allowed: true,
+            controlling: false,
+            generation: 0,
+            display: None,
+            desktop: DesktopKind::Ordinary,
+            video: None,
+            modes: None,
+        }),
+        None,
+    )
+    .await;
+    eventually(|| viewer.status().state == ViewerState::CaptureUnavailable).await;
+    let status = viewer.status();
+    assert_eq!(status.reason, Some(ViewerReason::SecureDesktop));
+    assert_eq!(status.host_os, Some(crate::HostOs::Macos));
+    let view = viewer.view();
+    assert_eq!(view.state, DesktopView::STATE_CAPTURE_UNAVAILABLE);
+    assert_ne!(view.flags & DesktopView::FLAG_SECURE_DESKTOP, 0);
+    // Host did not offer `unlock` in `Accepted.capabilities`.
+    assert_eq!(
+        viewer.unlock("S3cr3t!".into()),
+        Err(crate::UnlockError::NotOffered)
+    );
+    drop(host);
+    viewer.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn unlock_checks_capability_and_control_then_sends_secret_and_reads_notice() {
+    let (viewer, mut host, _) = connect(HostMessage::Accepted {
+        codec: VideoCodec::H264,
+        limits: VideoLimits::for_viewer(60.0),
+        nominal_fps: 60,
+        quality: QualityPreset::Balanced,
+        capabilities: vec!["os_macos".into(), crate::protocol::CAPABILITY_UNLOCK.into()],
+        ticket: None,
+    })
+    .await;
+    let viewer = viewer.unwrap();
+    send(
+        &mut host,
+        HostMessage::State(StateRecord {
+            state: SessionState::CaptureUnavailable,
+            reason: Some(crate::StateReason::SecureDesktop),
+            message: "the screen is locked".into(),
+            control_allowed: false,
+            controlling: false,
+            generation: 1,
+            display: None,
+            desktop: DesktopKind::Secure,
+            video: None,
+            modes: None,
+        }),
+        None,
+    )
+    .await;
+    eventually(|| viewer.status().state == ViewerState::CaptureUnavailable).await;
+    assert_eq!(
+        viewer.unlock("S3cr3t!".into()),
+        Err(crate::UnlockError::ControlNotAllowed)
+    );
+    assert!(matches!(
+        viewer.unlock(String::new()),
+        Err(crate::UnlockError::Invalid(_))
+    ));
+
+    send(
+        &mut host,
+        HostMessage::State(StateRecord {
+            state: SessionState::CaptureUnavailable,
+            reason: Some(crate::StateReason::SecureDesktop),
+            message: "the screen is locked".into(),
+            control_allowed: true,
+            controlling: false,
+            generation: 1,
+            display: None,
+            desktop: DesktopKind::Secure,
+            video: None,
+            modes: None,
+        }),
+        None,
+    )
+    .await;
+    eventually(|| viewer.status().control_allowed).await;
+    viewer.unlock("CorrectHorse1!".into()).unwrap();
+    let received = receive(&mut host).await;
+    assert!(matches!(
+        received,
+        ViewerMessage::Unlock { password } if password.as_str() == "CorrectHorse1!"
+    ));
+
+    send(
+        &mut host,
+        HostMessage::Notice {
+            code: NoticeCode::UnlockFailed,
+            message: "incorrect Mac login password".into(),
+        },
+        None,
+    )
+    .await;
+    eventually(|| viewer.status().notice.is_some()).await;
+    let notice = viewer.status().notice.unwrap();
+    assert_eq!(notice.code, NoticeCode::UnlockFailed);
+    assert_eq!(notice.message, "incorrect Mac login password");
     drop(host);
     viewer.stop().await.unwrap();
 }

@@ -29,6 +29,9 @@ class MainFlutterWindow: NSWindow {
       NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
       result(nil)
     }
+    // Floating drag-to-authorize card shown beneath System Settings' privacy
+    // panes (ui/macos/Runner/PermissionHelper.swift).
+    PermissionHelper.register(with: flutterViewController.engine.binaryMessenger)
     // The remote desktop's H.264/H.265 decoder (ui/darwin/DesktopVideo.swift).
     DesktopVideoPlugin.register(
       with: flutterViewController.registrar(forPlugin: "PbMapperDesktopVideo"))

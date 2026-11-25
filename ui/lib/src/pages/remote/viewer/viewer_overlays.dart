@@ -627,7 +627,10 @@ class ViewerOverlayLayer extends StatelessWidget {
                 bottom: 34,
                 child: _ViewOnlyPill(),
               ),
-            if (s.notice case final notice?)
+            if (s.notice case final notice?
+                when !(viewerOverlayFor(s).kind ==
+                        ViewerOverlayKind.secureDesktop &&
+                    notice.code == DesktopNoticeCode.unlockFailed))
               Positioned(
                 left: 12,
                 right: 12,
@@ -644,6 +647,8 @@ class ViewerOverlayLayer extends StatelessWidget {
                           context.l10n.viewerRemoteResolutionFailed(
                             notice.message,
                           ),
+                        DesktopNoticeCode.unlockFailed =>
+                          context.l10n.viewerUnlockFailed(notice.message),
                       },
                     ),
                   ),
@@ -782,19 +787,34 @@ class ViewerOverlayLayer extends StatelessWidget {
         ];
       case ViewerOverlayKind.secureDesktop || ViewerOverlayKind.waitingDesktop:
         final secure = kind == ViewerOverlayKind.secureDesktop;
+        final canUnlockMac =
+            secure &&
+            s.hostOs == 'macos' &&
+            s.controlAllowed &&
+            s.capabilities.contains('unlock');
+        final secureBody = s.hostOs == 'macos'
+            ? (canUnlockMac
+                  ? l10n.viewerSecureMacUnlockBody
+                  : l10n.viewerSecureMacBody)
+            : l10n.viewerSecureBody;
         return [
           const ViewerScrim.translucent(),
           centred(
             ViewerCard(
-              width: 360,
+              width: canUnlockMac ? 380 : 360,
               leading: const Icon(
                 AppIcons.secureDesktop,
                 size: AppIconSize.nav,
                 color: ViewerPalette.caution,
               ),
               title: secure ? l10n.viewerSecureTitle : l10n.viewerWaitingTitle,
-              body: secure ? l10n.viewerSecureBody : l10n.viewerWaitingBody,
-              children: [_Chip(l10n.viewerInputPaused)],
+              body: secure ? secureBody : l10n.viewerWaitingBody,
+              children: [
+                if (canUnlockMac)
+                  _MacUnlockForm(desktop: actions.desktop, session: s)
+                else
+                  _Chip(l10n.viewerInputPaused),
+              ],
             ),
           ),
         ];
@@ -951,6 +971,189 @@ class ViewerOverlayLayer extends StatelessWidget {
     String text, [
     Color color = ViewerPalette.textSecondary,
   ]) => Text(text, style: TextStyle(fontSize: 13, color: color));
+}
+
+/// Password entry and wake-and-unlock button on the Mac secure-desktop card.
+class _MacUnlockForm extends StatefulWidget {
+  const _MacUnlockForm({required this.desktop, required this.session});
+
+  final DesktopStore desktop;
+  final DesktopSessionView session;
+
+  @override
+  State<_MacUnlockForm> createState() => _MacUnlockFormState();
+}
+
+class _MacUnlockFormState extends State<_MacUnlockForm> {
+  final _controller = TextEditingController();
+  bool _revealed = false;
+  bool _submitting = false;
+  DesktopNotice? _baselineNotice;
+  Timer? _timeout;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.addListener(_onChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant _MacUnlockForm oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final notice = widget.session.notice;
+    if (_submitting &&
+        notice != null &&
+        notice.code == DesktopNoticeCode.unlockFailed &&
+        !identical(notice, _baselineNotice)) {
+      _stopSubmitting();
+    }
+  }
+
+  @override
+  void dispose() {
+    _timeout?.cancel();
+    _controller
+      ..removeListener(_onChanged)
+      ..clear()
+      ..dispose();
+    super.dispose();
+  }
+
+  void _onChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _stopSubmitting() {
+    _timeout?.cancel();
+    _timeout = null;
+    if (_submitting && mounted) {
+      setState(() => _submitting = false);
+    }
+  }
+
+  void _submit() {
+    final password = _controller.text;
+    if (_submitting || password.isEmpty) return;
+    _baselineNotice = widget.session.notice;
+    final sent = widget.desktop.unlockRemote(password);
+    _controller.clear();
+    if (!sent) return;
+    _timeout?.cancel();
+    _timeout = Timer(const Duration(seconds: 4), _stopSubmitting);
+    setState(() => _submitting = true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final notice = widget.session.notice;
+    final error =
+        !_submitting &&
+            notice != null &&
+            notice.code == DesktopNoticeCode.unlockFailed
+        ? l10n.viewerUnlockFailed(notice.message)
+        : null;
+    final canSubmit = !_submitting && _controller.text.isNotEmpty;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextField(
+          key: const Key('viewer-mac-unlock-password'),
+          controller: _controller,
+          enabled: !_submitting,
+          autofocus: true,
+          obscureText: !_revealed,
+          enableSuggestions: false,
+          autocorrect: false,
+          textInputAction: TextInputAction.done,
+          onSubmitted: (_) => _submit(),
+          style: const TextStyle(fontSize: 13.5, color: ViewerPalette.text),
+          cursorColor: ViewerPalette.signal,
+          decoration: InputDecoration(
+            isDense: true,
+            hintText: l10n.viewerUnlockPasswordHint,
+            hintStyle: const TextStyle(
+              fontSize: 13,
+              color: ViewerPalette.textQuiet,
+            ),
+            filled: true,
+            fillColor: Colors.white.withValues(alpha: 0.06),
+            contentPadding: const EdgeInsetsDirectional.fromSTEB(12, 10, 6, 10),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: const BorderSide(color: ViewerPalette.outline),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: const BorderSide(color: ViewerPalette.signal),
+            ),
+            disabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(
+                color: ViewerPalette.outline.withValues(alpha: 0.5),
+              ),
+            ),
+            suffixIconConstraints: const BoxConstraints(
+              minWidth: 34,
+              minHeight: 34,
+            ),
+            suffixIcon: IconButton(
+              key: const Key('viewer-mac-unlock-reveal'),
+              padding: EdgeInsets.zero,
+              visualDensity: VisualDensity.compact,
+              onPressed: _submitting
+                  ? null
+                  : () => setState(() => _revealed = !_revealed),
+              icon: Icon(
+                _revealed ? AppIcons.hide : AppIcons.show,
+                size: AppIconSize.inline,
+                color: ViewerPalette.textSecondary,
+              ),
+            ),
+          ),
+        ),
+        if (error != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            error,
+            key: const Key('viewer-mac-unlock-error'),
+            style: const TextStyle(
+              fontSize: 12.5,
+              height: 1.4,
+              color: ViewerPalette.danger,
+            ),
+          ),
+        ],
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            if (_submitting) ...[
+              const ViewerSpinner(size: 16),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  l10n.viewerUnlocking,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    color: ViewerPalette.textSecondary,
+                  ),
+                ),
+              ),
+            ] else
+              Expanded(child: _Chip(l10n.viewerInputPaused)),
+            const SizedBox(width: 8),
+            ViewerButton(
+              key: const Key('viewer-mac-unlock-submit'),
+              label: l10n.viewerUnlockAction,
+              filled: true,
+              onPressed: canSubmit ? _submit : null,
+            ),
+          ],
+        ),
+      ],
+    );
+  }
 }
 
 class _ViewOnlyPill extends StatelessWidget {

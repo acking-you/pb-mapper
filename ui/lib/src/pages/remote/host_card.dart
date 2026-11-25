@@ -1,11 +1,12 @@
 import 'dart:async';
-import 'dart:io' show Platform;
+import 'dart:io' show File, Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
 import 'package:pb_mapper_ui/src/common/app_toast.dart';
 import 'package:pb_mapper_ui/src/common/l10n_extension.dart';
+import 'package:pb_mapper_ui/src/common/permission_card.dart';
 import 'package:pb_mapper_ui/src/pages/remote/invite_qr.dart';
 import 'package:pb_mapper_ui/src/pages/remote/remote_format.dart';
 import 'package:pb_mapper_ui/src/shell/app_scope.dart';
@@ -537,12 +538,39 @@ class _PermissionRow extends StatelessWidget {
   final String permission, pane, title, body;
   final IconData icon;
 
-  /// The system's prompt where it still shows one; System Settings when the
-  /// permission is still missing after it.
+  static String _runningBundleName() {
+    final bundle = File(Platform.resolvedExecutable).parent.parent.parent;
+    final path = bundle.path;
+    if (!path.endsWith('.app')) return 'pb-mapper';
+    final last = bundle.uri.pathSegments
+        .where((segment) => segment.isNotEmpty)
+        .lastOrNull;
+    if (last == null) return 'pb-mapper';
+    final trimmed = last.replaceAll(RegExp(r'\.app$'), '');
+    return trimmed.isEmpty ? 'pb-mapper' : trimmed;
+  }
+
+  /// Checks whether the permission is already granted; otherwise opens System
+  /// Settings at the right pane alongside the native drag-to-authorize card so
+  /// dragging the icon and flipping the switch completes setup without restart.
   Future<void> _grant(BuildContext context) async {
+    final l10n = context.l10n;
     final desktop = AppScope.of(context).store.desktop;
-    if (await desktop.requestHostPermission(permission)) return;
+    if (await desktop.requestHostPermission(permission)) {
+      if (PermissionCard.shownPermission == permission) {
+        await PermissionCard.hide();
+      }
+      return;
+    }
     await launchUrl(Uri.parse(pane));
+    final appName = _runningBundleName();
+    await PermissionCard.show(
+      permission: permission,
+      title: l10n.hostPermissionCardTitle(appName),
+      subtitle: l10n.hostPermissionCardSubtitle,
+      appName: appName,
+      onGranted: (_) => unawaited(desktop.recheckHostPermissions()),
+    );
   }
 
   @override

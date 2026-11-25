@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
+import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_video.dart' show VideoPlacement;
 import 'package:pb_mapper_ui/src/pages/remote/viewer/decoder_hint.dart';
 import 'package:pb_mapper_ui/src/pages/remote/viewer/desktop_keyboard.dart';
@@ -269,6 +270,23 @@ void main() {
       find.byKey(const Key('viewer-overlay-secureDesktop')),
       findsOneWidget,
     );
+    expect(find.textContaining('UAC prompt'), findsOneWidget);
+    expect(scrim().opaque, isFalse);
+
+    await enter(
+      const DesktopSessionView(
+        target: _target,
+        phase: DesktopPhase.waitingForDesktop,
+        hasPicture: true,
+        secureDesktop: true,
+        hostOs: 'macos',
+      ),
+    );
+    expect(
+      find.byKey(const Key('viewer-overlay-secureDesktop')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('This Mac is locked'), findsOneWidget);
     expect(scrim().opaque, isFalse);
 
     await enter(
@@ -1992,6 +2010,78 @@ void main() {
         messenger.setMockMethodCallHandler(windowManager, null);
         messenger.setMockMethodCallHandler(SystemKeyCapture.channel, null);
       }
+    },
+  );
+
+  testWidgets(
+    'locked Mac with unlock capability offers password unlock and shows unlock_failed inline',
+    (tester) async {
+      _size(tester, const Size(1280, 800));
+      final api = FakeDesktopApi();
+      final store = DesktopStore(api);
+      final demand = store.demand(DesktopDemand.viewer);
+      await store.connect(_target);
+      api.viewerStatusValue = const DesktopViewerStatus(
+        state: 'capture_unavailable',
+        reason: 'secure_desktop',
+        secureDesktop: true,
+        hostOs: 'macos',
+        controlAllowed: true,
+        capabilities: ['os_macos', 'unlock'],
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+
+      await tester.pumpWidget(
+        _app(
+          DesktopViewer(
+            desktop: store,
+            prefs: ViewerPrefs(persist: false),
+            title: 'Mac Studio',
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final field = find.byKey(const Key('viewer-mac-unlock-password'));
+      final submit = find.byKey(const Key('viewer-mac-unlock-submit'));
+      expect(field, findsOneWidget);
+      expect(submit, findsOneWidget);
+
+      await tester.enterText(field, 'CorrectHorse1!');
+      await tester.pump();
+      await tester.tap(submit);
+      await tester.pump();
+
+      expect(api.argsOf('unlock'), [
+        {'password': 'CorrectHorse1!'},
+      ]);
+      expect(tester.widget<TextField>(field).controller?.text, isEmpty);
+
+      api.viewerStatusValue = const DesktopViewerStatus(
+        state: 'capture_unavailable',
+        reason: 'secure_desktop',
+        secureDesktop: true,
+        hostOs: 'macos',
+        controlAllowed: true,
+        capabilities: ['os_macos', 'unlock'],
+        notice: DesktopNotice(
+          DesktopNoticeCode.unlockFailed,
+          'incorrect Mac login password',
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump();
+
+      expect(find.byKey(const Key('viewer-mac-unlock-error')), findsOneWidget);
+      expect(
+        find.textContaining('incorrect Mac login password'),
+        findsOneWidget,
+      );
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      demand.dispose();
+      store.dispose();
+      await tester.pump(const Duration(seconds: 5));
     },
   );
 }

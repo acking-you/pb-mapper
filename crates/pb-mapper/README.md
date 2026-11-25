@@ -10,7 +10,7 @@ same relay ([Remote desktop](#remote-desktop)).
 
 ```toml
 [dependencies]
-pb-mapper = "0.14"
+pb-mapper = "0.15"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -199,7 +199,7 @@ To stay on the relay, pass `RegisterOptions { allow_direct: false, .. }` or
 ## Remote desktop
 
 ```toml
-pb-mapper = { version = "0.14", features = ["desktop"] }
+pb-mapper = { version = "0.15", features = ["desktop"] }
 ```
 
 The `desktop` feature exposes `pb_mapper::desktop`: a host shares a display,

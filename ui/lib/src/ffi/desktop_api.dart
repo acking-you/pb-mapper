@@ -410,6 +410,7 @@ class DesktopViewerStatus {
       'locked' => DesktopNoticeCode.locked,
       'lock_failed' => DesktopNoticeCode.lockFailed,
       'display_mode_failed' => DesktopNoticeCode.displayModeFailed,
+      'unlock_failed' => DesktopNoticeCode.unlockFailed,
       _ => null,
     };
     return DesktopViewerStatus(
@@ -425,7 +426,8 @@ class DesktopViewerStatus {
       display: json['display'] is Map
           ? DesktopDisplay.fromJson(map(json['display']))
           : null,
-      secureDesktop: json['desktop'] == 'secure',
+      secureDesktop:
+          json['desktop'] == 'secure' || json['reason'] == 'secure_desktop',
       codec: video['codec'] as String?,
       videoWidth: video['width'] as int? ?? 0,
       videoHeight: video['height'] as int? ?? 0,
@@ -652,6 +654,7 @@ abstract interface class DesktopApiClient {
   /// `DISPLAY_MODE_NOT_LISTED` or, once closed, `IO`. The host refuses with
   /// a `displayModeFailed` notice.
   DisplayMode setDisplayMode(DisplayModeTarget target);
+  void unlock(String password);
   void pause();
   void resume();
 
@@ -993,6 +996,9 @@ class DesktopApi implements DesktopApiClient {
 
   @override
   void resume() => _hot('resume');
+
+  @override
+  void unlock(String password) => _hot('unlock', {'password': password});
 
   @override
   DesktopCursorShape? cursorShape(int shape) {

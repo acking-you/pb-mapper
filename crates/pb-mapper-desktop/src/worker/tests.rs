@@ -67,6 +67,9 @@ struct Fake {
     fail_input: Arc<AtomicBool>,
     fail_move: Arc<AtomicBool>,
     fail_lock: Arc<AtomicBool>,
+    /// While `Some(secret)`, capture fails as `SecureDesktop` until `unlock`
+    /// is called with `secret`.
+    locked_secret: Arc<Mutex<Option<String>>>,
     /// Every capture fails, while the desktop stays as it was.
     fail_capture: Arc<AtomicBool>,
     /// The OS double-click time and box; `None` never holds a press.
@@ -149,6 +152,7 @@ impl Fake {
             fail_input: Arc::default(),
             fail_move: Arc::default(),
             fail_lock: Arc::default(),
+            locked_secret: Arc::default(),
             fail_capture: Arc::default(),
             guard: Arc::default(),
             pointer: Arc::new(Mutex::new((3, 3))),
@@ -209,6 +213,18 @@ impl Backend for Fake {
             height: 10,
         })
     }
+    fn context(&mut self) -> Result<DesktopContext> {
+        let locked = self.locked_secret.lock().is_some();
+        Ok(DesktopContext {
+            display: self.display()?,
+            generation: u64::from(!locked),
+            desktop: if locked {
+                crate::DesktopKind::Secure
+            } else {
+                crate::DesktopKind::Ordinary
+            },
+        })
+    }
     fn capture(&mut self) -> Result<Vec<u8>> {
         Ok(vec![1])
     }
@@ -252,6 +268,13 @@ impl Backend for Fake {
             log.captures.push((started, (self.clock)(), keyframe, rate));
             log.captures.len()
         };
+        if self.locked_secret.lock().is_some() {
+            return Err(crate::BackendError::new(
+                crate::FailureKind::SecureDesktop,
+                "macOS hides the lock screen",
+            )
+            .into());
+        }
         if self.fail_capture.load(Ordering::SeqCst) {
             return Err(error("no compatible hardware encoder"));
         }
@@ -397,6 +420,17 @@ impl Backend for Fake {
     fn restore_display_mode(&mut self) -> Result<bool> {
         self.log.lock().restores += 1;
         Ok(false)
+    }
+    fn unlock(&mut self, password: &str) -> Result<()> {
+        let mut locked = self.locked_secret.lock();
+        match locked.as_deref() {
+            None => Ok(()),
+            Some(expected) if expected == password => {
+                *locked = None;
+                Ok(())
+            }
+            Some(_) => Err(error("incorrect Mac login password")),
+        }
     }
 }
 
@@ -3198,4 +3232,38 @@ fn switching_controllers_forgets_fractional_scroll_carry() {
     h.run(Duration::from_millis(20));
     assert_eq!(h.probe.scroll_forgets(), baseline + 1);
     assert_eq!(h.probe.scrolls().len(), 3);
+}
+
+#[test]
+fn unlock_works_during_secure_desktop_unavailable_and_reports_refusals() {
+    let mut h = Harness::new(false, None);
+    *h.fake.locked_secret.lock() = Some("CorrectHorse1!".into());
+    h.run(Duration::from_millis(50), false);
+    assert_eq!(h.state().record.state, SessionState::CaptureUnavailable);
+    assert_eq!(h.state().record.reason, Some(StateReason::SecureDesktop));
+
+    let secret = |pw: &str| crate::protocol::UnlockSecret::new(pw.into()).unwrap();
+    // View-only host refuses unlock with `NoticeCode::UnlockFailed`.
+    h.send(LaneCommand::Unlock(secret("CorrectHorse1!")));
+    h.step();
+    assert_eq!(
+        h.state().notice.map(|(code, _, _)| code),
+        Some(NoticeCode::UnlockFailed)
+    );
+    assert!(h.fake.locked_secret.lock().is_some());
+
+    // Control allowed, wrong password -> `NoticeCode::UnlockFailed` with backend message.
+    h.shared.policy.set(true);
+    h.send(LaneCommand::Unlock(secret("wrong")));
+    h.step();
+    let notice = h.state().notice.unwrap();
+    assert_eq!(notice.0, NoticeCode::UnlockFailed);
+    assert!(notice.1.contains("incorrect Mac login password"));
+
+    // Correct password unlocks the screen and resumes streaming immediately.
+    h.send(LaneCommand::Unlock(secret("CorrectHorse1!")));
+    h.run(Duration::from_millis(250), false);
+    assert!(h.fake.locked_secret.lock().is_none());
+    assert_eq!(h.state().record.state, SessionState::Streaming);
+    assert_eq!(h.state().record.desktop, crate::DesktopKind::Ordinary);
 }

@@ -61,6 +61,15 @@ pub(crate) fn wakeable(
     asleep && !(builtin() && lid_closed())
 }
 
+/// Whether a declaration should light a display that is not listed as awake
+/// or asleep (an external monitor in deep standby that dropped HPD): when no
+/// display is awake at all and no lid is closed. A portable with a closed lid
+/// must never light its built-in panel over and over when its external
+/// display was unplugged.
+pub(crate) fn wake_unlisted(any_awake: bool, lid_closed: impl FnOnce() -> bool) -> bool {
+    !any_awake && !lid_closed()
+}
+
 /// How long a display that turned off under a running capture is left
 /// dark before it is lit, the session checked before each look: a Mac that
 /// locks as its display turns off then has the time to say so, and stays
@@ -138,6 +147,18 @@ mod tests {
         assert!(wakeable(true, || false, lid_unread), "an external display");
         assert!(wakeable(true, || true, || false), "the lid is open");
         assert!(!wakeable(true, || true, || true), "behind the closed lid");
+        assert!(
+            !wake_unlisted(true, lid_unread),
+            "another display already draws"
+        );
+        assert!(
+            wake_unlisted(false, || false),
+            "deep-standby external monitor with no awake display"
+        );
+        assert!(
+            !wake_unlisted(false, || true),
+            "unplugged external monitor with closed lid"
+        );
     }
 
     /// A display found asleep at a session's start or a resume is lit at

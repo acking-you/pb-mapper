@@ -48,6 +48,10 @@ enum UpdateFailure {
   /// A download does not match the size or SHA-256 the manifest lists.
   checksum,
 
+  /// The unpacked bundle or archive failed its signature, notarization or
+  /// identity check before anything was replaced.
+  verification,
+
   /// Android requires the user to allow installs from this app.
   permission,
 
@@ -217,6 +221,11 @@ class PublishedRelease {
 
 /// How an update reaches this installation.
 enum UpdateMethod {
+  /// Extract the signed, notarized app bundle from its disk image, swap it in
+  /// once the app has quit, and reopen it (macOS). Falls back to saving and
+  /// opening the disk image when the bundle's folder is not writable.
+  replaceBundle,
+
   /// Run the installer quietly once the app has quit, then reopen it
   /// (Windows, installed).
   installer,
@@ -224,8 +233,14 @@ enum UpdateMethod {
   /// Swap the AppImage the app runs from and reopen it (Linux).
   replaceAppImage,
 
-  /// Save the file to Downloads and show it: unpack the portable archive, or
-  /// drag the app out of the disk image (portable Windows, Linux zip, macOS).
+  /// Unpack the portable archive into a staging folder, replace the running
+  /// folder's files once the app has quit, and reopen it (portable Windows and
+  /// Linux). Falls back to saving the archive to Downloads when the folder is
+  /// not writable.
+  replacePortable,
+
+  /// Save the file to Downloads and show it when the running installation
+  /// cannot replace itself in place.
   saveDownload,
 
   /// Hand a verified APK to Android's package installer.
@@ -239,6 +254,7 @@ class UpdateHost {
     required this.arch,
     this.windowsInstalled = false,
     this.appImage,
+    this.bundleId,
     this.androidAbis = const [],
   });
 
@@ -254,6 +270,9 @@ class UpdateHost {
 
   /// The AppImage the Linux app runs from, if it does.
   final String? appImage;
+
+  /// The running macOS bundle identifier (`CFBundleIdentifier`), when known.
+  final String? bundleId;
 
   /// Device ABIs in preference order, including when this process is 32 bit.
   final List<String> androidAbis;
@@ -305,8 +324,11 @@ UpdatePlan? planUpdate(ReleaseManifest manifest, UpdateHost host) {
   }
   if (asset == null) return null;
   final method = switch (host.os) {
+    'macos' => UpdateMethod.replaceBundle,
     'windows' when host.windowsInstalled => UpdateMethod.installer,
+    'windows' => UpdateMethod.replacePortable,
     'linux' when host.appImage != null => UpdateMethod.replaceAppImage,
+    'linux' => UpdateMethod.replacePortable,
     'android' => UpdateMethod.systemInstaller,
     _ => UpdateMethod.saveDownload,
   };

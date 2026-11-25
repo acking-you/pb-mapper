@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
+import '../common/permission_card.dart';
 import '../ffi/desktop_api.dart';
 import '../ffi/desktop_video.dart';
 import '../ffi/display_refresh.dart';
@@ -59,8 +60,12 @@ const _hostChangeBusyRetry = Duration(seconds: 1);
 
 /// The capabilities while the Remote page shows a permission still missing
 /// or no display, so a grant made beside a visible window, or a display
-/// attached, shows within this. Returning to the app reads them at once.
+/// attached, shows within this. While the owner is actively granting a
+/// permission (`_capabilityActive`), we check faster so the drag-and-switch
+/// grant reflects almost immediately without restarting.
 const _capabilityFallback = Duration(seconds: 10);
+const _capabilityActive = Duration(milliseconds: 500);
+const _permissionGrantWindow = Duration(seconds: 60);
 
 /// The view leaf's read when no frame, no move and no moving peer pointer
 /// reads it (see `DesktopStore._acceptView`).
@@ -484,13 +489,15 @@ class DesktopStore {
         capabilities != null &&
         (capabilities.reason == 'no_display' ||
             capabilities.permissions?.complete == false);
+    final activeGrant =
+        _permissionPollUntil != null && _now().isBefore(_permissionPollUntil!);
     final capabilityEvery =
         !_disposed &&
             !_restarting &&
             !_cannotHost &&
             _hostPageVisible &&
             awaitsOwner
-        ? _capabilityFallback
+        ? (activeGrant ? _capabilityActive : _capabilityFallback)
         : null;
     if (capabilityEvery != _capabilityEvery) {
       _capabilityEvery = capabilityEvery;
@@ -567,6 +574,11 @@ class DesktopStore {
 
   DesktopCapabilities? _capabilities;
   int _capabilityReads = 0, _capabilityApplied = 0;
+  DateTime? _permissionPollUntil;
+
+  /// Re-reads host capabilities immediately (for example when the native
+  /// macOS permission card observes a fresh grant).
+  Future<void> recheckHostPermissions() => _recheckCapabilities();
 
   /// The capabilities read again, and shown when they changed.
   Future<void> _recheckCapabilities() async {
@@ -814,6 +826,16 @@ class DesktopStore {
           ? background.server
           : null,
     );
+    final perms = capabilities?.permissions;
+    if (perms != null) {
+      final shown = PermissionCard.shownPermission;
+      if (perms.complete ||
+          (shown == 'screen_capture' && perms.screenCapture) ||
+          (shown == 'input' && perms.input)) {
+        unawaited(PermissionCard.hide());
+      }
+      if (perms.complete) _permissionPollUntil = null;
+    }
     _schedulePolling();
   }
 
@@ -1125,6 +1147,9 @@ class DesktopStore {
     var granted = false;
     try {
       granted = await _api.requestHostPermission(permission);
+      if (!granted) {
+        _permissionPollUntil = _now().add(_permissionGrantWindow);
+      }
       await _readCapabilities();
     } catch (e) {
       if (!_disposed) _hostError = _failureOf(e);
@@ -1794,6 +1819,7 @@ class DesktopStore {
       hasPicture: _hasPicture,
       paused: _target != null && (_nativePaused || !_visible),
       path: path == null || path.isEmpty ? null : path,
+      hostOs: status?.hostOs,
       notice: status?.notice,
       capabilities: status?.capabilities ?? const [],
       displayModes: status?.modes,
@@ -2662,6 +2688,22 @@ class DesktopStore {
     final geometry = _geometry.value;
     if (geometry == null) return;
     send(const DesktopInput.lock(), geometryEpoch: geometry.epoch);
+  }
+
+  /// Wakes a locked remote Mac display and enters its login password without
+  /// needing a live video frame. Once unlocked, control is requested as soon
+  /// as the first fresh frame arrives.
+  bool unlockRemote(String password) {
+    if (_disposed || _media == null || password.isEmpty) return false;
+    try {
+      _api.unlock(password);
+      _controlWanted = true;
+      _controlSuppressed = false;
+      _publishSession();
+      return true;
+    } on DesktopCallException {
+      return false;
+    }
   }
 
   /// A live change: never reconnects (D12).

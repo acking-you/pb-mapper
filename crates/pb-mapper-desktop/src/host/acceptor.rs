@@ -659,6 +659,7 @@ mod tests {
         let backend = BackendCaps {
             h265: true,
             lock: true,
+            unlock: true,
             display_modes: true,
             os: Some(HostOs::Android),
             physical_keys: true,

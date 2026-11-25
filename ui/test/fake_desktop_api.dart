@@ -717,6 +717,24 @@ class FakeDesktopApi implements DesktopApiClient {
   }
 
   @override
+  void unlock(String password) {
+    _log('unlock', {'password': password});
+    if (password.isEmpty) {
+      throw const DesktopCallException('INVALID_ARGUMENT');
+    }
+    final status = viewerStatusValue;
+    if (status == null) {
+      throw const DesktopCallException('IO');
+    }
+    if (!status.capabilities.contains('unlock')) {
+      throw const DesktopCallException('INVALID_ARGUMENT');
+    }
+    if (!status.controlAllowed) {
+      throw const DesktopCallException('NOT_CONTROLLING');
+    }
+  }
+
+  @override
   DesktopCursorShape? cursorShape(int shape) {
     _log('cursor_shape', {'shape': shape});
     return cursorShapes[shape];

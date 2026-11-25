@@ -106,8 +106,10 @@ class UpdateDialog extends StatelessWidget {
             ),
             const SizedBox(height: 10),
             Text(switch (plan.method) {
+              UpdateMethod.replaceBundle => l10n.updateNoteBundle,
               UpdateMethod.installer => l10n.updateNoteInstaller,
               UpdateMethod.replaceAppImage => l10n.updateNoteAppImage,
+              UpdateMethod.replacePortable => l10n.updateNotePortable,
               UpdateMethod.saveDownload =>
                 plan.asset.name.endsWith('.dmg')
                     ? l10n.updateNoteDiskImage
@@ -180,6 +182,7 @@ class UpdateDialog extends StatelessWidget {
             UpdateFailure.unsigned => l10n.updateFailedUnsigned,
             UpdateFailure.signature => l10n.updateFailedSignature,
             UpdateFailure.checksum => l10n.updateFailedChecksum,
+            UpdateFailure.verification => l10n.updateFailedVerification,
             UpdateFailure.permission => l10n.updateFailedPermission,
             UpdateFailure.incompatiblePackage => l10n.updateIncompatiblePackage,
             UpdateFailure.install => l10n.updateFailedInstall,

@@ -303,14 +303,45 @@ class UpdateController extends ChangeNotifier {
 
   Future<void> _apply(UpdatePlan plan, File file) async {
     final replacesSelf =
+        plan.method == UpdateMethod.replaceBundle ||
         plan.method == UpdateMethod.installer ||
         plan.method == UpdateMethod.replaceAppImage ||
+        plan.method == UpdateMethod.replacePortable ||
         plan.method == UpdateMethod.systemInstaller;
     if (replacesSelf && !replaceSelf) {
+      _verifiedFile = null;
+      await _discard(file);
       _set(UpdateStage.verifiedOnly);
       return;
     }
     switch (plan.method) {
+      case UpdateMethod.replaceBundle:
+        final version = _published?.version;
+        if (version == null) {
+          throw const UpdateException(
+            UpdateFailure.install,
+            'No target release version',
+          );
+        }
+        try {
+          await installer.replaceMacBundle(
+            file,
+            version: version,
+            bundleId: _host?.bundleId,
+          );
+        } on FileSystemException catch (error) {
+          // Not ours to replace (a read-only volume or an Applications folder
+          // owned by another account): save and open the verified disk image.
+          debugPrint('Could not replace the macOS bundle: $error');
+          _savedPath = await installer.saveToDownloads(file, plan.asset.name);
+          await _discard(file);
+          _set(UpdateStage.saved);
+          return;
+        }
+        await _remember();
+        await _discard(file);
+        _set(UpdateStage.installing);
+        await quit();
       case UpdateMethod.installer:
         // Noted before the installer starts, so a running installer always
         // has its note; taken back when it ended before installing, which
@@ -335,6 +366,22 @@ class UpdateController extends ChangeNotifier {
           // Not ours to replace (a read-only or root-owned folder): hand
           // the new AppImage to the user instead.
           debugPrint('Could not replace the AppImage: $error');
+          _savedPath = await installer.saveToDownloads(file, plan.asset.name);
+          await _discard(file);
+          _set(UpdateStage.saved);
+          return;
+        }
+        await _remember();
+        await _discard(file);
+        _set(UpdateStage.installing);
+        await quit();
+      case UpdateMethod.replacePortable:
+        try {
+          await installer.replacePortable(file);
+        } on FileSystemException catch (error) {
+          // Not ours to replace (a read-only or root-owned folder): save the
+          // verified archive to Downloads instead.
+          debugPrint('Could not replace the portable directory: $error');
           _savedPath = await installer.saveToDownloads(file, plan.asset.name);
           await _discard(file);
           _set(UpdateStage.saved);
@@ -468,12 +515,18 @@ class UpdateController extends ChangeNotifier {
     // Dart names the processor it was compiled for at the end of its
     // version: `... on "windows_x64"`.
     final target = RegExp(r'on "\w+_(\w+)"').firstMatch(Platform.version);
+    String? bundleId;
+    if (Platform.isMacOS) {
+      final info = await PackageInfo.fromPlatform();
+      if (info.packageName.isNotEmpty) bundleId = info.packageName;
+    }
     return UpdateHost(
       os: Platform.operatingSystem,
       arch: target?[1] ?? 'unknown',
       windowsInstalled:
           Platform.isWindows && WindowsInstallerUpdate.isInstalled(),
       appImage: Platform.isLinux ? AppImageUpdate.current() : null,
+      bundleId: bundleId,
       androidAbis: Platform.isAndroid
           ? await AndroidPackageUpdate.abis()
           : const [],

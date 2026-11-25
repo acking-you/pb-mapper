@@ -6,14 +6,16 @@
 //! the main thread (`layout.rs`), and goes up where it went down; every
 //! other key, and a viewer's physical keys, by place, so the Mac's own
 //! layout and input source decide what they type; text is a Unicode string
-//! per event. macOS posts nothing without the owner's Accessibility grant,
-//! and says nothing either, so the grant is checked first.
+//! per event, or virtual key codes on the lock screen. macOS posts nothing
+//! without the owner's Accessibility grant, and says nothing either, so the
+//! grant is checked first.
 
 use super::{
     clicks::{Clicks, SLOP},
-    desktop::Shared,
+    desktop::{self, Shared},
     keys::{self, Layout, Modifiers},
-    layout, pointer,
+    layout, permissions, pointer, power,
+    unlock::{self, PasswordCheck},
 };
 use crate::{
     BackendError, Button, DoubleClickGuard, FailureKind, Key, Permission, Result, error,
@@ -27,8 +29,8 @@ use objc2::rc::autoreleasepool;
 use objc2_app_kit::NSEvent;
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation,
-    CGEventType, CGMouseButton, CGPreflightPostEventAccess, CGScrollEventUnit,
+    CGDisplayIsAsleep, CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID,
+    CGEventTapLocation, CGEventType, CGMainDisplayID, CGMouseButton, CGScrollEventUnit,
 };
 use std::time::{Duration, Instant};
 
@@ -36,6 +38,13 @@ use std::time::{Duration, Instant};
 const ACCESS_CHECK: Duration = Duration::from_secs(1);
 /// macOS's own default, for an interval the system reports out of range.
 const DEFAULT_DOUBLE_CLICK: Duration = Duration::from_millis(500);
+/// Wait bounds when waking a sleeping display and submitting a password on `loginwindow`.
+const UNLOCK_WAKE_WAIT: Duration = Duration::from_millis(800);
+const UNLOCK_WAKE_POLL: Duration = Duration::from_millis(40);
+const UNLOCK_FOCUS_SETTLE: Duration = Duration::from_millis(120);
+const UNLOCK_KEY_PACE: Duration = Duration::from_millis(8);
+const UNLOCK_VERIFY_WAIT: Duration = Duration::from_millis(1800);
+const UNLOCK_VERIFY_POLL: Duration = Duration::from_millis(50);
 
 pub(crate) struct MacInput {
     geometry: Shared,
@@ -116,17 +125,22 @@ impl MacInput {
         })
     }
 
+    fn refresh_layout(&mut self) {
+        let generation = layout::generation();
+        if generation != self.layout.0 {
+            self.layout = (generation, layout::current());
+        }
+    }
+
     fn send_key(&mut self, source: Pressed, down: bool) -> Result<()> {
         self.allowed()?;
+        if matches!(source, Pressed::Key(_)) && down {
+            self.refresh_layout();
+        }
+        let layout = self.layout.1;
         let routed = self.keys.route(source, down, || match source {
             Pressed::Physical(usage) => keys::usage_code(usage),
-            Pressed::Key(key) => {
-                let generation = layout::generation();
-                if generation != self.layout.0 {
-                    self.layout = (generation, layout::current());
-                }
-                Some(self.layout.1.code(key))
-            }
+            Pressed::Key(key) => Some(layout.code(key)),
             Pressed::Button(_) => None,
         });
         if let Some((_, code)) = routed {
@@ -146,7 +160,7 @@ impl MacInput {
                 granted
             }
             _ => {
-                let granted = CGPreflightPostEventAccess();
+                let granted = permissions::input_granted();
                 self.access = Some((now, granted));
                 granted
             }
@@ -156,7 +170,7 @@ impl MacInput {
         } else {
             Err(BackendError::permission_missing(
                 Permission::Input,
-                "macOS has not granted pb-mapper Accessibility, which remote control needs: allow it in System Settings › Privacy & Security › Accessibility",
+                "macOS has not granted pb-mapper Accessibility, which remote control and lock-screen unlock need: allow it in System Settings › Privacy & Security › Accessibility",
             )
             .into())
         }
@@ -274,6 +288,50 @@ impl MacInput {
         }
         Ok(())
     }
+
+    /// Type one character onto `loginwindow`'s secure password field: printable
+    /// ASCII uses real hardware virtual key codes (`kVK_*` + `SHIFT`), because
+    /// `NSSecureTextField` ignores `UNICODE_KEY`'s Unicode override; non-ASCII
+    /// characters fall back to Unicode insertion.
+    fn type_lock_char(&self, ch: char) -> Result<()> {
+        if let Some((code, shifted)) = self.layout.1.ascii_stroke(ch) {
+            let shift = keys::key_code(Key::Shift);
+            let flags = if shifted { keys::SHIFT | 0x02 } else { 0 };
+            if shifted {
+                self.keyboard(shift, true, flags, true)?;
+            }
+            let typed = self
+                .keyboard(code, true, flags, false)
+                .and_then(|()| self.keyboard(code, false, flags, false));
+            if shifted {
+                let _ = self.keyboard(shift, false, 0, true);
+            }
+            typed
+        } else {
+            let mut units = [0u16; 2];
+            self.unicode(ch.encode_utf16(&mut units))
+        }
+    }
+
+    /// Clear any stale characters in `loginwindow`'s password box (`Cmd+A`,
+    /// then `Backspace`) while still on the lock screen.
+    fn clear_lock_field(&self) -> Result<()> {
+        if !desktop::is_locked() {
+            return Ok(());
+        }
+        let cmd = keys::key_code(Key::Meta);
+        let cmd_flags = keys::COMMAND | 0x08;
+        let select_all = self.layout.1.code(Key::A);
+        self.keyboard(cmd, true, cmd_flags, true)?;
+        let selected = self
+            .keyboard(select_all, true, cmd_flags, false)
+            .and_then(|()| self.keyboard(select_all, false, cmd_flags, false));
+        let _ = self.keyboard(cmd, false, 0, true);
+        selected?;
+        let backspace = keys::key_code(Key::Backspace);
+        self.keyboard(backspace, true, 0, false)?;
+        self.keyboard(backspace, false, 0, false)
+    }
 }
 
 /// The event types of a button: down, up, dragged; and its Core Graphics
@@ -312,6 +370,7 @@ fn index(button: Button) -> usize {
 impl Injector for MacInput {
     /// macOS has no public call that locks the screen.
     const LOCK: bool = false;
+    const UNLOCK: bool = true;
     const PHYSICAL_KEYS: bool = true;
     const HIRES_WHEEL: bool = true;
     /// The cursor reports `(x, y)` until the window server has applied the
@@ -401,9 +460,18 @@ impl Injector for MacInput {
         self.send_key(Pressed::Key(key), down)
     }
     /// Text is typed with no modifier, whatever is held: a held Command
-    /// must not turn it into shortcuts. It holds no line break or tab.
+    /// must not turn it into shortcuts. It holds no line break or tab. On the
+    /// lock screen, printable ASCII goes as virtual key codes so `loginwindow`
+    /// accepts it into its password field.
     fn text(&mut self, text: &str) -> Result<()> {
         self.allowed()?;
+        if desktop::is_locked() {
+            self.refresh_layout();
+            for ch in text.chars() {
+                self.type_lock_char(ch)?;
+            }
+            return Ok(());
+        }
         for units in keys::runs(text) {
             self.unicode(&units)?;
         }
@@ -417,6 +485,70 @@ impl Injector for MacInput {
     }
     fn lock(&mut self) -> Result<()> {
         Err(BackendError::new(FailureKind::Unsupported, "lock the desktop").into())
+    }
+    /// Wake a sleeping Mac display and unlock `loginwindow` with `password`.
+    /// Verifies `password` via OpenDirectory first when the user is a local
+    /// account, and checks `desktop::is_locked()` before every keystroke so
+    /// nothing is ever typed into an unlocked desktop.
+    fn unlock(&mut self, password: &str) -> Result<()> {
+        if password.is_empty() || password.chars().any(|ch| matches!(ch, '\r' | '\n' | '\0')) {
+            return Err(error("invalid unlock password"));
+        }
+        desktop::on_console()?;
+        // Re-check Accessibility fresh in case the owner just granted it.
+        self.access = None;
+        self.allowed()?;
+        if !desktop::is_locked() {
+            return Ok(());
+        }
+        if unlock::verify_local_password(password) == PasswordCheck::Invalid {
+            return Err(error("incorrect Mac login password"));
+        }
+        power::force_light();
+        let wake_until = Instant::now() + UNLOCK_WAKE_WAIT;
+        while CGDisplayIsAsleep(CGMainDisplayID()) && Instant::now() < wake_until {
+            std::thread::sleep(UNLOCK_WAKE_POLL);
+        }
+        std::thread::sleep(UNLOCK_FOCUS_SETTLE);
+        if !desktop::is_locked() {
+            return Ok(());
+        }
+        self.modifiers = Modifiers::default();
+        self.refresh_layout();
+        // Nudge `loginwindow` so the password field owns keyboard focus, then
+        // replace any stale dots before typing the password.
+        let _ = self.mouse(
+            CGEventType::MouseMoved,
+            CGMouseButton::Left,
+            Some((0, 0)),
+            None,
+        );
+        self.clear_lock_field()?;
+        std::thread::sleep(Duration::from_millis(20));
+        for ch in password.chars() {
+            if !desktop::is_locked() {
+                return Ok(());
+            }
+            self.type_lock_char(ch)?;
+            std::thread::sleep(UNLOCK_KEY_PACE);
+        }
+        if !desktop::is_locked() {
+            return Ok(());
+        }
+        self.keyboard(keys::RETURN, true, 0, false)?;
+        self.keyboard(keys::RETURN, false, 0, false)?;
+        let verify_until = Instant::now() + UNLOCK_VERIFY_WAIT;
+        while Instant::now() < verify_until {
+            if !desktop::is_locked() {
+                return Ok(());
+            }
+            std::thread::sleep(UNLOCK_VERIFY_POLL);
+        }
+        if !desktop::is_locked() {
+            Ok(())
+        } else {
+            Err(error("the Mac stayed locked after entering the password"))
+        }
     }
     /// The owner's double-click interval; the slop in pixels at this
     /// display's scale.

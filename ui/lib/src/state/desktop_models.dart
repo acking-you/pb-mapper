@@ -489,7 +489,7 @@ enum DesktopDemand { page, viewer }
 /// cannot be verified.
 enum DesktopHelperState { none, ready, stopped, outdated, unverified }
 
-enum DesktopNoticeCode { locked, lockFailed, displayModeFailed }
+enum DesktopNoticeCode { locked, lockFailed, displayModeFailed, unlockFailed }
 
 @immutable
 class DesktopDisplay {
@@ -657,6 +657,7 @@ class DesktopSessionView {
     this.hasPicture = false,
     this.paused = false,
     this.path,
+    this.hostOs,
     this.notice,
     this.capabilities = const [],
     this.displayModes,
@@ -676,6 +677,9 @@ class DesktopSessionView {
 
   /// `direct` or `relay`; null before the path is known.
   final String? path;
+
+  /// `windows` or `macos`, when reported by the host.
+  final String? hostOs;
   final DesktopNotice? notice;
 
   /// What the host offers beyond the base protocol, such as `lock`.
@@ -720,6 +724,7 @@ class DesktopSessionView {
       other.hasPicture == hasPicture &&
       other.paused == paused &&
       other.path == path &&
+      other.hostOs == hostOs &&
       other.notice == notice &&
       listEquals(other.capabilities, capabilities) &&
       other.displayModes == displayModes;
@@ -740,6 +745,7 @@ class DesktopSessionView {
     hasPicture,
     paused,
     path,
+    hostOs,
     notice,
     Object.hashAll(capabilities),
     displayModes,

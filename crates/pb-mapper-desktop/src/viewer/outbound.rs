@@ -26,7 +26,7 @@ use crate::{
     Input, InputEvent, KeyframeReason, QualityPreset,
     input::SCROLL_UNITS_MAX,
     modes::Mode,
-    protocol::{Route, ViewerMessage},
+    protocol::{Route, UnlockSecret, ViewerMessage},
 };
 use std::{
     collections::VecDeque,
@@ -142,6 +142,7 @@ struct Slots {
     quality: Option<QualityPreset>,
     route: Option<Route>,
     display_mode: Option<ModeRequest>,
+    unlock: Option<UnlockSecret>,
 }
 impl Slots {
     /// Whether `(generation, frame_id)` is newer than the last presentation written.
@@ -317,6 +318,9 @@ impl Outbound {
     pub fn display_mode(&self, request: ModeRequest) {
         self.update(|slots| slots.display_mode = Some(request));
     }
+    pub fn unlock(&self, password: UnlockSecret) {
+        self.update(|slots| slots.unlock = Some(password));
+    }
 
     /// Queue one batch of input, all under the queue lock so sequences follow
     /// queue order. `admit` returns the `(generation, frame_id)` of the fresh
@@ -485,6 +489,9 @@ impl Outbound {
                 Lifecycle::Pause => ViewerMessage::Pause {},
                 Lifecycle::Resume => ViewerMessage::Resume {},
             });
+        }
+        if let Some(password) = slots.unlock.take() {
+            return Next::Send(ViewerMessage::Unlock { password });
         }
         let ping = last_write + PING_IDLE;
         let mut due = ping;

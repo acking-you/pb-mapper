@@ -433,7 +433,7 @@ this version typed each twice.
 | Connecting | Its steps — finding the host, going direct or through the relay, checking its identity, the first picture — with Cancel |
 | Live | The picture; the toolbar's chip says when it is delayed |
 | Reconnecting | The last picture greyed, a countdown (1, 2, 4, 8, then 15 s) and Retry now; a busy host is retried the same way, and when the relay answers without listing the computer's service the viewer says it isn't sharing right now (only while the relay and credential are those it was opened through; after a settings change it says nothing). After two minutes of failures the session ends |
-| Waiting for the remote desktop | The last picture, and why: a UAC prompt or the lock screen without the helper, or no desktop at all |
+| Waiting for the remote desktop | The last picture, and why: a UAC prompt or the lock screen without the helper, no desktop at all, or a locked Mac (where an authorized viewer with `unlock` can enter the Mac login password to wake the display and unlock `loginwindow` once Accessibility is granted on the Mac) |
 | Recovering the picture | The last picture while a new keyframe comes |
 | Host identity changed | An opaque card. Retries stop, and nothing replaces the saved identity except **Paste new invitation**, which opens the add flow for that computer |
 | Ended | Why — sharing stopped, the host ended the session, the invitation was revoked or refused, a different pb-mapper version, the picture could not be decoded, two minutes of failed retries (the computer isn't sharing, couldn't be reached, or another device is still viewing it) — with Reconnect where it can help, Retry after a decoder failure, and Paste new invitation for a revoked or refused one |
@@ -1427,7 +1427,7 @@ crates/pb-mapper-desktop/src/
   platform/windows/video/                        capture, scale and encode, fused
   platform/windows/helper/                       service, install, worker, pipes
   platform/macos/{mod,cf,capture,encoder,video,desktop,geometry,input,clicks,
-    keys,pixels,pointer,cursor,modes,mode_list,still,timer,waiter,power,wake,
+    keys,pixels,pointer,cursor,modes,mode_list,still,timer,unlock,waiter,power,wake,
     keychain}.rs
   privileged/                                    public helper facade
 ```

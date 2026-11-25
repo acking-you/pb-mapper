@@ -119,7 +119,7 @@ class _PbMapperAppState extends State<PbMapperApp> with WindowListener {
   );
   final SharingChrome _sharing = SharingChrome();
   late final UpdateController _updates =
-      widget.updates ?? UpdateController(quit: () async => _quit());
+      widget.updates ?? UpdateController(quit: _quitFromTray);
   UpdateSchedule? _updateSchedule;
   final GalaxyView _galaxy = GalaxyView();
   AppLifecycleListener? _lifecycle;

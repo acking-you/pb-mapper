@@ -9,10 +9,10 @@ The system still asks for installation consent.
 | --- | --- |
 | Android | Download to private cache, check package ID, certificate and increasing effective versionCode, request permission to install packages, then open Android's installer using a read-only content URI. Returning from permission settings continues automatically. Retry reuses and rechecks the downloaded APK. |
 | Windows installer | Download and verify, then start the Inno Setup installer with `/SILENT /UPDATEPID=<the app's process>` while the app is still open and in front. For a machine-wide install Setup starts itself again elevated, so Windows asks for permission in front of the app; the app quits once Setup's log (`setup.log` beside the download) exists, which Setup starts only after that permission. Setup waits up to a minute for the app to close before it replaces a file, and when it ends, installed or not, opens the installed app again (`{app}`, as the user who started it). If Setup ends before that point (permission refused), the app stays open and Retry reuses the verified download. The next launch checks whether the requested version actually installed and removes the installer, and the log too when it did. |
-| Windows portable | Download and verify the ZIP, select it in Explorer for replacement by the user. |
+| Windows portable | Download and verify the ZIP, unpack it into a staging folder, check the bundle's files, replace the running folder once the app quits, and reopen; save to Downloads and select in Explorer if its folder cannot be written. |
 | Linux x64 AppImage | Download and verify, replace the AppImage, reopen; save to Downloads if its location cannot be written. |
-| Linux x64 portable | Download and verify the ZIP, open Downloads. Other architectures report no package. |
-| macOS Intel / Apple Silicon | Download the matching DMG, verify it, save it to Downloads and open the system disk-image installer. Drag the app into Applications. |
+| Linux x64 portable | Download and verify the ZIP, unpack it into a staging folder, check the bundle's files, replace the running folder once the app quits, and reopen; save to Downloads if its folder cannot be written. Other architectures report no package. |
+| macOS Intel / Apple Silicon | Download the matching DMG, verify it, mount it quietly, check the `.app` bundle's Developer ID team, Gatekeeper verdict, bundle identifier and version, swap the running `.app` once the app quits, and reopen; save to Downloads and open the disk image if the bundle cannot be written in place. |
 | iOS | Use a properly signed development, TestFlight or App Store distribution. An unsigned IPA is not an installable consumer update. |
 
 ### The Windows installer and the update
@@ -60,10 +60,14 @@ invitation, which the page shows again once the app has restarted into it.
 
 Since 0.9.7 the macOS app and its DMG are signed with the project's Developer
 ID, notarized and stapled, and the mounted DMG passes Gatekeeper before it is
-uploaded ([macOS signing](macos-signing.zh-CN.md)). Unlike CipherRelay it does
-not replace its own bundle in Applications (it was sandboxed until 0.12.0 and
-could not): it opens the verified DMG for installation instead, and never
-removes quarantine or disables Gatekeeper. An opener failure is reported as failure, rather than
+uploaded ([macOS signing](macos-signing.zh-CN.md)). As in CipherRelay, the
+app mounts the verified DMG quietly, copies `pb-mapper.app` into a staging
+folder, checks its Developer ID team (`5T7QB722FM`), Gatekeeper verdict
+(`spctl --assess --type execute`), bundle identifier and version before
+touching anything, swaps the running `.app` once the app has quit, and reopens
+it. When the bundle's location cannot be written by the current user, it saves
+and opens the verified DMG in Downloads instead, and never removes quarantine
+or disables Gatekeeper. An opener failure is reported as failure, rather than
 saying the installation opened successfully.
 
 ## Android signing baseline
@@ -127,8 +131,8 @@ privilege adjustment and distinguishes session-query failures from an absent
 owner login. Build 919 replaces the separate installed-app launch with an
 acknowledged, automatic restart after helper installation. Builds 920 to 927
 were consumed by later issue #50 test distributions (version 0.10.2), and
-0.11.0 uses 928. Release 0.12.0 uses 929, 0.12.1 uses 930 and 0.13.0 uses 931. Release 0.14.0 uses 932. The next
-distribution must use at least 933. The build counter is independent of the
+0.11.0 uses 928. Release 0.12.0 uses 929, 0.12.1 uses 930 and 0.13.0 uses 931. Release 0.14.0 uses 932 and 0.15.0 uses 933. The next
+distribution must use at least 934. The build counter is independent of the
 public version.
 
 To build and verify the Windows installer and zip without publishing a

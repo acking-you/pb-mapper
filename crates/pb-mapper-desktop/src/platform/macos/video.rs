@@ -403,6 +403,9 @@ impl VideoSource for MacVideo {
                 if power::wake([self.display]) {
                     return Err(power::waking());
                 }
+                if capture::blocked_by_lock_screen() {
+                    return Err(capture::locked_screen().into());
+                }
                 return Err(BackendError::new(
                     FailureKind::CaptureFailed,
                     "ScreenCaptureKit delivered no picture",

@@ -56,7 +56,12 @@ pub(crate) const CAPABILITY_WHEEL_HIRES: &str = "wheel_hires";
 /// does the host write `Accepted::ticket`, and only to a host whose
 /// `Accepted` listed it does the viewer write `Authenticate::standby_for`.
 pub(crate) const CAPABILITY_STANDBY: &str = "standby";
+/// Both ways: this end speaks remote lock-screen wake and password unlock.
+/// Only when both listed it may the viewer write `ViewerMessage::Unlock`, and
+/// only then does the host write `NoticeCode::UnlockFailed`.
+pub(crate) const CAPABILITY_UNLOCK: &str = "unlock";
 pub(crate) const MAX_CAPABILITIES: usize = 16;
+pub(crate) const UNLOCK_PASSWORD_MAX: usize = 256;
 
 /// Viewers a host serves at once.
 pub(crate) const MAX_VIEWERS: usize = 4;
@@ -148,6 +153,42 @@ impl TryFrom<u8> for PeerColor {
 impl From<PeerColor> for u8 {
     fn from(color: PeerColor) -> Self {
         color.0
+    }
+}
+
+/// A lock-screen password carried by [`ViewerMessage::Unlock`]: 1..=256 UTF-8
+/// bytes with no line breaks or NUL, redacted in `Debug`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub(crate) struct UnlockSecret(String);
+impl UnlockSecret {
+    pub(crate) fn new(password: String) -> Result<Self, &'static str> {
+        if password.is_empty() || password.len() > UNLOCK_PASSWORD_MAX {
+            return Err("unlock password length out of bounds");
+        }
+        if password.chars().any(|ch| matches!(ch, '\r' | '\n' | '\0')) {
+            return Err("unlock password contains forbidden control character");
+        }
+        Ok(Self(password))
+    }
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl std::fmt::Debug for UnlockSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("\"[redacted]\"")
+    }
+}
+impl TryFrom<String> for UnlockSecret {
+    type Error = &'static str;
+    fn try_from(password: String) -> Result<Self, Self::Error> {
+        Self::new(password)
+    }
+}
+impl From<UnlockSecret> for String {
+    fn from(secret: UnlockSecret) -> Self {
+        secret.0
     }
 }
 
@@ -244,6 +285,10 @@ pub(crate) enum ViewerMessage {
     /// Ordered input lane: back to the display's original mode. Only to a
     /// host that listed `display_mode`.
     RestoreDisplayMode {},
+    /// Ordered input lane: wake a locked host display and enter its login
+    /// password without requiring a fresh video frame. Only to a host that
+    /// listed `unlock`.
+    Unlock { password: UnlockSecret },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -566,6 +611,9 @@ pub enum NoticeCode {
     /// A display mode change or restore was refused, or failed. Only to a
     /// viewer that listed `display_mode`.
     DisplayModeFailed,
+    /// Waking and unlocking a locked host failed, or was refused. Only to a
+    /// viewer that listed `unlock`.
+    UnlockFailed,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -805,6 +853,10 @@ mod tests {
                 code: NoticeCode::DisplayModeFailed,
                 message: "the remote resolution is still changing".into(),
             },
+            HostMessage::Notice {
+                code: NoticeCode::UnlockFailed,
+                message: "incorrect Mac login password".into(),
+            },
             HostMessage::Stopped {
                 reason: StopReason::HostEnded,
                 message: String::new(),
@@ -812,6 +864,22 @@ mod tests {
         ];
         for message in &host {
             rejects_extra_field::<HostMessage>(round_trip(message));
+        }
+
+        let unlock = ViewerMessage::Unlock {
+            password: UnlockSecret::new("S3cr3t!Pass".into()).unwrap(),
+        };
+        assert!(!format!("{unlock:?}").contains("S3cr3t!Pass"));
+        rejects_extra_field::<ViewerMessage>(round_trip(&unlock));
+        for bad in [
+            "".to_owned(),
+            "a\nb".to_owned(),
+            "x".repeat(UNLOCK_PASSWORD_MAX + 1),
+        ] {
+            assert!(
+                serde_json::from_value::<ViewerMessage>(json!({"op": "unlock", "password": bad}))
+                    .is_err()
+            );
         }
 
         // drag_start is omitted when false, and absent means false.

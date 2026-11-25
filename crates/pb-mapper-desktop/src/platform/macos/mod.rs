@@ -32,6 +32,8 @@ pub(crate) mod keys;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod mode_list;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) mod permissions;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod pixels;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod pointer;
@@ -67,6 +69,8 @@ mod tests;
 #[cfg(target_os = "macos")]
 pub(crate) mod timer;
 #[cfg(target_os = "macos")]
+mod unlock;
+#[cfg(target_os = "macos")]
 mod video;
 #[cfg(test)]
 mod vt_measure;
@@ -78,14 +82,10 @@ pub(crate) use platform::Macos;
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::{capture, cursor, desktop, input, modes, power, still, video};
+    use super::{capture, cursor, desktop, input, modes, permissions, power, still, video};
     use crate::{
         BackendError, Display, DisplaySelection, HostOs, Permission, Result,
         platform::{HostPermissions, HostSupport, Parts, Platform, UnsupportedReason},
-    };
-    use objc2_core_graphics::{
-        CGPreflightPostEventAccess, CGPreflightScreenCaptureAccess, CGRequestPostEventAccess,
-        CGRequestScreenCaptureAccess,
     };
     use std::{
         future::Future,
@@ -103,7 +103,7 @@ mod platform {
     pub(crate) fn screen_capture_missing() -> BackendError {
         BackendError::permission_missing(
             Permission::ScreenCapture,
-            "macOS has not granted pb-mapper Screen Recording: allow it in System Settings › Privacy & Security › Screen Recording, then open pb-mapper again",
+            "macOS has not granted pb-mapper Screen Recording: allow it in System Settings › Privacy & Security › Screen Recording",
         )
     }
 
@@ -122,8 +122,8 @@ mod platform {
         /// host.
         fn support() -> HostSupport {
             let permissions = HostPermissions {
-                screen_capture: CGPreflightScreenCaptureAccess(),
-                input: CGPreflightPostEventAccess(),
+                screen_capture: permissions::screen_capture_granted(),
+                input: permissions::input_granted(),
             };
             let reason = if !capture::available() {
                 Some(UnsupportedReason::Platform)
@@ -143,13 +143,11 @@ mod platform {
                 permissions: Some(permissions),
             }
         }
-        /// Each request shows the system's prompt the first time, and lists
-        /// the app in System Settings.
+        /// Prepares live permission tracking and checks whether the permission
+        /// is already granted; System Settings and the drag-to-authorize card
+        /// handle interactive authorization without a redundant modal alert.
         fn request(permission: Permission) -> bool {
-            match permission {
-                Permission::ScreenCapture => CGRequestScreenCaptureAccess(),
-                Permission::Input => CGRequestPostEventAccess(),
-            }
+            permissions::request(permission)
         }
         fn displays() -> Result<Vec<Display>> {
             desktop::displays()
@@ -159,7 +157,7 @@ mod platform {
         fn acquire(
             selection: &DisplaySelection,
         ) -> impl Future<Output = Result<(ScreenAccess, Display)>> + Send {
-            std::future::ready(if CGPreflightScreenCaptureAccess() {
+            std::future::ready(if permissions::screen_capture_granted() {
                 desktop::resolve(selection).map(|display| (ScreenAccess(()), display))
             } else {
                 Err(screen_capture_missing().into())

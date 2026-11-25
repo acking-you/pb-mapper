@@ -85,9 +85,9 @@ pub use video::{
 };
 pub use viewer::{
     AttachError, ConnectError, ConnectStage, DecoderInfo, DecoderState, Decoders, DesktopView,
-    InputError, IntervalStats, NoticeInfo, PresentedInfo, Pull, VideoConsumer, VideoInfo,
-    VideoSink, VideoUnit, Viewer, ViewerConfig, ViewerLink, ViewerReason, ViewerState, ViewerStats,
-    ViewerStatus,
+    InputError, IntervalStats, NoticeInfo, PresentedInfo, Pull, UnlockError, VideoConsumer,
+    VideoInfo, VideoSink, VideoUnit, Viewer, ViewerConfig, ViewerLink, ViewerReason, ViewerState,
+    ViewerStats, ViewerStatus,
 };
 pub use watch::HostChanges;
 

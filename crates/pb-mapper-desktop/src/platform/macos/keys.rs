@@ -134,27 +134,139 @@ const NAMED: [(Key, char); 36] = [
 ];
 
 /// The places that type characters: a Mac keyboard's main block, without
-/// the keypad and the function keys.
+/// the keypad and the function keys, plus the ISO section key (`0x0a`) and
+/// JIS yen/underscore (`0x5d`, `0x5e`).
 const TYPING: RangeInclusive<u16> = 0x00..=0x32;
+const EXTRA_TYPING: [u16; 3] = [0x0a, 0x5d, 0x5e];
+const PRINTABLE_ASCII: usize = (b'~' - b' ') as usize + 1;
 
-/// The key each named letter and digit presses in one keyboard layout.
+/// US-ANSI `(kVK_*, shifted)` for printable ASCII `' '..='~'` (`0x20..=0x7E`).
+const ANSI_ASCII: [(u16, bool); PRINTABLE_ASCII] = [
+    (0x31, false), // ' '
+    (0x12, true),  // '!'
+    (0x27, true),  // '"'
+    (0x14, true),  // '#'
+    (0x15, true),  // '$'
+    (0x17, true),  // '%'
+    (0x1a, true),  // '&'
+    (0x27, false), // '\''
+    (0x19, true),  // '('
+    (0x1d, true),  // ')'
+    (0x1c, true),  // '*'
+    (0x18, true),  // '+'
+    (0x2b, false), // ','
+    (0x1b, false), // '-'
+    (0x2f, false), // '.'
+    (0x2c, false), // '/'
+    (0x1d, false), // '0'
+    (0x12, false), // '1'
+    (0x13, false), // '2'
+    (0x14, false), // '3'
+    (0x15, false), // '4'
+    (0x17, false), // '5'
+    (0x16, false), // '6'
+    (0x1a, false), // '7'
+    (0x1c, false), // '8'
+    (0x19, false), // '9'
+    (0x29, true),  // ':'
+    (0x29, false), // ';'
+    (0x2b, true),  // '<'
+    (0x18, false), // '='
+    (0x2f, true),  // '>'
+    (0x2c, true),  // '?'
+    (0x13, true),  // '@'
+    (0x00, true),  // 'A'
+    (0x0b, true),  // 'B'
+    (0x08, true),  // 'C'
+    (0x02, true),  // 'D'
+    (0x0e, true),  // 'E'
+    (0x03, true),  // 'F'
+    (0x05, true),  // 'G'
+    (0x04, true),  // 'H'
+    (0x22, true),  // 'I'
+    (0x26, true),  // 'J'
+    (0x28, true),  // 'K'
+    (0x25, true),  // 'L'
+    (0x2e, true),  // 'M'
+    (0x2d, true),  // 'N'
+    (0x1f, true),  // 'O'
+    (0x23, true),  // 'P'
+    (0x0c, true),  // 'Q'
+    (0x0f, true),  // 'R'
+    (0x01, true),  // 'S'
+    (0x11, true),  // 'T'
+    (0x20, true),  // 'U'
+    (0x09, true),  // 'V'
+    (0x0d, true),  // 'W'
+    (0x07, true),  // 'X'
+    (0x10, true),  // 'Y'
+    (0x06, true),  // 'Z'
+    (0x21, false), // '['
+    (0x2a, false), // '\\'
+    (0x1e, false), // ']'
+    (0x16, true),  // '^'
+    (0x1b, true),  // '_'
+    (0x32, false), // '`'
+    (0x00, false), // 'a'
+    (0x0b, false), // 'b'
+    (0x08, false), // 'c'
+    (0x02, false), // 'd'
+    (0x0e, false), // 'e'
+    (0x03, false), // 'f'
+    (0x05, false), // 'g'
+    (0x04, false), // 'h'
+    (0x22, false), // 'i'
+    (0x26, false), // 'j'
+    (0x28, false), // 'k'
+    (0x25, false), // 'l'
+    (0x2e, false), // 'm'
+    (0x2d, false), // 'n'
+    (0x1f, false), // 'o'
+    (0x23, false), // 'p'
+    (0x0c, false), // 'q'
+    (0x0f, false), // 'r'
+    (0x01, false), // 's'
+    (0x11, false), // 't'
+    (0x20, false), // 'u'
+    (0x09, false), // 'v'
+    (0x0d, false), // 'w'
+    (0x07, false), // 'x'
+    (0x10, false), // 'y'
+    (0x06, false), // 'z'
+    (0x21, true),  // '{'
+    (0x2a, true),  // '|'
+    (0x1e, true),  // '}'
+    (0x32, true),  // '~'
+];
+
+/// The key each named letter and digit presses in one keyboard layout, and
+/// the `(kVK_*, shifted)` keystroke that types each printable ASCII character
+/// on `loginwindow`'s secure password field (which ignores Unicode-only
+/// `CGEventKeyboardSetUnicodeString` overrides on `UNICODE_KEY`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Layout([u16; NAMED.len()]);
+pub(crate) struct Layout {
+    named: [u16; NAMED.len()],
+    ascii: [(u16, bool); PRINTABLE_ASCII],
+}
 
 impl Layout {
     /// The ANSI places: what a layout that cannot be read gets.
     pub(crate) fn ansi() -> Self {
-        Self(NAMED.map(|(key, _)| key_code(key)))
+        Self {
+            named: NAMED.map(|(key, _)| key_code(key)),
+            ascii: ANSI_ASCII,
+        }
     }
 
     /// A layout whose place `code` types `typed(code, shifted)`. Each named
     /// key goes to its ANSI place where that types its character, else to
     /// the first place that does, unshifted before shifted (a French
     /// layout's digits are shifted); where none does, as on a layout of
-    /// another script, to its ANSI place.
+    /// another script, to its ANSI place. Printable ASCII strokes follow the
+    /// same rule, exact-case first.
     pub(crate) fn of(typed: impl Fn(u16, bool) -> Option<char>) -> Self {
         let mut layout = Self::ansi();
-        for (code, (_, named)) in layout.0.iter_mut().zip(NAMED) {
+        for (code, (_, named)) in layout.named.iter_mut().zip(NAMED) {
             let types = |place: u16, shifted: bool| {
                 typed(place, shifted).map(|typed| typed.to_ascii_lowercase()) == Some(named)
             };
@@ -163,10 +275,31 @@ impl Layout {
                 if types(ansi, shifted) {
                     return Some(ansi);
                 }
-                TYPING.clone().find(|place| types(*place, shifted))
+                TYPING
+                    .clone()
+                    .filter(|place| *place != RETURN && *place != TAB)
+                    .find(|place| types(*place, shifted))
             });
             if let Some(found) = found {
                 *code = found;
+            }
+        }
+        for (index, stroke) in layout.ascii.iter_mut().enumerate() {
+            let wanted = char::from(b' ' + index as u8);
+            let (ansi_code, ansi_shifted) = *stroke;
+            if typed(ansi_code, ansi_shifted) == Some(wanted) {
+                continue;
+            }
+            let found = [false, true].into_iter().find_map(|shifted| {
+                TYPING
+                    .clone()
+                    .filter(|place| *place != RETURN && *place != TAB)
+                    .chain(EXTRA_TYPING)
+                    .find(|place| typed(*place, shifted) == Some(wanted))
+                    .map(|place| (place, shifted))
+            });
+            if let Some(found) = found {
+                *stroke = found;
             }
         }
         layout
@@ -178,7 +311,16 @@ impl Layout {
         NAMED
             .iter()
             .position(|(named, _)| *named == key)
-            .map_or_else(|| key_code(key), |at| self.0[at])
+            .map_or_else(|| key_code(key), |at| self.named[at])
+    }
+
+    /// The `(kVK_*, shifted)` keystroke that types printable ASCII `ch`
+    /// (`' '..='~'`) on the Mac's keyboard layout.
+    pub(crate) fn ascii_stroke(&self, ch: char) -> Option<(u16, bool)> {
+        let byte = u8::try_from(ch).ok()?;
+        (b' '..=b'~')
+            .contains(&byte)
+            .then(|| self.ascii[usize::from(byte - b' ')])
     }
 }
 
@@ -460,6 +602,41 @@ mod tests {
         let cyrillic = |code: u16, _| char::from_u32(0x0430 + u32::from(code));
         assert_eq!(Layout::of(cyrillic), Layout::ansi());
         assert_eq!(Layout::ansi().code(Key::C), 0x08);
+    }
+
+    /// Printable ASCII password characters resolve to real virtual key codes
+    /// and Shift state across both US-ANSI and French AZERTY layouts.
+    #[test]
+    fn printable_ascii_strokes_cover_passwords_and_follow_the_layout() {
+        let ansi = Layout::ansi();
+        for byte in b' '..=b'~' {
+            let ch = char::from(byte);
+            assert!(ansi.ascii_stroke(ch).is_some(), "missing stroke for {ch:?}");
+        }
+        assert_eq!(ansi.ascii_stroke('a'), Some((0x00, false)));
+        assert_eq!(ansi.ascii_stroke('A'), Some((0x00, true)));
+        assert_eq!(ansi.ascii_stroke('1'), Some((0x12, false)));
+        assert_eq!(ansi.ascii_stroke('!'), Some((0x12, true)));
+        assert_eq!(ansi.ascii_stroke('@'), Some((0x13, true)));
+        assert_eq!(ansi.ascii_stroke('_'), Some((0x1b, true)));
+        assert_eq!(ansi.ascii_stroke('~'), Some((0x32, true)));
+        assert_eq!(ansi.ascii_stroke('你'), None);
+        assert_eq!(ansi.ascii_stroke('\n'), None);
+
+        let azerty = |code: u16, shifted: bool| {
+            let (plain, shift) = match code {
+                0x00 => ('q', 'Q'),
+                0x0c => ('a', 'A'),
+                0x12 => ('&', '1'),
+                _ => return None,
+            };
+            Some(if shifted { shift } else { plain })
+        };
+        let layout = Layout::of(azerty);
+        assert_eq!(layout.ascii_stroke('a'), Some((0x0c, false)));
+        assert_eq!(layout.ascii_stroke('A'), Some((0x0c, true)));
+        assert_eq!(layout.ascii_stroke('&'), Some((0x12, false)));
+        assert_eq!(layout.ascii_stroke('1'), Some((0x12, true)));
     }
 
     /// An arrow key-down keeps the Fn and numeric-pad flags Core Graphics

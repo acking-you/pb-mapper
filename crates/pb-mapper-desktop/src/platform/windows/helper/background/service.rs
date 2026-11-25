@@ -55,7 +55,6 @@ pub(crate) async fn run(stop: CancellationToken) -> Result<()> {
         message,
         retry_at: Instant::now(),
         retry: retry(),
-        capture_failure_since: None,
         persistence_failed: false,
     };
     if let Err(failure) = state.restore_power_request().await {
@@ -123,7 +122,6 @@ struct Supervisor {
     message: String,
     retry_at: Instant,
     retry: RetryBackoff,
-    capture_failure_since: Option<Instant>,
     persistence_failed: bool,
 }
 impl Supervisor {
@@ -176,7 +174,6 @@ impl Supervisor {
             let _ = host.stop_with(reason).await;
         }
         self.session = None;
-        self.capture_failure_since = None;
     }
     async fn command(
         &mut self,
@@ -437,23 +434,19 @@ impl Supervisor {
         };
         if let Some(host) = &self.host {
             match host.status().state {
-                HostState::CaptureUnavailable => {
-                    let since = self.capture_failure_since.get_or_insert_with(Instant::now);
-                    if since.elapsed() >= Duration::from_secs(5) {
-                        self.deactivate().await;
-                        self.message =
-                            "Desktop capture stopped; background hosting will reconnect".into();
-                        self.retry_at = Instant::now() + self.retry.next_delay();
-                    }
+                HostState::Stopped => {
+                    self.deactivate_with(StopReason::Restarting).await;
+                    self.message = "Desktop host stopped; background hosting will reconnect".into();
+                    self.retry_at = Instant::now() + self.retry.next_delay();
                 }
-                HostState::Streaming => {
-                    self.capture_failure_since = None;
+                HostState::Streaming | HostState::Waiting => {
                     self.retry.reset();
                 }
-                HostState::Waiting
-                | HostState::Connecting
-                | HostState::Paused
-                | HostState::Stopped => self.capture_failure_since = None,
+                // `CaptureUnavailable` is retried on thread C (for instance
+                // while a sleeping DisplayPort monitor takes several seconds
+                // to wake); tearing the host down would send a terminal
+                // `HostStopped` to connected viewers.
+                HostState::CaptureUnavailable | HostState::Connecting | HostState::Paused => {}
             }
         }
         if self.host.is_some() || self.pending.is_some() || Instant::now() < self.retry_at {
@@ -567,7 +560,6 @@ mod tests {
             message: String::new(),
             retry_at: Instant::now(),
             retry: retry(),
-            capture_failure_since: None,
             persistence_failed: false,
         }
     }

@@ -18,19 +18,74 @@
 
 use crate::platform::awake::{Power, Touches, Wait, Watchdog};
 use pb_mapper_core::power::windows::PowerRequest;
-use std::{sync::OnceLock, thread::Thread, time::Instant};
-use windows::Win32::System::Power::{ES_DISPLAY_REQUIRED, SetThreadExecutionState};
+use std::{
+    sync::OnceLock,
+    thread::Thread,
+    time::{Duration, Instant},
+};
+use windows::Win32::{
+    System::Power::{ES_DISPLAY_REQUIRED, SetThreadExecutionState},
+    UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT, SendInput,
+    },
+};
 
 static TOUCHES: Touches = Touches::new();
 /// The watchdog, once the first touch started it; `None` if it could not be.
 static WATCHDOG: OnceLock<Option<Thread>> = OnceLock::new();
+/// Rate-limits display wake nudges while a sleeping DP monitor is still
+/// re-enumerating.
+static LAST_NUDGE: parking_lot::Mutex<Option<Instant>> = parking_lot::const_mutex(None);
+const NUDGE_EVERY: Duration = Duration::from_secs(2);
 
 /// Capture ran: keep the display and the system awake for `LINGER` more.
 /// Never blocks; only the first touch after an idle spell wakes the
-/// watchdog, and only the first of all starts it.
-pub(crate) fn touch() {
+/// watchdog, and only the first of all starts it. Returns `true` when this
+/// touch woke the watchdog from idle.
+pub(crate) fn touch() -> bool {
     if TOUCHES.touch(Instant::now()) {
         wake();
+        return true;
+    }
+    false
+}
+
+/// Nudge the active input desktop on the calling thread with a zero-delta
+/// relative mouse move so Windows wakes a powered-off or Modern Standby
+/// display (including `Winlogon` in the helper worker, where the detached
+/// watchdog thread is not bound). When `periodic` is true, rate-limited to
+/// once every `NUDGE_EVERY`.
+pub(crate) fn nudge_input_desktop(periodic: bool) {
+    let now = Instant::now();
+    {
+        let mut last = LAST_NUDGE.lock();
+        if periodic
+            && last.is_some_and(|at| {
+                now.checked_duration_since(at)
+                    .is_some_and(|age| age < NUDGE_EVERY)
+            })
+        {
+            return;
+        }
+        *last = Some(now);
+    }
+    let input = [INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_MOVE,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }];
+    // SAFETY: `input` is a valid single-element array on the stack; a
+    // relative (0, 0) move leaves the cursor position unchanged.
+    unsafe {
+        let _ = SendInput(&input, size_of::<INPUT>() as i32);
     }
 }
 

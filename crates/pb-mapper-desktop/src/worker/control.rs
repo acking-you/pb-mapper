@@ -128,6 +128,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                     }
                 }
                 LaneCommand::DisplayMode(_)
+                | LaneCommand::Unlock(_)
                 | LaneCommand::Control { enabled: true }
                 | LaneCommand::Release => {}
             }
@@ -168,11 +169,16 @@ impl<B: Backend, K: Clock> Engine<B, K> {
     }
 
     fn execute_slot(&mut self, idx: usize, command: LaneCommand, now: Instant) {
-        // A display mode command is never held behind a drag, nor ends one.
+        // A display mode or unlock command is never held behind a drag, nor ends one.
         let holding = self.slots[idx]
             .as_ref()
             .is_some_and(|slot| slot.hold.until.is_some());
-        if holding && !matches!(command, LaneCommand::DisplayMode(_)) {
+        if holding
+            && !matches!(
+                command,
+                LaneCommand::DisplayMode(_) | LaneCommand::Unlock(_)
+            )
+        {
             if !matches!(
                 command,
                 LaneCommand::Release
@@ -204,6 +210,7 @@ impl<B: Backend, K: Clock> Engine<B, K> {
                 None => self.slot_input(idx, event, now),
             },
             LaneCommand::DisplayMode(command) => self.display_mode(Some(idx), command, now),
+            LaneCommand::Unlock(password) => self.slot_unlock(idx, password.as_str(), now),
         }
     }
 
@@ -263,6 +270,48 @@ impl<B: Backend, K: Clock> Engine<B, K> {
 
     pub(super) fn allowed(&self) -> bool {
         self.room.policy.allowed() && self.room.policy.get() == self.policy
+    }
+
+    /// Wake a locked host display and submit its login password when control
+    /// is allowed at the host, even while `CaptureUnavailable` hides the lock
+    /// screen from ScreenCaptureKit.
+    fn slot_unlock(&mut self, idx: usize, password: &str, now: Instant) {
+        if !self.allowed() {
+            self.notice_slot(
+                idx,
+                NoticeCode::UnlockFailed,
+                "control is not authorized at the host".into(),
+                now,
+            );
+            return;
+        }
+        if self.lease.is_none()
+            && let Some(admission) = &self.admission
+        {
+            match admission.acquire() {
+                Ok(lease) => self.lease = Some(lease),
+                Err(failure) => {
+                    self.notice_slot(idx, NoticeCode::UnlockFailed, failure.to_string(), now);
+                    return;
+                }
+            }
+        }
+        let unlocked = self.backend.unlock(password);
+        self.sync_lease();
+        let after = self.clock.now();
+        match unlocked {
+            Ok(()) => {
+                self.input_injected(after);
+                self.context_due = after;
+                let _ = self.geometry(after);
+            }
+            Err(failure) if link_lost(&failure) => {
+                self.fatal = Some(failure);
+            }
+            Err(failure) => {
+                self.notice_slot(idx, NoticeCode::UnlockFailed, failure.to_string(), after);
+            }
+        }
     }
 
     fn slot_control(&mut self, idx: usize, enabled: bool) {

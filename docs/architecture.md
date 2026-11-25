@@ -849,7 +849,11 @@ The design and its rules are in `docs/ui-design.md`.
   newest `vX.Y.Z-ui` release, check its Ed25519-signed manifest, download and
   hash the one package, apply it per platform. See "Updates" in
   `docs/ui-design.md`; `ui/pubspec.yaml`'s version must be bumped with the
-  workspace's at every release. On Windows the app starts the installer
+  workspace's at every release. On macOS the app mounts the verified DMG
+  quietly, checks the staged `.app` against the Developer ID team and
+  Gatekeeper, swaps the running `.app` after quitting and reopens it; portable
+  Windows and Linux builds unpack and verify their `.zip` and replace their
+  folder on exit; on installed Windows builds the app starts the installer
   itself with `/UPDATEPID` and quits once its log exists; the installer is
   `ui/windows/packaging/exe/inno_setup.iss`, checked in so that it names
   `pb_mapper_ui.exe` (fastforge would take the first `.exe` of the bundle,

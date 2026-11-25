@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:pb_mapper_ui/l10n/app_localizations.dart';
+import 'package:pb_mapper_ui/src/common/permission_card.dart';
 import 'package:pb_mapper_ui/src/ffi/desktop_api.dart';
 import 'package:pb_mapper_ui/src/ffi/relay_models.dart';
 import 'package:pb_mapper_ui/src/pages/remote/invite_scanner.dart';
@@ -1035,47 +1036,45 @@ void main() {
     },
   );
 
-  testWidgets(
-    "a phone's featured computer can be removed from its More",
-    (tester) async {
-      const id = '0123456789abcdef0123456789abcdef';
-      final vault = FakeRemoteComputerVault()
-        ..records.add(
-          const RemoteComputer(
-            id: id,
-            name: 'Lab',
-            service: 'desktop:lab',
-            fingerprint: 'FFFF-0000-FFFF-0000',
-            relay: 'localhost:7666',
-            namespace: 0,
-          ),
-        );
-      // A phone is not controlled, so its computers lead the page.
-      final api = FakePbMapperApi();
-      api.desktop.available = const DesktopCapabilities(
-        host: false,
-        displays: [],
+  testWidgets("a phone's featured computer can be removed from its More", (
+    tester,
+  ) async {
+    const id = '0123456789abcdef0123456789abcdef';
+    final vault = FakeRemoteComputerVault()
+      ..records.add(
+        const RemoteComputer(
+          id: id,
+          name: 'Lab',
+          service: 'desktop:lab',
+          fingerprint: 'FFFF-0000-FFFF-0000',
+          relay: 'localhost:7666',
+          namespace: 0,
+        ),
       );
-      await pumpApp(
-        tester,
-        api,
-        page: AppPage.remote,
-        size: const Size(390, 844),
-        vault: vault,
-      );
-      // A phone's only computer is the featured one, never a row.
-      expect(_key('computer-featured'), findsOneWidget);
-      await _tapIn(tester, _key('computer-featured-more'));
-      await settle(tester);
-      await tester.tap(_key('computer-remove-$id'));
-      await settle(tester);
-      await tester.tap(_key('confirm-destructive'));
-      await settle(tester);
-      expect(vault.records, isEmpty);
-      await finish(tester);
-    },
-    variant: TargetPlatformVariant.only(TargetPlatform.android),
-  );
+    // A phone is not controlled, so its computers lead the page.
+    final api = FakePbMapperApi();
+    api.desktop.available = const DesktopCapabilities(
+      host: false,
+      displays: [],
+    );
+    await pumpApp(
+      tester,
+      api,
+      page: AppPage.remote,
+      size: const Size(390, 844),
+      vault: vault,
+    );
+    // A phone's only computer is the featured one, never a row.
+    expect(_key('computer-featured'), findsOneWidget);
+    await _tapIn(tester, _key('computer-featured-more'));
+    await settle(tester);
+    await tester.tap(_key('computer-remove-$id'));
+    await settle(tester);
+    await tester.tap(_key('confirm-destructive'));
+    await settle(tester);
+    expect(vault.records, isEmpty);
+    await finish(tester);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
   testWidgets(
     "a remembered computer's rename and remove are reachable without a mouse",
@@ -1146,5 +1145,84 @@ void main() {
       TargetPlatform.android,
       TargetPlatform.windows,
     }),
+  );
+
+  testWidgets(
+    'a Mac permission not yet granted opens System Settings with the drag card '
+    'and notices the grant live without restarting',
+    (tester) async {
+      PermissionCard.resetForTest();
+      final helperCalls = <MethodCall>[];
+      final urls = <String>[];
+      final messenger = tester.binding.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(PermissionCard.channel, (call) async {
+        helperCalls.add(call);
+        return null;
+      });
+      const launcherChannel = MethodChannel(
+        'plugins.flutter.io/url_launcher_macos',
+      );
+      const fallbackLauncher = MethodChannel('plugins.flutter.io/url_launcher');
+      Future<Object?> mockLaunch(MethodCall call) async {
+        final args = call.arguments;
+        if (args is Map && args['url'] is String) {
+          urls.add(args['url'] as String);
+        } else if (args is String) {
+          urls.add(args);
+        }
+        return true;
+      }
+
+      messenger.setMockMethodCallHandler(launcherChannel, mockLaunch);
+      messenger.setMockMethodCallHandler(fallbackLauncher, mockLaunch);
+      addTearDown(() {
+        PermissionCard.resetForTest();
+        messenger.setMockMethodCallHandler(PermissionCard.channel, null);
+        messenger.setMockMethodCallHandler(launcherChannel, null);
+        messenger.setMockMethodCallHandler(fallbackLauncher, null);
+      });
+
+      final api = FakePbMapperApi();
+      api.desktop.permissionGranted = false;
+      api.desktop.available = const DesktopCapabilities(
+        reason: 'permission_missing',
+        backgroundService: false,
+        permissions: DesktopHostPermissions(),
+        displays: [DesktopDisplay(1, 'Built-in Retina Display', 3024, 1964)],
+      );
+
+      await pumpApp(tester, api, page: AppPage.remote);
+      expect(_key('host-permission-screen_capture'), findsOneWidget);
+
+      await _tapIn(tester, _key('host-permission-screen_capture-grant'));
+      await settle(tester);
+
+      expect(helperCalls.map((c) => c.method), ['show']);
+      expect(
+        (helperCalls.single.arguments as Map)['permission'],
+        'screen_capture',
+      );
+      expect(PermissionCard.shownPermission, 'screen_capture');
+
+      // Simulate the owner dragging pb-mapper into System Settings and
+      // switching Screen Recording on while the app stays open.
+      api.desktop.available = const DesktopCapabilities(
+        host: true,
+        backgroundService: false,
+        permissions: DesktopHostPermissions(screenCapture: true),
+        displays: [DesktopDisplay(1, 'Built-in Retina Display', 3024, 1964)],
+      );
+      await tester.pump(const Duration(milliseconds: 600));
+      await settle(tester);
+
+      expect(_key('host-permission-screen_capture'), findsNothing);
+      expect(
+        tester.widget<FilledButton>(_key('host-enable')).onPressed,
+        isNotNull,
+      );
+      expect(PermissionCard.shown, isFalse);
+      expect(helperCalls.map((c) => c.method), ['show', 'hide']);
+      await finish(tester);
+    },
   );
 }

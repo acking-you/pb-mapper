@@ -421,6 +421,7 @@ impl From<&BackendCaps> for StartCaps {
         let BackendCaps {
             h265: _,
             lock,
+            unlock: _,
             display_modes,
             os,
             cursor,
@@ -454,6 +455,7 @@ impl From<StartCaps> for BackendCaps {
         Self {
             h265: false,
             lock,
+            unlock: false,
             display_modes,
             os,
             cursor,

@@ -643,6 +643,9 @@ impl Backend for RemoteBackend {
         self.changed_mode = false;
         Ok(answer.restored.unwrap_or(false))
     }
+    fn unlock(&mut self, _password: &str) -> Result<()> {
+        Err(BackendError::new(FailureKind::Unsupported, "unlock the desktop").into())
+    }
 }
 impl Drop for RemoteBackend {
     /// Close the worker, then stop the I/O thread (`Link`'s drop).

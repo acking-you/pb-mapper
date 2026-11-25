@@ -173,46 +173,82 @@ pub(crate) struct WinDesktop {
     binding: Option<DesktopBinding>,
 }
 impl WinDesktop {
-    pub(crate) fn open(display: &Display) -> Result<Self> {
-        let (id, monitor) = match monitor_handle(display.id) {
-            Ok(monitor) => (display.id, monitor),
-            Err(failure) => by_name(&display.name).ok_or(failure)?,
-        };
-        Ok(Self {
+    /// Keep `display`'s identity even when a sleeping DisplayPort monitor has
+    /// dropped HPD and is not enumerated yet; `read_geometry` resolves its
+    /// handle once it wakes.
+    pub(crate) fn open(display: &Display) -> Self {
+        let resolved = monitor_handle(display.id)
+            .ok()
+            .map(|monitor| (display.id, monitor))
+            .or_else(|| {
+                (!display.name.is_empty())
+                    .then(|| by_name(&display.name))
+                    .flatten()
+            });
+        let (id, monitor) = resolved.unwrap_or((display.id, HMONITOR(std::ptr::null_mut())));
+        Self {
             id,
             name: display.name.clone(),
             monitor,
             binding: None,
-        })
+        }
     }
     #[cfg(feature = "windows-helper")]
     /// The display of `id`, or, when that went stale, of the `device` name.
-    pub(crate) fn bound(id: u32, device: Option<String>, binding: DesktopBinding) -> Result<Self> {
+    /// Succeeds even while a sleeping monitor is unenumerated so the worker
+    /// can wake it and wait for it to return.
+    pub(crate) fn bound(id: u32, device: Option<String>, binding: DesktopBinding) -> Self {
         let _dpi = DpiScope::enter();
-        let (id, monitor) = match monitor_handle(id) {
-            Ok(monitor) => (id, monitor),
-            Err(failure) => device.as_deref().and_then(by_name).ok_or(failure)?,
+        let resolved = monitor_handle(id)
+            .ok()
+            .map(|monitor| (id, monitor))
+            .or_else(|| device.as_deref().and_then(by_name));
+        let (id, monitor, name) = match resolved {
+            Some((id, monitor)) => {
+                let name = current_display(id, monitor)
+                    .map_or_else(|_| device.unwrap_or_default(), |display| display.name);
+                (id, monitor, name)
+            }
+            None => (
+                id,
+                HMONITOR(std::ptr::null_mut()),
+                device.unwrap_or_default(),
+            ),
         };
-        let name = current_display(id, monitor)
-            .map_or_else(|_| device.unwrap_or_default(), |display| display.name);
-        Ok(Self {
+        Self {
             id,
             name,
             monitor,
             binding: Some(binding),
-        })
+        }
     }
     fn read_geometry(&mut self) -> Result<MonitorGeometry> {
-        monitor_geometry(self.monitor).or_else(|failure| {
-            // A mode change may recreate the monitor's handle; its device
-            // name stays.
-            let (id, monitor) = by_name(&self.name)
-                .filter(|(id, _)| *id != self.id)
-                .ok_or(failure)?;
-            self.id = id;
-            self.monitor = monitor;
-            monitor_geometry(monitor)
-        })
+        if !self.monitor.0.is_null()
+            && let Ok(geometry) = monitor_geometry(self.monitor)
+        {
+            return Ok(geometry);
+        }
+        // A mode change or DisplayPort sleep/wake may recreate or restore the
+        // monitor's handle; its device name stays.
+        let found = monitor_handle(self.id)
+            .ok()
+            .map(|monitor| (self.id, monitor))
+            .or_else(|| {
+                (!self.name.is_empty())
+                    .then(|| by_name(&self.name))
+                    .flatten()
+            });
+        let Some((id, monitor)) = found else {
+            self.monitor = HMONITOR(std::ptr::null_mut());
+            return Err(display_lost("selected display is no longer available"));
+        };
+        self.id = id;
+        self.monitor = monitor;
+        let geometry = monitor_geometry(monitor)?;
+        if self.name.is_empty() {
+            self.name = win32::from_wide_nul(&geometry.device);
+        }
+        Ok(geometry)
     }
 }
 impl Desktop for WinDesktop {
@@ -232,7 +268,16 @@ impl Desktop for WinDesktop {
         binding.enter(on_switch)
     }
     fn display(&mut self) -> Result<Display> {
-        Ok(self.read_geometry()?.display(self.id))
+        // `PlatformBackend::display` ran `prepare` just before, so this thread
+        // owns the active input desktop. Hold `PowerRequestDisplayRequired`
+        // even before `Encoder::open` runs (so a monitor disconnected in sleep
+        // still wakes), and nudge the input desktop on wake or `DisplayLost`.
+        let woke = super::power::touch();
+        let geometry = self.read_geometry();
+        if woke || geometry.is_err() {
+            super::power::nudge_input_desktop(geometry.is_err() && !woke);
+        }
+        Ok(geometry?.display(self.id))
     }
     fn display_matches(&mut self, expected: &Display) -> Result<bool> {
         let geometry = self.read_geometry()?;

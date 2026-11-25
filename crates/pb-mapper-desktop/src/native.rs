@@ -173,6 +173,7 @@ impl<P: Platform> Backend for PlatformBackend<P> {
             caps: BackendCaps {
                 h265: probe_h265 && P::Video::encodes(&display, VideoCodec::H265),
                 lock: self.parts.input.can_lock(),
+                unlock: self.parts.input.can_unlock(),
                 display_modes: <P::Modes as DisplayModes>::SUPPORTED
                     && modes.available(&display.name),
                 os: Some(P::OS),
@@ -493,6 +494,16 @@ impl<P: Platform> Backend for PlatformBackend<P> {
         self.parts.desktop.forget_recent();
         restored
     }
+    fn unlock(&mut self, password: &str) -> Result<()> {
+        let _scope = self.parts.desktop.scope();
+        self.release();
+        if !self.parts.input.can_unlock() {
+            return Err(BackendError::new(FailureKind::Unsupported, "unlock the desktop").into());
+        }
+        let unlocked = self.parts.input.unlock(password);
+        self.parts.desktop.forget_recent();
+        unlocked
+    }
 }
 impl<P: Platform> Drop for PlatformBackend<P> {
     fn drop(&mut self) {
@@ -646,6 +657,9 @@ impl Backend for NativeBackend {
     }
     fn restore_display_mode(&mut self) -> Result<bool> {
         self.0.restore_display_mode()
+    }
+    fn unlock(&mut self, password: &str) -> Result<()> {
+        self.0.unlock(password)
     }
 }
 

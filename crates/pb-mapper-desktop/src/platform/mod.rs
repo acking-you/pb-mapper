@@ -267,6 +267,8 @@ pub(crate) trait VideoSource: Sized {
 pub(crate) trait Injector: Sized {
     /// The compile-time default; the runtime truth is `can_lock`.
     const LOCK: bool;
+    /// The compile-time default; the runtime truth is `can_unlock`.
+    const UNLOCK: bool = false;
     /// Whether [`Injector::physical_key`] presses keys: a host lists
     /// `physical_keys` only then.
     const PHYSICAL_KEYS: bool = false;
@@ -276,6 +278,9 @@ pub(crate) trait Injector: Sized {
     const HIRES_WHEEL: bool = false;
     fn can_lock(&self) -> bool {
         Self::LOCK
+    }
+    fn can_unlock(&self) -> bool {
+        Self::UNLOCK
     }
     /// Absolute physical virtual-desktop pixels: display origin plus offset.
     fn pointer(&mut self, x: i32, y: i32) -> Result<()>;
@@ -316,6 +321,11 @@ pub(crate) trait Injector: Sized {
     fn forget_scroll(&mut self) {}
     /// Called only when `can_lock`.
     fn lock(&mut self) -> Result<()>;
+    /// Called only when `can_unlock`.
+    fn unlock(&mut self, password: &str) -> Result<()> {
+        let _ = password;
+        Err(BackendError::new(FailureKind::Unsupported, "unlock the desktop").into())
+    }
     fn double_click(&mut self) -> Option<DoubleClickGuard> {
         None
     }
@@ -569,6 +579,7 @@ pub fn request_permission(permission: Permission) -> bool {
 pub(crate) fn fallback_caps<P: Platform>() -> BackendCaps {
     BackendCaps {
         lock: <P::Input as Injector>::LOCK,
+        unlock: <P::Input as Injector>::UNLOCK,
         physical_keys: <P::Input as Injector>::PHYSICAL_KEYS,
         hires_wheel: <P::Input as Injector>::HIRES_WHEEL,
         os: Some(P::OS),

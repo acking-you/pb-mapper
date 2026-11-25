@@ -330,9 +330,42 @@ struct ShareableContent(Retained<SCShareableContent>);
 // SAFETY: the retained snapshot is read-only on the receiving thread.
 unsafe impl Send for ShareableContent {}
 
+/// ScreenCaptureKit blocks capture while the Mac is locked, even when Screen
+/// Recording is granted: report `SecureDesktop` rather than a fatal consent
+/// revocation so the session stays connected for remote password unlock.
+pub(crate) fn locked_screen() -> BackendError {
+    BackendError::new(
+        FailureKind::SecureDesktop,
+        "macOS hides the lock screen; enter the password in the viewer to wake and unlock",
+    )
+}
+
+pub(crate) fn blocked_by_lock_screen() -> bool {
+    super::desktop::is_locked() && super::permissions::screen_capture_granted()
+}
+
+/// Non-streaming check of whether `ScreenCaptureKit` (`replayd`) currently
+/// grants this process access to shareable display metadata. Called only after
+/// the owner initiates Screen Recording setup or after a TCC change on an
+/// already-granted process, never on cold unasked startup.
+pub(crate) fn probe_access() -> bool {
+    shareable(|handler| {
+        // SAFETY: `handler` is valid for the duration of the completion callback.
+        unsafe {
+            SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+                false, true, handler,
+            );
+        }
+    })
+    .is_ok()
+}
+
 /// A numeric error code identifies a ScreenCaptureKit failure only in its domain.
 pub(super) fn failure(error: Option<&NSError>) -> BackendError {
     let Some(error) = error else {
+        if blocked_by_lock_screen() {
+            return locked_screen();
+        }
         return BackendError::new(
             FailureKind::CaptureFailed,
             "ScreenCaptureKit returned no error",
@@ -342,7 +375,6 @@ pub(super) fn failure(error: Option<&NSError>) -> BackendError {
     // SAFETY: the framework's static error domain, used only after its availability check.
     if domain.isEqualToString(unsafe { SCStreamErrorDomain }) {
         match SCStreamErrorCode(error.code()) {
-            SCStreamErrorCode::UserDeclined => return super::platform::screen_capture_missing(),
             SCStreamErrorCode::UserStopped => {
                 return BackendError::new(
                     FailureKind::ConsentRevoked,
@@ -352,8 +384,14 @@ pub(super) fn failure(error: Option<&NSError>) -> BackendError {
                     ),
                 );
             }
+            SCStreamErrorCode::UserDeclined if !blocked_by_lock_screen() => {
+                return super::platform::screen_capture_missing();
+            }
             _ => {}
         }
+    }
+    if blocked_by_lock_screen() {
+        return locked_screen();
     }
     BackendError::new(
         FailureKind::CaptureFailed,
@@ -421,6 +459,9 @@ pub(crate) fn display(id: u32) -> Result<Retained<SCDisplay>> {
         // SAFETY: a display's id, read only.
         .find(|display| unsafe { display.displayID() } == id)
         .ok_or_else(|| {
+            if blocked_by_lock_screen() {
+                return locked_screen().into();
+            }
             BackendError::new(
                 FailureKind::DisplayLost,
                 "ScreenCaptureKit does not list the selected display",

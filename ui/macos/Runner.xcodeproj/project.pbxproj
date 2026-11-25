@@ -29,6 +29,7 @@
 		33CC11132044BFA00003C045 /* MainFlutterWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33CC11122044BFA00003C045 /* MainFlutterWindow.swift */; };
 		DE5C0DE22EC4000100C0FFEE /* DesktopVideo.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE5C0DE12EC4000100C0FFEE /* DesktopVideo.swift */; };
 		DE5C0DE82EC4000100C0FFEE /* DesktopPointer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE5C0DE72EC4000100C0FFEE /* DesktopPointer.swift */; };
+		DE5C0DEA2EC4000100C0FFEE /* PermissionHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE5C0DE92EC4000100C0FFEE /* PermissionHelper.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -82,6 +83,7 @@
 		9740EEB21CF90195004384FC /* Debug.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; path = Debug.xcconfig; sourceTree = "<group>"; };
 		DE5C0DE12EC4000100C0FFEE /* DesktopVideo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DesktopVideo.swift; path = ../darwin/DesktopVideo.swift; sourceTree = SOURCE_ROOT; };
 		DE5C0DE72EC4000100C0FFEE /* DesktopPointer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = DesktopPointer.swift; path = ../darwin/DesktopPointer.swift; sourceTree = SOURCE_ROOT; };
+		DE5C0DE92EC4000100C0FFEE /* PermissionHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionHelper.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -168,6 +170,7 @@
 			children = (
 				33CC10F02044A3C60003C045 /* AppDelegate.swift */,
 				33CC11122044BFA00003C045 /* MainFlutterWindow.swift */,
+				DE5C0DE92EC4000100C0FFEE /* PermissionHelper.swift */,
 				DE5C0DE12EC4000100C0FFEE /* DesktopVideo.swift */,
 				DE5C0DE72EC4000100C0FFEE /* DesktopPointer.swift */,
 				33E51913231747F40026EE4D /* DebugProfile.entitlements */,
@@ -355,6 +358,7 @@
 				335BBD1B22A9A15E00E9071D /* GeneratedPluginRegistrant.swift in Sources */,
 				DE5C0DE22EC4000100C0FFEE /* DesktopVideo.swift in Sources */,
 				DE5C0DE82EC4000100C0FFEE /* DesktopPointer.swift in Sources */,
+				DE5C0DEA2EC4000100C0FFEE /* PermissionHelper.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

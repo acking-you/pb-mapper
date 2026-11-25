@@ -20,7 +20,7 @@
 
 use super::{
     desktop,
-    wake::{WakeLimiter, wakeable},
+    wake::{WakeLimiter, wake_unlisted, wakeable},
 };
 use crate::{BackendError, Display, FailureKind};
 use objc2_core_foundation::{CFBoolean, CFRetained, CFString, CFType};
@@ -117,12 +117,36 @@ pub(crate) fn wake(ids: impl IntoIterator<Item = CGDirectDisplayID>) -> bool {
     asleep
 }
 
+/// Light sleeping displays, or declare activity when no display is awake at
+/// all (an external monitor in deep standby that dropped HPD) and no lid is
+/// closed. Every caller has verified `desktop::available()` first.
+pub(crate) fn wake_any() -> bool {
+    let mut any_awake = false;
+    let mut should_light = false;
+    for id in online() {
+        if !CGDisplayIsAsleep(id) {
+            any_awake = true;
+        } else if wakeable(true, || CGDisplayIsBuiltin(id), lid_closed) {
+            should_light = true;
+            break;
+        }
+    }
+    if !should_light {
+        should_light = wake_unlisted(any_awake, lid_closed);
+    }
+    if should_light {
+        light();
+    }
+    should_light
+}
+
 /// At a session's start, before its display is bound: when this login owns
-/// the screen, unlocked, light every display that sleeps, and wait up to
-/// `WAKE_WAIT` for `display` to draw, so that it is listed and its capture
-/// starts with a picture.
+/// the console, light every display that sleeps (including on the lock screen
+/// or an external monitor that dropped HPD in deep standby), and wait up to
+/// `WAKE_WAIT` for `display` to draw, so that a fast panel starts with a
+/// picture while a slower monitor continues waking under `Engine`'s retry.
 pub(crate) fn wake_for_session(display: &Display) {
-    if desktop::available().is_err() || !wake(online()) {
+    if desktop::on_console().is_err() || drawing(display) || !wake_any() {
         return;
     }
     let until = Instant::now() + WAKE_WAIT;
@@ -157,11 +181,22 @@ pub(crate) fn light() {
     if !woken.limiter.admit(Instant::now()) {
         return;
     }
+    declare_activity(&mut woken.id);
+}
+
+/// Declare the local user active unconditionally (for an explicit remote
+/// lock-screen wake and password unlock), recording the wake timestamp.
+pub(crate) fn force_light() {
+    let mut woken = WOKEN.lock();
+    let _ = woken.limiter.admit(Instant::now());
+    declare_activity(&mut woken.id);
+}
+
+fn declare_activity(id: &mut AssertionId) {
     let name = CFString::from_static_str("pb-mapper: a remote desktop viewer is watching");
     // SAFETY: a name, the local user and the id the last declaration gave
     // (or none), which the call replaces with the one to pass next.
-    let status =
-        unsafe { IOPMAssertionDeclareUserActivity(&name, USER_ACTIVE_LOCAL, &mut woken.id) };
+    let status = unsafe { IOPMAssertionDeclareUserActivity(&name, USER_ACTIVE_LOCAL, id) };
     if status == SUCCESS {
         tracing::debug!(target: "pb_mapper_desktop::session", event = "desktop_display_wake");
     } else {

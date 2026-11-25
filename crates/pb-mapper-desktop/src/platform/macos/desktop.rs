@@ -8,7 +8,9 @@
 //! input never does.
 
 use super::{cf, geometry::Geometry, reuse::Reuse};
-use crate::{BackendError, Display, DisplaySelection, FailureKind, Result, platform::Desktop};
+use crate::{
+    BackendError, DesktopKind, Display, DisplaySelection, FailureKind, Result, platform::Desktop,
+};
 use objc2_core_foundation::{CFBoolean, CFNumber, CFRetained, CFString, CFUUID};
 use objc2_core_graphics::{
     CGDirectDisplayID, CGDisplayBounds, CGDisplayCopyDisplayMode, CGDisplayMode,
@@ -118,9 +120,11 @@ pub(crate) fn resolve(selection: &DisplaySelection) -> Result<Display> {
     }
 }
 
-/// Whether this process's login owns the screen, unlocked: else the secure
-/// desktop.
-pub(super) fn available() -> Result<()> {
+/// Whether this process's login owns the console, and whether the screen is
+/// locked (`DesktopKind::Secure`) or unlocked (`DesktopKind::Ordinary`).
+/// Fast User Switching to another login or running without a WindowServer
+/// session is outside this process's console (`FailureKind::SecureDesktop`).
+pub(crate) fn on_console() -> Result<DesktopKind> {
     let Some(session) = CGSessionCopyCurrentDictionary() else {
         return Err(secure("this process has no window server session"));
     };
@@ -139,9 +143,14 @@ pub(super) fn available() -> Result<()> {
         return Err(secure("another login is using the screen"));
     }
     if flag("CGSSessionScreenIsLocked") == Some(true) {
-        return Err(secure("the screen is locked"));
+        return Ok(DesktopKind::Secure);
     }
-    Ok(())
+    Ok(DesktopKind::Ordinary)
+}
+
+/// Whether this Mac's active console session currently shows the lock screen.
+pub(crate) fn is_locked() -> bool {
+    matches!(on_console(), Ok(DesktopKind::Secure))
 }
 
 fn secure(why: &str) -> std::io::Error {
@@ -158,9 +167,11 @@ pub(crate) struct MacDesktop {
     /// Its UUID, which finds it again when its id goes stale.
     name: String,
     geometry: Shared,
+    kind: DesktopKind,
+    generation: u64,
     /// The last passing session check, and the last geometry read with the
     /// id it was read under, which capture and the pointer reuse.
-    reuse: Reuse<(CGDirectDisplayID, Geometry)>,
+    reuse: Reuse<(CGDirectDisplayID, Geometry), DesktopKind>,
     reads: Reads,
 }
 
@@ -186,23 +197,51 @@ impl Reads {
 }
 
 impl MacDesktop {
-    /// `display`, by its id, or by its name when that id is gone.
+    /// `display`, by its id, or by its name when that id is gone. When the
+    /// display is asleep, still link-training or hidden behind a locked Mac,
+    /// its identity is kept so thread C can report `SecureDesktop` or wake
+    /// and bind it once it draws instead of failing the session at start.
     pub(crate) fn open(display: &Display) -> Result<Self> {
-        let id = match geometry(display.id) {
-            Some(_)
+        let resolved = match geometry(display.id) {
+            Some(read)
                 if display.name.is_empty()
                     || uuid(display.id).as_deref() == Some(&display.name) =>
             {
-                display.id
+                Some((display.id, read))
             }
-            _ => by_name(&display.name)
-                .ok_or_else(|| display_lost("selected display is no longer available"))?,
+            _ if !display.name.is_empty() => {
+                by_name(&display.name).and_then(|id| Some((id, geometry(id)?)))
+            }
+            _ => None,
         };
-        let geometry = geometry(id).ok_or_else(|| display_lost("display is unavailable"))?;
+        let (id, name, initial) = match resolved {
+            Some((id, read)) => (id, uuid(id).unwrap_or_else(|| display.name.clone()), read),
+            None => (
+                if display.name.is_empty() {
+                    display.id
+                } else {
+                    0
+                },
+                display.name.clone(),
+                Geometry::new(
+                    (
+                        f64::from(display.x),
+                        f64::from(display.y),
+                        f64::from(display.width.max(1)),
+                        f64::from(display.height.max(1)),
+                    ),
+                    display.width as usize,
+                    display.width as usize,
+                ),
+            ),
+        };
+        let kind = on_console().unwrap_or(DesktopKind::Ordinary);
         Ok(Self {
             id,
-            name: uuid(id).unwrap_or_else(|| display.name.clone()),
-            geometry: Rc::new(Cell::new(geometry)),
+            name,
+            geometry: Rc::new(Cell::new(initial)),
+            kind,
+            generation: 0,
             reuse: Reuse::default(),
             reads: Reads::default(),
         })
@@ -220,14 +259,28 @@ impl MacDesktop {
     }
 
     /// The session check, reused within 16 ms of a pass when `recent`.
+    /// Flipping between unlocked (`Ordinary`) and locked (`Secure`) advances
+    /// `generation` and runs `on_switch` so held input is released and a
+    /// fresh `ScreenCaptureKit` stream is opened across the boundary.
     fn session(&mut self, recent: bool, on_switch: impl FnOnce()) -> Result<()> {
         let reads = &self.reads;
-        self.reuse
-            .session(Instant::now(), recent, || {
-                reads.count_session();
-                available()
-            })
-            .inspect_err(|_| on_switch())
+        let next = match self.reuse.session(Instant::now(), recent, || {
+            reads.count_session();
+            on_console()
+        }) {
+            Ok(kind) => kind,
+            Err(err) => {
+                on_switch();
+                return Err(err);
+            }
+        };
+        if next != self.kind {
+            on_switch();
+            self.kind = next;
+            self.generation = self.generation.wrapping_add(1);
+            self.reuse.forget_geometry();
+        }
+        Ok(())
     }
 
     /// Whether the display is still `expected`; with `recent`, a geometry
@@ -239,6 +292,7 @@ impl MacDesktop {
             geometry,
             reuse,
             reads,
+            ..
         } = self;
         reuse.matches(
             Instant::now(),
@@ -260,11 +314,12 @@ fn read_geometry(
     name: &str,
     shared: &Shared,
 ) -> Result<(CGDirectDisplayID, Geometry)> {
-    let read = match geometry(*id) {
+    let read = match (*id != 0).then(|| geometry(*id)).flatten() {
         Some(read) => read,
         None => {
-            let found = by_name(name)
-                .filter(|found| *found != *id)
+            let found = (!name.is_empty())
+                .then(|| by_name(name))
+                .flatten()
                 .ok_or_else(|| display_lost("selected display is no longer available"))?;
             *id = found;
             geometry(found).ok_or_else(|| display_lost("display is unavailable"))?
@@ -290,12 +345,25 @@ impl Desktop for MacDesktop {
             geometry,
             reuse,
             reads,
+            ..
         } = self;
-        let (id, read) = reuse.geometry(Instant::now(), || {
-            reads.count_geometry();
-            read_geometry(id, name, geometry)
-        })?;
-        Ok(read.display(id, name.clone()))
+        let (resolved_id, read) = reuse
+            .geometry(Instant::now(), || {
+                reads.count_geometry();
+                read_geometry(id, name, geometry)
+            })
+            .inspect_err(|_| {
+                // `PlatformBackend::display` ran `prepare` just before: this
+                // login owns the console. Keep lighting a display that takes
+                // longer than `WAKE_WAIT` to link-train.
+                super::power::wake_any();
+            })?;
+        if name.is_empty()
+            && let Some(resolved_name) = uuid(resolved_id)
+        {
+            *name = resolved_name;
+        }
+        Ok(read.display(resolved_id, name.clone()))
     }
     fn display_matches(&mut self, expected: &Display) -> Result<bool> {
         self.matches(expected, false)
@@ -305,5 +373,53 @@ impl Desktop for MacDesktop {
     }
     fn forget_recent(&mut self) {
         self.reuse.forget();
+    }
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+    fn kind(&self) -> DesktopKind {
+        self.kind
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::failure_kind;
+
+    /// Opening a display that is currently asleep or unlisted succeeds so the
+    /// session can stay alive, report `DisplayLost` (or `SecureDesktop` from
+    /// `prepare`), and rebind by UUID once the monitor wakes.
+    #[test]
+    fn an_unlisted_display_opens_lazily_and_rebinds_by_uuid_when_active() {
+        let missing = Display {
+            id: u32::MAX - 1,
+            name: "00000000-0000-0000-0000-000000000000".into(),
+            x: 0,
+            y: 0,
+            width: 3840,
+            height: 2160,
+        };
+        let mut desktop = MacDesktop::open(&missing).unwrap();
+        let err = read_geometry(&mut desktop.id, &desktop.name, &desktop.geometry).unwrap_err();
+        assert_eq!(failure_kind(&err), Some(FailureKind::DisplayLost));
+
+        if let Ok(primary) = resolve(&DisplaySelection::Primary)
+            && !primary.name.is_empty()
+        {
+            let sleeping = Display {
+                id: u32::MAX - 2,
+                name: primary.name.clone(),
+                x: 0,
+                y: 0,
+                width: primary.width,
+                height: primary.height,
+            };
+            let mut rebound = MacDesktop::open(&sleeping).unwrap();
+            let (id, read) =
+                read_geometry(&mut rebound.id, &rebound.name, &rebound.geometry).unwrap();
+            assert_eq!(id, primary.id);
+            assert!(read.matches(id, &rebound.name, &primary));
+        }
     }
 }

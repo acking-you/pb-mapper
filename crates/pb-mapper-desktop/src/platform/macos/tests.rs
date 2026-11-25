@@ -2677,7 +2677,7 @@ impl Bench {
             .session(Instant::now(), recent, || {
                 *reads += 1;
                 // The read, whatever it answers.
-                let _ = desktop::available();
+                let _ = desktop::on_console();
                 Ok(())
             })
             .unwrap();
@@ -2839,7 +2839,7 @@ fn capture_unavailable() -> Option<&'static str> {
         Some("Screen Recording is not granted to this process")
     } else if CGDisplayIsAsleep(CGMainDisplayID()) {
         Some("the main display sleeps")
-    } else if desktop::available().is_err() {
+    } else if desktop::on_console().is_err() || desktop::is_locked() {
         Some("the screen is locked, or another login owns it")
     } else {
         None
