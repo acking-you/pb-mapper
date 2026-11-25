@@ -895,10 +895,14 @@ refused over such a grant (`HELPER_OUTDATED`, `HELPER_FOREIGN_APP`), since
 configuring it from here would replace its view-only, relay-only or paused
 policy, and under another service name its invitation.
 
-Protocol 12 is the current one, with the pipes
-`pb-mapper.desktop-helper.v12` and `pb-mapper.desktop-background.v12`.
-Between its answers the worker pushes what the app would otherwise have to
-ask for again and again, so the app's thread C never polls the worker.
+Protocol 13 uses the pipes `pb-mapper.desktop-helper.v13` and
+`pb-mapper.desktop-background.v13`. It adds `keep_awake` to the background
+host settings and a `set_keep_awake` management operation. While background
+sharing is enabled, the service can hold a system power request between
+viewers. Stop and revoke release it. Older grants default to off.
+
+Starting with protocol 12, the worker pushes between its answers what the app
+would otherwise have to ask for again and again, so the app's thread C never polls the worker.
 Every record the worker writes names its `kind` (`Record` in
 `oop/proto.rs`): `reply`, an answer, its response's fields beside the tag;
 `unit`, a unit its encoder finished, with the desktop generation its

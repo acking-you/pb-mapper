@@ -80,6 +80,24 @@ class FakePbMapperApi implements PbMapperApiClient {
   }
 
   @override
+  Future<OperationResult> setKeepAwake(bool enabled) async {
+    calls.add('setKeepAwake($enabled)');
+    if (_refused() case final refused?) return refused;
+    config = ConfigStatus(
+      serverAddress: config.serverAddress,
+      keepAliveEnabled: config.keepAliveEnabled,
+      keepAwake: enabled,
+      msgHeaderKey: config.msgHeaderKey,
+      relayTransport: config.relayTransport,
+      lanFirst: config.lanFirst,
+      lanTransport: config.lanTransport,
+      isolatedRelayAdminKeySet: config.isolatedRelayAdminKeySet,
+      isolatedRelayAdminKey: config.isolatedRelayAdminKey,
+    );
+    return const OperationResult(success: true, message: '');
+  }
+
+  @override
   Future<OperationResult> updateConfig({
     required String serverAddress,
     required bool keepAlive,
@@ -101,6 +119,7 @@ class FakePbMapperApi implements PbMapperApiClient {
     config = ConfigStatus(
       serverAddress: serverAddress,
       keepAliveEnabled: keepAlive,
+      keepAwake: config.keepAwake,
       msgHeaderKey: msgHeaderKey,
       relayTransport: relayTransport,
       lanFirst: lanFirst,
@@ -648,6 +667,7 @@ class FakePbMapperApi implements PbMapperApiClient {
     config = ConfigStatus(
       serverAddress: config.serverAddress,
       keepAliveEnabled: config.keepAliveEnabled,
+      keepAwake: config.keepAwake,
       msgHeaderKey: rotated,
       relayTransport: config.relayTransport,
       lanFirst: config.lanFirst,

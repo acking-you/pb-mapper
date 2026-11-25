@@ -473,10 +473,12 @@ Nothing in the SDK crates knows it exists.
     or is offered Update); `background.rs` and `background/`, its own host
     and that host's grant at rest; `os/`, its Win32 glue by concern. The
     service side and the `pb-mapper-desktop-helper` binary need `--features
-    windows-helper`. `HELPER_PROTOCOL` (now 12) and the `.v<n>` pipe names
+    windows-helper`. `HELPER_PROTOCOL` (now 13) and the `.v<n>` pipe names
     change together; an installed helper of another protocol, or of another
     build (its executable differs from the one bundled with the app), is
-    offered Update. Protocol 12: the worker pushes between its answers,
+    offered Update. Protocol 13 adds the background host’s keep-awake setting
+    and an operation to change it during sharing. Starting with protocol 12,
+    the worker pushes between its answers,
     every record tagged by `kind` (`oop/proto.rs`'s `Record`: `reply`,
     `unit` with its bytes, `failed`, `pending`, `fresh`, `pointer`); `Request::Stream`
     turns the pushes for a streaming host on and off; `Request::Video` lost

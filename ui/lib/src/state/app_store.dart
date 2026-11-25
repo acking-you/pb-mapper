@@ -560,6 +560,9 @@ class AppStore extends ChangeNotifier {
     return result;
   }
 
+  Future<OperationResult> setKeepAwake(bool enabled) =>
+      _writeConfig(() => api.setKeepAwake(enabled));
+
   /// Whether this computer tries a local network it shares with the other
   /// end first, saved at once with the relay settings as they are. Nothing
   /// about the relay changed, so it is not asked anything. Running tunnels

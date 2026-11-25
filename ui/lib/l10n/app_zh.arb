@@ -1,4 +1,7 @@
 {
+  "powerSettings": "电源",
+  "keepComputerAwake": "防止电脑自动睡眠",
+  "keepComputerAwakeHelp": "无人连接时也保持 pb-mapper 可用。屏幕仍可熄灭，使用电池时会增加耗电。",
   "@@locale": "zh",
   "appTitle": "pb-mapper",
 

@@ -35,6 +35,34 @@ fn call_json(handle: &PbMapperHandle, request: Value) -> Value {
     })
 }
 
+/// The power request outlives an idle host and follows the owner's saved
+/// preference on startup. No relay or viewer is needed to acquire it.
+#[cfg(target_os = "macos")]
+#[test]
+fn idle_power_follows_the_app_lifetime() {
+    let root = TempRoot::new("idle-power");
+    let handle = new_handle(&root);
+    let set = |handle: &PbMapperHandle, enabled| {
+        let reply = call_json(handle, json!({"op": "set_keep_awake", "enabled": enabled}));
+        assert_eq!(reply["success"], true, "{reply}");
+        assert_eq!(handle.state.blocking_lock().awake.is_some(), enabled);
+    };
+    assert!(handle.state.blocking_lock().awake.is_none());
+    set(&handle, true);
+    drop(handle);
+    let reopened = new_handle(&root);
+    reopened
+        .runtime
+        .block_on(reopened.desktop.restore_keep_awake(&reopened.state));
+    assert!(reopened.state.blocking_lock().awake.is_some());
+    set(&reopened, false);
+    drop(reopened);
+    let off = new_handle(&root);
+    off.runtime
+        .block_on(off.desktop.restore_keep_awake(&off.state));
+    assert!(off.state.blocking_lock().awake.is_none());
+}
+
 /// The hot export, as the UI isolate calls it.
 fn hot(handle: &PbMapperHandle, request: Value) -> Value {
     let request = CString::new(request.to_string()).unwrap();
@@ -637,6 +665,7 @@ fn a_service_snapshot_keeps_its_keys() {
             display_device: Some(r"\\.\DISPLAY2".into()),
             allow_control: true,
             allow_direct: false,
+            keep_awake: false,
             auto_start: true,
         }),
         server: Some("relay:7666".into()),
@@ -683,6 +712,7 @@ fn resume_configures_the_saved_host_from_the_current_settings() {
     use desktop::privileged::background::{Options, Settings};
     use pb_mapper_client::sdk::RelayTransport;
     let config = crate::state::AppConfig {
+        keep_awake: Some(true),
         server_address: "new-relay:7666".into(),
         relay_transport: RelayTransport::Quic,
         lan_first: false,
@@ -700,6 +730,7 @@ fn resume_configures_the_saved_host_from_the_current_settings() {
             display_device: None,
             allow_control: true,
             allow_direct: false,
+            keep_awake: false,
             auto_start: false,
         }),
         ..unavailable_background("")
@@ -727,6 +758,7 @@ fn resume_configures_the_saved_host_from_the_current_settings() {
                 display_device: None,
                 allow_control: true,
                 allow_direct: false,
+                keep_awake: true,
                 auto_start: true,
             },
             lan_first: false,
@@ -805,6 +837,7 @@ async fn disabled_service_allows_local_host_but_unknown_background_stays_blocked
             display_device: None,
             allow_control: false,
             allow_direct: true,
+            keep_awake: false,
             auto_start: true,
         }),
         ..unavailable_background("")

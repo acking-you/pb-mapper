@@ -14,7 +14,7 @@ use crate::state::PbMapperState;
 
 /// Opaque handle for the pb-mapper runtime and shared state.
 pub struct PbMapperHandle {
-    pub(crate) desktop: crate::desktop::DesktopState,
+    pub(crate) desktop: Arc<crate::desktop::DesktopState>,
     /// The window's readers of tunnel events.
     pub(crate) tunnel_events: crate::tunnel_events::TunnelEventReaders,
     pub(crate) runtime: Runtime,
@@ -123,9 +123,18 @@ pub unsafe extern "C" fn pb_mapper_set_app_dir(
         // and all subsequent native diagnostics reach the same directory as
         // its files.
         crate::disk_log::configure(&PbMapperState::get_config_dir(&path));
-        handle
-            .runtime
-            .block_on(async { handle.state.lock().await.set_app_directory_path(path) })?;
+        let mut state = handle.state.blocking_lock();
+        let had_preference = state.keep_awake().is_some();
+        state.set_app_directory_path(path)?;
+        if had_preference || state.keep_awake().is_some() {
+            // logind or the Windows service may take seconds. The first window
+            // can render as soon as its saved configuration has been loaded.
+            let desktop = handle.desktop.clone();
+            let settings = handle.state.clone();
+            handle.runtime.spawn(async move {
+                desktop.restore_keep_awake(&settings).await;
+            });
+        }
         Ok(Reply::Message("app directory updated".into()))
     })
 }

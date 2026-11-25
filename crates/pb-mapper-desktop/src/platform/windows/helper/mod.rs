@@ -132,8 +132,9 @@ fn connect_backend(
 /// host on and off, `Request::Video` no longer drains alone or waits
 /// (`submit`, `wait_ms`), `Request::Input` may carry `Input::Scroll`, and
 /// the `Start` caps say whether the worker scrolls in 1/120 of a notch
-/// (`hires_wheel`).
-pub const HELPER_PROTOCOL: u32 = 12;
+/// (`hires_wheel`). 13: a configured background host can hold a system
+/// power request while it waits for connections.
+pub const HELPER_PROTOCOL: u32 = 13;
 
 /// What a worker exits with when a display mode it changed is still
 /// journalled: the service then starts a `restore` worker.
@@ -141,7 +142,7 @@ pub const HELPER_PROTOCOL: u32 = 12;
 pub(crate) const RESTORE_PENDING: u32 = 3;
 
 const SERVICE: &str = "PbMapperDesktop";
-const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v12";
+const PIPE: &str = r"\\.\pipe\pb-mapper.desktop-helper.v13";
 const _: () = assert!(
     names_protocol(PIPE, HELPER_PROTOCOL),
     "the helper pipe's name ends in .v and HELPER_PROTOCOL"

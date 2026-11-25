@@ -16,6 +16,8 @@ pub mod durable_file;
 pub mod error;
 pub mod listener;
 pub mod paging;
+#[cfg(feature = "system-awake")]
+pub mod power;
 pub mod test_support;
 pub mod time;
 pub mod timeout;
